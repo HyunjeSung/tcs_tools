@@ -315,7 +315,8 @@ def api_run_detail(run_id: str):
     meta = json.loads(meta_path.read_text())
     log_path = run_dir / "output.log"
     log_text = log_path.read_text(errors="replace") if log_path.exists() else ""
-    return {"meta": meta, "log": log_text}
+    _, _, cases = _parse_results(log_text)
+    return {"meta": meta, "log": log_text, "cases": cases}
 
 
 @app.post("/api/run")

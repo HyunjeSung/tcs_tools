@@ -46,6 +46,7 @@
   .badge.interrupted { background: rgba(231,76,60,.12); color: var(--warn); }
   .run-row { cursor: pointer; }
   .run-row:hover { background: #1c2438; }
+  .run-row.selected { background: #22304f; }
   .muted { color: var(--muted); }
 </style>
 </head>
@@ -75,7 +76,9 @@
     </section>
 
     <section>
-      <h2>결과 현황판 (최신 케이스별)</h2>
+      <h2>결과 현황판 <span id="statusLabel" class="muted">(최신 케이스별)</span>
+        <a href="#" id="latestLink" class="muted" style="display:none; float:right; text-decoration:underline;">최신으로</a>
+      </h2>
       <table id="statusTable">
         <thead><tr><th>TC</th><th>Case</th><th>설명</th><th>결과</th><th>이유</th><th>Run</th><th>시각</th></tr></thead>
         <tbody></tbody>
@@ -95,6 +98,7 @@
 <script>
 const $ = (sel) => document.querySelector(sel);
 let pollTimer = null;
+let selectedRunId = null;   // 실행 이력에서 클릭해 선택한 run (없으면 전체 최신 현황판 표시)
 
 async function loadCatalog() {
   const tcs = await fetch('/api/tcs').then(r => r.json());
@@ -129,6 +133,7 @@ async function runTc(tcId, btn) {
       return;
     }
     const { run_id } = await res.json();
+    selectedRunId = run_id;   // 방금 시작한 run 을 현황판에 바로 반영
     $('#runningLabel').textContent = `— ${run_id}`;
     pollRun(run_id);
   } catch (e) {
@@ -141,13 +146,11 @@ async function pollRun(runId) {
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(async () => {
     const data = await fetch(`/api/runs/${runId}`).then(r => r.json());
-    $('#log').textContent = data.log || '(출력 없음)';
-    $('#log').scrollTop = $('#log').scrollHeight;
+    renderRunView(runId, data);
     if (data.meta.status !== 'running') {
       clearInterval(pollTimer);
-      $('#runningLabel').textContent = `— ${runId} (${data.meta.status})`;
       setButtonsDisabled(false);
-      refreshStatus();
+      refreshStatus();   // 요약 카드만 갱신 — 현황판 표는 selectedRunId 가 있으면 그대로 유지
       refreshHistory();
     }
   }, 1500);
@@ -157,27 +160,53 @@ function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-async function refreshStatus() {
-  const status = await fetch('/api/status').then(r => r.json());
-  const rows = Object.entries(status).sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }));
+function renderStatusRows(rows) {
   const tbody = $('#statusTable tbody');
   tbody.innerHTML = '';
-  let pass = 0, fail = 0;
-  let lastAt = null;
-  rows.forEach(([caseId, v]) => {
-    if (v.status === 'PASS') pass++; else fail++;
-    if (!lastAt || v.at > lastAt) lastAt = v.at;
+  rows.forEach(v => {
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${v.tc}</td><td>${caseId}</td><td>${escapeHtml(v.desc)}</td>
+    tr.innerHTML = `<td>${v.tc}</td><td>${v.case}</td><td>${escapeHtml(v.desc)}</td>
       <td><span class="badge ${v.status}">${v.status}</span></td>
       <td class="muted">${escapeHtml(v.reason || '')}</td>
-      <td class="muted">${v.run_id}</td><td class="muted">${v.at || ''}</td>`;
+      <td class="muted">${v.run_id || ''}</td><td class="muted">${(v.at || '').replace('T', ' ')}</td>`;
     tbody.appendChild(tr);
+  });
+}
+
+function highlightSelectedRow() {
+  document.querySelectorAll('#historyTable .run-row').forEach(tr => {
+    tr.classList.toggle('selected', tr.dataset.runId === selectedRunId);
+  });
+}
+
+// 특정 run 의 로그 + 결과 현황판을 함께 갱신 (실행 이력 클릭 / 진행중인 run 폴링 공용)
+function renderRunView(runId, data) {
+  $('#log').textContent = data.log || '(출력 없음)';
+  $('#log').scrollTop = $('#log').scrollHeight;
+  $('#runningLabel').textContent = `— ${runId} (${data.meta.status})`;
+
+  const rows = (data.cases || []).map(c => ({ ...c, run_id: runId, at: data.meta.finished_at || '' }));
+  renderStatusRows(rows);
+  $('#statusLabel').textContent = `(${runId} 기준)`;
+  $('#latestLink').style.display = 'inline';
+
+  highlightSelectedRow();
+}
+
+async function refreshStatus() {
+  const status = await fetch('/api/status').then(r => r.json());
+  const entries = Object.entries(status).sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }));
+  let pass = 0, fail = 0, lastAt = null;
+  const rows = entries.map(([caseId, v]) => {
+    if (v.status === 'PASS') pass++; else fail++;
+    if (!lastAt || v.at > lastAt) lastAt = v.at;
+    return { ...v, case: caseId };
   });
   $('#cardTotal').textContent = rows.length;
   $('#cardPass').textContent = pass;
   $('#cardFail').textContent = fail;
   $('#cardLast').textContent = lastAt ? lastAt.replace('T', ' ') : '-';
+  if (!selectedRunId) renderStatusRows(rows);   // 특정 run 선택 중이면 그 표를 덮어쓰지 않음
 }
 
 function formatDuration(startIso, endIso) {
@@ -195,6 +224,7 @@ async function refreshHistory() {
   runs.forEach(r => {
     const tr = document.createElement('tr');
     tr.className = 'run-row';
+    tr.dataset.runId = r.run_id;
     tr.innerHTML = `<td>${r.run_id}</td><td>${r.label || r.tc_id}</td>
       <td><span class="badge ${r.status}">${r.status}</span></td>
       <td>${r.pass}/${r.fail}</td><td class="muted">${(r.started_at || '').replace('T', ' ')}</td>
@@ -203,12 +233,21 @@ async function refreshHistory() {
     tr.onclick = () => showRunLog(r.run_id);
     tbody.appendChild(tr);
   });
+  highlightSelectedRow();
 }
 
 async function showRunLog(runId) {
+  selectedRunId = runId;
   const data = await fetch(`/api/runs/${runId}`).then(r => r.json());
-  $('#log').textContent = data.log || '(출력 없음)';
-  $('#runningLabel').textContent = `— ${runId} (${data.meta.status})`;
+  renderRunView(runId, data);
+}
+
+function showLatestStatus() {
+  selectedRunId = null;
+  $('#statusLabel').textContent = '(최신 케이스별)';
+  $('#latestLink').style.display = 'none';
+  highlightSelectedRow();
+  refreshStatus();
 }
 
 async function refreshPing() {
@@ -217,6 +256,7 @@ async function refreshPing() {
 }
 
 async function init() {
+  $('#latestLink').onclick = (e) => { e.preventDefault(); showLatestStatus(); };
   await loadCatalog();
   await refreshStatus();
   await refreshHistory();

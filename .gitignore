@@ -1,5 +1,3 @@
-config.env
-
 # tc_dashboard 실행 산출물
 tools/tc_dashboard/runs/
 tools/tc_dashboard/latest_status.json

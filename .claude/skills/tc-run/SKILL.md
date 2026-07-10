@@ -10,7 +10,7 @@ version: 1.0.0
 
 ## 사전 조건
 
-- 레포 루트에 `config.env` 존재 (`config.env.example` 복사 후 값 수정 — `DUT_HOST`, `SSH_KEY_PATH`, `SERIAL_COM_PORT`, `WIN_KEY_PATH`, `WIN_TEMP_LOG_PATH`)
+- 레포 루트의 `config.env` 값이 본인 환경과 맞는지 확인 (`DUT_HOST`, `SSH_KEY_PATH`, `SERIAL_COM_PORT`, `WIN_KEY_PATH`, `WIN_TEMP_LOG_PATH`) — 다르면 직접 수정
 - DUT(config.env의 DUT_HOST) 시리얼 콘솔이 Windows config.env의 SERIAL_COM_PORT 에 연결되어 있을 것
 - `powershell.exe -Command "[System.IO.Ports.SerialPort]::GetPortNames()"` 결과에 config.env의 SERIAL_COM_PORT 있음
 - WSL2 환경 — `wslpath -w` 로 Windows 경로 변환 가능

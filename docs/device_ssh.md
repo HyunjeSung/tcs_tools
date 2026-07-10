@@ -1,10 +1,8 @@
 # AC Gen2 디바이스 접속 정보 (SSH + 시리얼)
 
-레포 루트의 `config.env` (없으면 `config.env.example` 복사 후 값 채우기) 를 먼저 준비한다:
+레포 루트에 `config.env`가 포함되어 있다. `DUT_HOST`, `SSH_KEY_PATH`, `SERIAL_COM_PORT`, `WIN_KEY_PATH`, `WIN_TEMP_LOG_PATH` 값이 본인 환경과 다르면 먼저 수정한 뒤 아래를 실행한다:
 
 ```bash
-cp config.env.example config.env
-# DUT_HOST, SSH_KEY_PATH, SERIAL_COM_PORT, WIN_KEY_PATH, WIN_TEMP_LOG_PATH 값을 본인 환경에 맞게 수정
 source config.env
 ```
 
@@ -22,7 +20,7 @@ scp -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no -P 22 <local> root@$DUT_HOST:
 
 ### SSH 키 사본 만들기 (최초 1회)
 
-원본 키(config.env의 `WIN_KEY_PATH`)는 passphrase가 걸려 있어 자동화에 그대로 쓸 수 없다. Passphrase는 팀 내부 채널로 전달받아 다음으로 사본을 만든다 (원본은 건드리지 않음):
+원본 키(`emsplus_mass`, 보통 `key/AC_GEN2/emsplus_mass` 경로로 배포됨, config.env의 `WIN_KEY_PATH`)는 passphrase가 걸려 있어 자동화에 그대로 쓸 수 없다. 원본 키 파일과 passphrase는 팀으로부터 별도로 전달받아 다음으로 사본을 만든다 (원본은 건드리지 않음):
 
 ```bash
 cp "$WIN_KEY_PATH" "$SSH_KEY_PATH"

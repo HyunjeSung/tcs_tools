@@ -2,7 +2,7 @@
 
 ## 디바이스 접속
 
-DUT 접속 정보(SSH/시리얼)와 자동화 도구 위치는 [docs/device_ssh.md](docs/device_ssh.md) 참고. 실행 전 `config.env` 준비 필요 (`cp config.env.example config.env` 후 값 수정) — 자세한 건 [README.md](README.md) 참고.
+DUT 접속 정보(SSH/시리얼)와 자동화 도구 위치는 [docs/device_ssh.md](docs/device_ssh.md) 참고. 레포에 `config.env`가 포함되어 있으니 본인 환경과 다른 값(`SERIAL_COM_PORT`, `WIN_KEY_PATH` 등)만 수정 — 자세한 건 [README.md](README.md) 참고.
 
 ## TC 작업 패턴
 

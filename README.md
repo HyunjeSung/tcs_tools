@@ -1,33 +1,38 @@
 # tcs_tools
 
-AC Gen2 EMS 디바이스용 TC(Test Case) 자동화 도구 모음 — TC 스펙/스크립트, 실행용 웹 대시보드, Claude Code 스킬을 묶어서 배포한다.
+AC Gen2 EMS 장비를 테스트할 때 반복되는 작업 — 스크립트를 장비에 전송하고, 실행하고, 결과 로그를 회수하는 것 — 을 자동화하는 도구 모음이다.
 
-## 구성
+**주요 기능**
+- 브라우저에서 테스트 실행 및 결과 확인 (`tools/tc_dashboard`)
+- Claude Code를 통한 자연어 명령("TC11 실행해줘")으로 테스트 실행 (`.claude/skills`)
 
-```
-tcs/                    # TC 스펙(.md) + 실행 스크립트(.sh) + 결과(.md) + evidence(.log)
-tools/tc_dashboard/      # 브라우저에서 TC 실행/현황을 보는 FastAPI 대시보드
-tools/serial/            # 시리얼(COM) 자동화 PowerShell 스크립트
-docs/device_ssh.md        # DUT SSH/시리얼 접속 정보 + 트러블슈팅
-.claude/skills/            # tc-bootstrap / tc-dev / tc-harness / tc-run
-.claude/agents/             # tc-plan
-```
+최초 셋업은 아래 "시작하기"를 따른다. 상세 절차는 각 단계의 링크된 문서를 참고.
 
-## 셋업
+## 시작하기
 
-빠른 요약:
+**[docs/install.md](docs/install.md) — 설치 매뉴얼**
 
+요약:
 ```bash
 git clone <repo-url> tcs_tools && cd tcs_tools
-cp config.env.example config.env   # 값 수정 필요
+# config.env 값이 본인 환경과 다르면 수정 (SERIAL_COM_PORT, WIN_KEY_PATH 등)
 pip install -r tools/tc_dashboard/requirements.txt
 ./tools/tc_dashboard/run.sh
 ```
+`http://localhost:8090` 접속 시 대시보드가 표시되면 정상.
 
-각 단계별 상세 절차 + 확인 명령 + 트러블슈팅은 **[docs/install.md](docs/install.md)** 참고 (처음 셋업하는 사람은 이 문서를 따라갈 것).
+## 폴더 구조
 
-## 참고
+| 폴더 | 내용 |
+|---|---|
+| `tcs/` | 테스트 항목(스펙), 실행 스크립트, 실행 결과 |
+| `tools/tc_dashboard/` | 브라우저 기반 테스트 실행/확인 도구 |
+| `tools/serial/` | 장비 시리얼(COM 포트) 통신 스크립트 |
+| `docs/` | 설치 및 장비 접속 관련 문서 |
+| `.claude/` | Claude Code가 인식하는 자동화 스킬 |
 
-- 설치 매뉴얼: [docs/install.md](docs/install.md)
-- TC 작성/실행 컨벤션: [CLAUDE.md](CLAUDE.md)
-- DUT 접속/시리얼 트러블슈팅: [docs/device_ssh.md](docs/device_ssh.md)
+## 관련 문서
+
+- 설치 매뉴얼(단계별 절차/확인법/문제 해결): [docs/install.md](docs/install.md)
+- 장비 접속 정보(SSH/시리얼) 및 트러블슈팅: [docs/device_ssh.md](docs/device_ssh.md)
+- TC 작성/실행 규칙(개발자용): [CLAUDE.md](CLAUDE.md)
