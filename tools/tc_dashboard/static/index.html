@@ -76,9 +76,7 @@
     </section>
 
     <section>
-      <h2>결과 현황판 <span id="statusLabel" class="muted">(최신 케이스별)</span>
-        <a href="#" id="latestLink" class="muted" style="display:none; float:right; text-decoration:underline;">최신으로</a>
-      </h2>
+      <h2>결과 현황판 <span id="statusLabel" class="muted">(최신 케이스별)</span></h2>
       <table id="statusTable">
         <thead><tr><th>TC</th><th>Case</th><th>설명</th><th>결과</th><th>이유</th><th>Run</th><th>시각</th></tr></thead>
         <tbody></tbody>
@@ -88,7 +86,7 @@
     <section>
       <h2>실행 이력</h2>
       <table id="historyTable">
-        <thead><tr><th>Run ID</th><th>대상</th><th>상태</th><th>PASS/FAIL</th><th>시작</th><th>종료</th><th>소요시간</th></tr></thead>
+        <thead><tr><th>Run ID</th><th>대상</th><th>상태</th><th>PASS/FAIL</th><th>시작</th><th>종료</th><th>소요시간</th><th>결과</th></tr></thead>
         <tbody></tbody>
       </table>
     </section>
@@ -188,7 +186,6 @@ function renderRunView(runId, data) {
   const rows = (data.cases || []).map(c => ({ ...c, run_id: runId, at: data.meta.finished_at || '' }));
   renderStatusRows(rows);
   $('#statusLabel').textContent = `(${runId} 기준)`;
-  $('#latestLink').style.display = 'inline';
 
   highlightSelectedRow();
 }
@@ -225,11 +222,15 @@ async function refreshHistory() {
     const tr = document.createElement('tr');
     tr.className = 'run-row';
     tr.dataset.runId = r.run_id;
+    const dlCell = r.finished_at
+      ? `<a href="/api/runs/${r.run_id}/result.pdf" download class="muted" style="text-decoration:underline;" onclick="event.stopPropagation()">다운로드</a>`
+      : '-';
     tr.innerHTML = `<td>${r.run_id}</td><td>${r.label || r.tc_id}</td>
       <td><span class="badge ${r.status}">${r.status}</span></td>
       <td>${r.pass}/${r.fail}</td><td class="muted">${(r.started_at || '').replace('T', ' ')}</td>
       <td class="muted">${r.finished_at ? r.finished_at.replace('T', ' ') : '진행중'}</td>
-      <td class="muted">${r.finished_at ? formatDuration(r.started_at, r.finished_at) : '-'}</td>`;
+      <td class="muted">${r.finished_at ? formatDuration(r.started_at, r.finished_at) : '-'}</td>
+      <td>${dlCell}</td>`;
     tr.onclick = () => showRunLog(r.run_id);
     tbody.appendChild(tr);
   });
@@ -242,21 +243,12 @@ async function showRunLog(runId) {
   renderRunView(runId, data);
 }
 
-function showLatestStatus() {
-  selectedRunId = null;
-  $('#statusLabel').textContent = '(최신 케이스별)';
-  $('#latestLink').style.display = 'none';
-  highlightSelectedRow();
-  refreshStatus();
-}
-
 async function refreshPing() {
   const p = await fetch('/api/ping').then(r => r.json());
   $('#dutDot').className = 'dot ' + (p.reachable ? 'on' : 'off');
 }
 
 async function init() {
-  $('#latestLink').onclick = (e) => { e.preventDefault(); showLatestStatus(); };
   await loadCatalog();
   await refreshStatus();
   await refreshHistory();

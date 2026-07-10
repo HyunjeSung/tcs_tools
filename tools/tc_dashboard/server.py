@@ -9,12 +9,22 @@ import json
 import re
 import subprocess
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+import markdown as md_lib
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from xhtml2pdf import pisa
+
+# xhtml2pdf(reportlab)는 한글 글꼴이 기본 내장되어 있지 않아 별도 등록이 필요함.
+# WSL2 환경 기준 Windows 기본 한글 글꼴(맑은 고딕) 경로를 우선 사용.
+KOREAN_FONT_CANDIDATES = [
+    "/mnt/c/Windows/Fonts/malgun.ttf",
+    str(Path.home() / ".local/share/fonts/NanumMyeongjo-Regular.ttf"),
+]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TC_DIR = REPO_ROOT / "tcs" / "system_log"
@@ -131,6 +141,102 @@ def _parse_results(text: str):
     return pass_n, fail_n, cases
 
 
+TC_SECTION_RE = re.compile(r"^(?:===|---)\s*(TC\d+)(?:-\d+)?\s*[:：].*?(?:===|---)$")
+
+
+def _split_log_by_tc(text: str) -> dict:
+    """output.log를 `=== TCxx: ... ===` / `--- TCxx-n: ... ---` 헤더 기준으로 TC별 원본 블록으로 나눈다.
+
+    tc_system_log.sh 가 각 TC 실행 전 이런 구분선을 찍어주는 것을 그대로 활용 —
+    tc_system_log_result.md 의 "근거 (tc_run.out)" 인용과 같은 방식.
+    """
+    blocks: dict = {}
+    current_tc = None
+    current_lines: list = []
+    for line in text.splitlines():
+        m = TC_SECTION_RE.match(line.strip())
+        if m:
+            if current_tc:
+                blocks[current_tc] = "\n".join(current_lines).strip()
+            current_tc = m.group(1)
+            current_lines = [line]
+        elif current_tc:
+            current_lines.append(line)
+    if current_tc:
+        blocks[current_tc] = "\n".join(current_lines).strip()
+    return blocks
+
+
+def _generate_result_md(run_id: str, meta: dict, cases: list, log_text: str, sl_journal_text: str = "") -> str:
+    """tcs/system_log/tc_system_log_result.md 형식을 본떠 run 단위 결과 보고서를 생성한다."""
+    lines = [
+        f"# TC 실행 결과 보고서 — {meta.get('label') or meta.get('tc_id', run_id)}",
+        "",
+        f"**Run ID:** {run_id}",
+        f"**실행일시:** {meta.get('started_at', '')} ~ {meta.get('finished_at', '')}",
+        f"**DUT:** {DUT_HOST} (qcells-emsplus, AC Gen2, aarch64)",
+        f"**스크립트:** tc_system_log.sh",
+        "",
+        f"**총 결과: PASS={meta.get('pass', 0)} / FAIL={meta.get('fail', 0)} / {len(cases)}기준**",
+        "",
+        "| TC | 기준 | 결과 |",
+        "|----|------|------|",
+    ]
+    for c in cases:
+        desc = c.get("desc", "").replace("|", "\\|")
+        lines.append(f"| {c['case']} ({desc}) | | **{c['status']}** |")
+
+    grouped: dict = {}
+    for c in cases:
+        grouped.setdefault(c["tc"], []).append(c)
+
+    tc_blocks = _split_log_by_tc(log_text)
+
+    lines += ["", "---"]
+    for tc, items in grouped.items():
+        lines += ["", f"## {tc}", "", "| 기준 ID | 결과 |", "|---------|------|"]
+        for c in items:
+            desc = c.get("desc", "").replace("|", "\\|")
+            lines.append(f"| {c['case']}: {desc} | **{c['status']}** |")
+            if c.get("reason"):
+                lines.append(f"| ↳ 사유 | {c['reason'].replace('|', chr(92) + '|')} |")
+        block = tc_blocks.get(tc)
+        if block:
+            lines += ["", "**근거 (output.log):**", "```", block, "```"]
+        if sl_journal_text.strip():
+            lines += ["", "**근거 (journald — [SL]/[SM] 애플리케이션 로그):**", "```", sl_journal_text.strip(), "```"]
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _korean_font_path():
+    for p in KOREAN_FONT_CANDIDATES:
+        if Path(p).exists():
+            return p
+    return None
+
+
+def _markdown_to_pdf(md_text: str) -> bytes:
+    body_html = md_lib.markdown(md_text, extensions=["tables", "fenced_code"])
+    font_path = _korean_font_path()
+    font_css = (
+        f'@font-face {{ font-family: "Korean"; src: url("{font_path}"); }}\n'
+        'body, table, th, td, h1, h2, pre, code { font-family: "Korean"; }\n'
+        if font_path else ""
+    )
+    html = f"""<html><head><meta charset="utf-8"><style>
+{font_css}
+body {{ font-size: 10px; }}
+table {{ border-collapse: collapse; width: 100%; margin: 8px 0; }}
+th, td {{ border: 1px solid #999; padding: 4px 6px; text-align: left; }}
+h1 {{ font-size: 16px; }} h2 {{ font-size: 13px; }}
+pre {{ font-size: 8px; white-space: pre-wrap; background: #f2f2f2; border: 1px solid #ccc; padding: 6px; }}
+</style></head><body>{body_html}</body></html>"""
+    buf = BytesIO()
+    pisa.CreatePDF(html, dest=buf)
+    return buf.getvalue()
+
+
 def _update_latest_status(run_id: str, meta: dict, cases: list):
     status_map = {}
     if STATUS_FILE.exists():
@@ -145,6 +251,56 @@ def _update_latest_status(run_id: str, meta: dict, cases: list):
             "at": meta["finished_at"],
         }
     STATUS_FILE.write_text(json.dumps(status_map, ensure_ascii=False, indent=2))
+
+
+SL_TAG_RE = re.compile(r"\[SL\]|\[SM\]")
+
+
+async def _start_journal_capture():
+    """DUT의 [SL]/[SM] 애플리케이션 로그를 별도 SSH 세션으로 실시간 캡처 시작.
+
+    tc-run 스킬이 시리얼에서 하는 '백그라운드 journalctl -f capture' 패턴을
+    SSH 세션으로 재현한 것 — 실패해도 본 TC 실행에는 영향 주지 않는다(best-effort).
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *ssh_argv("journalctl -u docker-loader -f -o short-iso --no-pager"),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+    except Exception:
+        return None, [], None
+
+    lines: list = []
+
+    async def _collect():
+        try:
+            while True:
+                line = await proc.stdout.readline()
+                if not line:
+                    break
+                lines.append(line.decode(errors="replace"))
+        except Exception:
+            pass
+
+    task = asyncio.create_task(_collect())
+    await asyncio.sleep(0.5)  # journalctl -f 가 구독을 시작할 시간 확보
+    return proc, lines, task
+
+
+async def _stop_journal_capture(proc, lines: list, task, run_dir: Path):
+    if proc is None:
+        return
+    try:
+        await asyncio.sleep(1.5)  # DUT journald 기록 지연분까지 확보
+        proc.kill()
+        await asyncio.wait_for(proc.wait(), timeout=5)
+    except Exception:
+        pass
+    if task:
+        task.cancel()
+    sl_lines = [l for l in lines if SL_TAG_RE.search(l)]
+    if sl_lines:
+        (run_dir / "sl_journal.log").write_text("".join(sl_lines))
 
 
 async def run_tc(run_id: str, entry: dict):
@@ -182,6 +338,8 @@ async def run_tc(run_id: str, entry: dict):
             )
             await asyncio.wait_for(chmod_proc.wait(), timeout=15)
 
+            journal_proc, journal_lines, collector_task = await _start_journal_capture()
+
             flag = entry["flag"] or ""
             remote_cmd = f"{REMOTE_SCRIPT} {flag} 2>&1".strip()
             logf.write(f"\n$ ssh root@{DUT_HOST} '{remote_cmd}'\n\n".encode())
@@ -196,6 +354,8 @@ async def run_tc(run_id: str, entry: dict):
                 await run_proc.wait()
                 logf.write(b"\n[DASHBOARD] TIMEOUT - \xed\x94\x84\xeb\xa1\x9c\xec\x84\xb8\xec\x8a\xa4 \xea\xb0\x95\xec\xa0\x9c \xec\xa2\x85\xeb\xa3\x8c\n")
                 exit_code = None
+
+            await _stop_journal_capture(journal_proc, journal_lines, collector_task, run_dir)
 
         meta["exit_code"] = exit_code
         text = log_path.read_text(errors="replace")
@@ -317,6 +477,34 @@ def api_run_detail(run_id: str):
     log_text = log_path.read_text(errors="replace") if log_path.exists() else ""
     _, _, cases = _parse_results(log_text)
     return {"meta": meta, "log": log_text, "cases": cases}
+
+
+def _load_finished_run(run_id: str):
+    run_dir = RUNS_DIR / run_id
+    meta_path = run_dir / "meta.json"
+    if not meta_path.exists():
+        raise HTTPException(404, "run not found")
+    meta = json.loads(meta_path.read_text())
+    if meta.get("status") == "running":
+        raise HTTPException(409, "run이 아직 진행 중")
+    log_path = run_dir / "output.log"
+    log_text = log_path.read_text(errors="replace") if log_path.exists() else ""
+    _, _, cases = _parse_results(log_text)
+    sl_journal_path = run_dir / "sl_journal.log"
+    sl_journal_text = sl_journal_path.read_text(errors="replace") if sl_journal_path.exists() else ""
+    return meta, cases, log_text, sl_journal_text
+
+
+@app.get("/api/runs/{run_id}/result.pdf")
+def api_run_result_pdf(run_id: str):
+    meta, cases, log_text, sl_journal_text = _load_finished_run(run_id)
+    md_content = _generate_result_md(run_id, meta, cases, log_text, sl_journal_text)
+    pdf_bytes = _markdown_to_pdf(md_content)
+    filename = f"tc_system_log_result_{run_id}.pdf"
+    return Response(
+        pdf_bytes, media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/api/run")
