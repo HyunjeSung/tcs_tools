@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>system_log TC Dashboard</title>
+<style>
+  :root {
+    --bg: #0f1420; --panel: #171d2e; --border: #2a3348; --text: #e6e9f0;
+    --muted: #8891a7; --pass: #2ecc71; --fail: #e74c3c; --warn: #f39c12; --accent: #4d8dff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, "Segoe UI", Pretendard, sans-serif;
+         background: var(--bg); color: var(--text); font-size: 14px; }
+  header { display: flex; align-items: center; justify-content: space-between;
+           padding: 14px 24px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  header h1 { font-size: 17px; margin: 0; }
+  header .dut { font-size: 12px; color: var(--muted); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .dot.on { background: var(--pass); } .dot.off { background: var(--fail); }
+  main { display: grid; grid-template-columns: 320px 1fr; gap: 16px; padding: 16px 24px; }
+  .cards { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 4px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; }
+  .card .num { font-size: 24px; font-weight: 700; }
+  .card .lbl { font-size: 12px; color: var(--muted); }
+  .card.pass .num { color: var(--pass); } .card.fail .num { color: var(--fail); }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
+  section h2 { font-size: 13px; margin: 0 0 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .tc-btn { display: block; width: 100%; text-align: left; background: #1e2740; border: 1px solid var(--border);
+            color: var(--text); padding: 9px 10px; border-radius: 6px; margin-bottom: 6px; cursor: pointer; font-size: 13px; }
+  .tc-btn:hover:not(:disabled) { border-color: var(--accent); }
+  .tc-btn:disabled { opacity: .45; cursor: not-allowed; }
+  .tc-btn .note { display: block; font-size: 11px; color: var(--warn); margin-top: 2px; }
+  .right-col { display: flex; flex-direction: column; gap: 16px; }
+  #log { background: #0a0e17; border: 1px solid var(--border); border-radius: 6px; padding: 10px;
+         font-family: "SF Mono", Consolas, monospace; font-size: 12px; white-space: pre-wrap;
+         max-height: 340px; overflow-y: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .badge.PASS, .badge.pass { background: rgba(46,204,113,.15); color: var(--pass); }
+  .badge.FAIL, .badge.fail { background: rgba(231,76,60,.15); color: var(--fail); }
+  .badge.running { background: rgba(77,141,255,.15); color: var(--accent); }
+  .badge.timeout, .badge.error { background: rgba(243,156,18,.15); color: var(--warn); }
+  .badge.rebooted { background: rgba(243,156,18,.15); color: var(--warn); }
+  .badge.interrupted { background: rgba(231,76,60,.12); color: var(--warn); }
+  .run-row { cursor: pointer; }
+  .run-row:hover { background: #1c2438; }
+  .muted { color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>system_log TC Dashboard</h1>
+  <div class="dut"><span id="dutDot" class="dot off"></span>DUT 192.168.10.25</div>
+</header>
+
+<main>
+  <div class="cards">
+    <div class="card"><div class="num" id="cardTotal">-</div><div class="lbl">전체 케이스</div></div>
+    <div class="card pass"><div class="num" id="cardPass">-</div><div class="lbl">PASS</div></div>
+    <div class="card fail"><div class="num" id="cardFail">-</div><div class="lbl">FAIL</div></div>
+    <div class="card"><div class="num" id="cardLast">-</div><div class="lbl">최근 실행</div></div>
+  </div>
+
+  <section>
+    <h2>TC 실행</h2>
+    <div id="tcButtons"></div>
+  </section>
+
+  <div class="right-col">
+    <section>
+      <h2>실행 로그 <span id="runningLabel" class="muted"></span></h2>
+      <div id="log">실행할 TC를 선택하세요.</div>
+    </section>
+
+    <section>
+      <h2>결과 현황판 (최신 케이스별)</h2>
+      <table id="statusTable">
+        <thead><tr><th>TC</th><th>Case</th><th>설명</th><th>결과</th><th>이유</th><th>Run</th><th>시각</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>실행 이력</h2>
+      <table id="historyTable">
+        <thead><tr><th>Run ID</th><th>대상</th><th>상태</th><th>PASS/FAIL</th><th>시작</th><th>종료</th><th>소요시간</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </div>
+</main>
+
+<script>
+const $ = (sel) => document.querySelector(sel);
+let pollTimer = null;
+
+async function loadCatalog() {
+  const tcs = await fetch('/api/tcs').then(r => r.json());
+  const box = $('#tcButtons');
+  box.innerHTML = '';
+  tcs.forEach(tc => {
+    const btn = document.createElement('button');
+    btn.className = 'tc-btn';
+    btn.dataset.id = tc.id;
+    btn.innerHTML = tc.label + (tc.note ? `<span class="note">${tc.note}</span>` : '');
+    btn.onclick = () => runTc(tc.id, btn);
+    box.appendChild(btn);
+  });
+}
+
+function setButtonsDisabled(disabled) {
+  document.querySelectorAll('.tc-btn').forEach(b => b.disabled = disabled);
+}
+
+async function runTc(tcId, btn) {
+  setButtonsDisabled(true);
+  $('#log').textContent = `[${tcId}] 시작 중...`;
+  try {
+    const res = await fetch('/api/run', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tc_id: tcId }),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      $('#log').textContent = `실행 실패: ${err.detail}`;
+      setButtonsDisabled(false);
+      return;
+    }
+    const { run_id } = await res.json();
+    $('#runningLabel').textContent = `— ${run_id}`;
+    pollRun(run_id);
+  } catch (e) {
+    $('#log').textContent = `요청 오류: ${e}`;
+    setButtonsDisabled(false);
+  }
+}
+
+async function pollRun(runId) {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    const data = await fetch(`/api/runs/${runId}`).then(r => r.json());
+    $('#log').textContent = data.log || '(출력 없음)';
+    $('#log').scrollTop = $('#log').scrollHeight;
+    if (data.meta.status !== 'running') {
+      clearInterval(pollTimer);
+      $('#runningLabel').textContent = `— ${runId} (${data.meta.status})`;
+      setButtonsDisabled(false);
+      refreshStatus();
+      refreshHistory();
+    }
+  }, 1500);
+}
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+async function refreshStatus() {
+  const status = await fetch('/api/status').then(r => r.json());
+  const rows = Object.entries(status).sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }));
+  const tbody = $('#statusTable tbody');
+  tbody.innerHTML = '';
+  let pass = 0, fail = 0;
+  let lastAt = null;
+  rows.forEach(([caseId, v]) => {
+    if (v.status === 'PASS') pass++; else fail++;
+    if (!lastAt || v.at > lastAt) lastAt = v.at;
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${v.tc}</td><td>${caseId}</td><td>${escapeHtml(v.desc)}</td>
+      <td><span class="badge ${v.status}">${v.status}</span></td>
+      <td class="muted">${escapeHtml(v.reason || '')}</td>
+      <td class="muted">${v.run_id}</td><td class="muted">${v.at || ''}</td>`;
+    tbody.appendChild(tr);
+  });
+  $('#cardTotal').textContent = rows.length;
+  $('#cardPass').textContent = pass;
+  $('#cardFail').textContent = fail;
+  $('#cardLast').textContent = lastAt ? lastAt.replace('T', ' ') : '-';
+}
+
+function formatDuration(startIso, endIso) {
+  if (!startIso || !endIso) return '-';
+  const secs = Math.round((new Date(endIso) - new Date(startIso)) / 1000);
+  if (secs < 0 || Number.isNaN(secs)) return '-';
+  const m = Math.floor(secs / 60), s = secs % 60;
+  return m > 0 ? `${m}분 ${s}초` : `${s}초`;
+}
+
+async function refreshHistory() {
+  const runs = await fetch('/api/runs').then(r => r.json());
+  const tbody = $('#historyTable tbody');
+  tbody.innerHTML = '';
+  runs.forEach(r => {
+    const tr = document.createElement('tr');
+    tr.className = 'run-row';
+    tr.innerHTML = `<td>${r.run_id}</td><td>${r.label || r.tc_id}</td>
+      <td><span class="badge ${r.status}">${r.status}</span></td>
+      <td>${r.pass}/${r.fail}</td><td class="muted">${(r.started_at || '').replace('T', ' ')}</td>
+      <td class="muted">${r.finished_at ? r.finished_at.replace('T', ' ') : '진행중'}</td>
+      <td class="muted">${r.finished_at ? formatDuration(r.started_at, r.finished_at) : '-'}</td>`;
+    tr.onclick = () => showRunLog(r.run_id);
+    tbody.appendChild(tr);
+  });
+}
+
+async function showRunLog(runId) {
+  const data = await fetch(`/api/runs/${runId}`).then(r => r.json());
+  $('#log').textContent = data.log || '(출력 없음)';
+  $('#runningLabel').textContent = `— ${runId} (${data.meta.status})`;
+}
+
+async function refreshPing() {
+  const p = await fetch('/api/ping').then(r => r.json());
+  $('#dutDot').className = 'dot ' + (p.reachable ? 'on' : 'off');
+}
+
+async function init() {
+  await loadCatalog();
+  await refreshStatus();
+  await refreshHistory();
+  await refreshPing();
+  setInterval(refreshPing, 10000);
+  // 다른 클라이언트가 실행 중일 수도 있으니 주기적으로 이력만 새로고침
+  setInterval(refreshHistory, 15000);
+}
+init();
+</script>
+</body>
+</html>

@@ -1,0 +1,425 @@
+############################################################
+# tc_system_log 통합 Evidence — Full 재실행 (모든 보정 적용 후)
+# 생성: 2026-06-22 13:42:35
+# DUT: 192.168.10.25 (qcells-emsplus)
+# 스크립트 md5: efb3abde666fabdddde43ae35b9ea4c8 (TC13-2 보정 + TC11 + TC12 검증 분리 후, sec 5 참조)
+# 실행 환경: SSH (COM7 disconnect 상태)
+# 결과: PASS=29 / FAIL=1 / 총 30 기준 (TC12 분리 4 기준 적용 시 31/1/32 로 재집계 가능 — 다음 풀 실행에서 검증)
+#
+# 실행 구성:
+#   1. MAIN (SSH):    TC02 + SETUP + TC01/TC03~TC09 + TC12/TC13  → 13:34:29 ~ 13:38:13 (3분 44초) [PASS=21 FAIL=1]
+#   2. TC11 (SSH):    --tc11                                       → 13:38:49 ~ 13:38:56 (7초)    [PASS=5  FAIL=0]
+#   3. TC10 (SSH):    --tc10-pre → reboot → boot+merge → --tc10-post                              [PASS=3  FAIL=0]
+#
+# 잔존 FAIL: TC04-2 (300MB journal, 알려진 제약)
+############################################################
+
+############################################################
+# SECTION 1 — 메인 TC (SSH) — FILE: main.log (97 lines)
+############################################################
+Warning: Permanently added '192.168.10.25' (ECDSA) to the list of known hosts.
+============================================
+ system_log TC
+ Mon Jun 22 13:34:30 KST 2026
+============================================
+=== [PRE-CHECK] system_log_timer_loop 시작 확인 ===
+  [WARN] '[system_log_timer_loop] loop started' 로그 없음 — system_log timer 미동작 가능. 계속 진행하나 TC02 발화 보장 안 됨
+=== TC02: 24시간 타이머 동작 확인 ===
+  [TC02-절차1] system_log_timer_loop 실행 로그 확인...
+    [WARN] '[system_log_timer_loop] loop started' 로그 없음 — 부팅 직후 vacuum으로 사라졌을 가능성, 계속 진행
+  [TC02-절차2] files_before=7, latest=systemlog_20260623105912_20260623110348.log.xz
+  [TC02-절차3] NTP로 시스템 시간 동기화...
+    동기화 후 시간: 2026-06-22 13:34:33
+  [TC02-절차4] 시스템 시간 +25h 이동: 2026-06-23 14:34:33 (원래: 2026-06-22 13:34:33)
+  [TC02-절차5] 타이머 발화 대기 (70초)...
+  [TC02-절차6] files_after=8, latest=systemlog_20260622131833_20260623143433.log.xz
+  [TC02-절차7] NTP로 시스템 시간 복원...
+    복원 후 시간: 2026-06-23 14:35:45
+[PASS] TC02-1: toupload 신규 .xz 생성
+  [TC02-2 수동확인] 최신 파일: systemlog_20260622131833_20260623143433.log.xz
+                   기대 endtime(+25h): 20260623143433 근처
+[PASS] TC02-2: 파일명 endtime이 변경 시간 근처 (수동 확인)
+[SETUP] get_log_data 요청 (응답 대기 30초 + 파일 생성 대기 10초)...
+[SETUP] 응답: OK: {"error_code":"NONE","payload":{}}
+[SETUP] 완료.
+[SETUP] xz 파일: before=8 after=9
+[SETUP] 저널: before=8.0M after=8.0M
+
+=== TC01: 파일명 규칙 검증 ===
+[PASS] TC01-1: 파일명 형식 (systemlog_시작_저장.log.xz)
+[PASS] TC01-2: 시작시각 <= 저장시각
+=== TC03: On-demand export ===
+[PASS] TC03-1: get_log_data 후 .xz 파일 신규 생성됨
+  before=8 after=9
+=== TC04: On-demand timeout (실제 journal 데이터 시나리오) ===
+  systemd-cat으로 journald에 실제 데이터 주입 → 사이즈별로 get_log_data 응답/파일 생성 검증
+
+  --- TC04-1: 목표 journal 100MB (urandom 70MB 주입) ---
+    [SETUP] vacuum 후 journal: 8.0M
+    [SETUP] 주입 took 22s, journal: 8.0M → 101.6M
+/dev/root       2.1G  397M  1.6G  20% /
+    [TC04-1] get_log_data 요청 송신...
+    [TC04-1] 응답: OK ({"error_code":"UNKNOWN","payload":{}}), 응답까지 11초
+    [TC04-1] after: files=10
+[PASS] TC04-1: journal 100MB 상태에서 10초 이내 .xz 파일 생성
+
+  --- TC04-2: 목표 journal 300MB (urandom 210MB 주입) ---
+    [SETUP] vacuum 후 journal: 8.0M
+    [SETUP] 주입 took 57s, journal: 8.0M → 288.8M
+/dev/root       2.1G  397M  1.6G  20% /
+    [TC04-2] get_log_data 요청 송신...
+    [TC04-2] 응답: OK ({"error_code":"UNKNOWN","payload":{}}), 응답까지 6초
+    [TC04-2] after: files=10
+[FAIL] TC04-2: journal 300MB 상태에서 10초 이내 .xz 파일 생성
+    before_files=10 after_files=10, journal=288.8M, 응답=6s
+=== TC05: 로그 파일 xz 압축 확인 ===
+[PASS] TC05-1: .xz 파일 존재
+[PASS] TC05-2: xz 파일 무결성 (xz --test)
+[PASS] TC05-3: 원본 .log 파일 삭제됨
+=== TC06: journalctl rotate 후 저널 사용량 확인 ===
+  rotate 전: 8.0M → 후: 8.0M
+  [수동 확인] 저널 사용량이 감소했거나 이미 최소 상태이면 PASS
+[PASS] TC06-1: journalctl rotate && vacuum 실행됨 (수동 확인)
+=== TC07: 30일 경과 파일 삭제 ===
+  더미 파일 생성 완료, get_log_data 트리거 (삭제 확인용)...
+[PASS] TC07-1: 31일 경과 파일 자동 삭제됨
+[PASS] TC07-2: 29일 경과 파일 유지됨
+=== TC08: Azure Connector 업로드 대상 파일 생성 확인 ===
+[PASS] TC08-1: toupload에 .log.xz 파일 존재
+  .xz 파일 수: 11
+[PASS] TC08-2: toupload에 .log.xz.meta 파일 존재
+  .meta 파일 수: 10
+=== TC09: Factory Reset 시 로그 전체 삭제 ===
+[PASS] TC09-1: factory_reset 응답 수신
+[PASS] TC09-2: toupload 디렉토리 내 파일 전체 삭제
+=== TC12: nmon retention 30일 ===
+  [TC12-절차2] systemctl restart nmon.service ...
+[PASS] TC12-1: 3 디렉토리에서 mtime 40일 더미 모두 삭제됨
+[PASS] TC12-2: 3 디렉토리에서 현재 시각 더미 보존됨
+=== TC13: nmon 부재 환경 호환 (no-op) ===
+  [TC13-절차1] nmon/old 비움 — 현재 .nmon=0
+  [TC13-절차2] get_log_data 요청 송신...
+  [TC13-절차2] 응답: OK: {"error_code":"NONE","payload":{}}
+[PASS] TC13-1: nmon/old 비어있는 상태에서 get_log_data 응답 수신
+[PASS] TC13-2: 응답 error_code=0|"NONE" (task_rotate_sync 정상)
+[PASS] TC13-3: 최근 1분 journald 에 task_upload_nmon ERROR 부재
+
+============================================
+ 결과: PASS=21  FAIL=1
+============================================
+
+[안내] TC10(리부트)은 별도 실행:
+  ./tc_system_log.sh --tc10-pre   (재부팅 발생)
+  ./tc_system_log.sh --tc10-post  (SSH 재접속 후)
+[안내] TC11(nmon 업로드 happy path)은 디폴트에 포함되지 않음:
+  ./tc_system_log.sh --tc11       (TC11만)
+  ./tc_system_log.sh --tc-nmon    (TC11+TC12+TC13 일괄)
+
+############################################################
+# SECTION 2 — TC11 nmon happy path (SSH) — FILE: tc11.log (22 lines)
+############################################################
+Warning: Permanently added '192.168.10.25' (ECDSA) to the list of known hosts.
+============================================
+ system_log TC
+ Tue Jun 23 14:38:49 KST 2026
+============================================
+=== TC11: nmon 업로드 happy path ===
+  [TC11-절차1~2] baseline: old=3, toupload .nmon=18, .meta=18
+  [TC11-절차3] get_log_data 요청 송신...
+  [TC11-절차3] 응답: OK: {"error_code":"NONE","payload":{}}
+  [TC11-절차5] after: old=0, toupload .nmon=21 (new=3), .meta=21 (new=3)
+[PASS] TC11-1: nmon/old/*.nmon 모두 이동됨 (0개)
+[PASS] TC11-2: toupload .nmon 갯수 증가 (before<after)
+    .nmon: 18 → 21 (+3)
+[PASS] TC11-5: toupload .nmon.meta 갯수 증가 (before<after)
+    .meta: 18 → 21 (+3)
+  [TC11-절차5] meta 검증 대상: dummy_tc11_1782193129_b.nmon.meta
+[PASS] TC11-3: .meta upload_path=/ems-system/nmon/2026/06/ 매치
+[PASS] TC11-4: .meta 후처리 4개 필드 매치 (success/failure/move_dir/from)
+
+============================================
+ 결과: PASS=5  FAIL=0
+============================================
+
+############################################################
+# SECTION 3 — TC10 reboot 시나리오 (SSH)
+############################################################
+
+[TC10-PRE]
+Warning: Permanently added '192.168.10.25' (ECDSA) to the list of known hosts.
+============================================
+ system_log TC
+ Tue Jun 23 14:39:16 KST 2026
+============================================
+=== TC10-PRE: 리부트 전 로그 저장 ===
+  현재 staging .xz: 0, toupload .xz: 2
+[PASS] TC10-1: 리부트 전 로그 저장 응답 수신
+[PASS] TC10-2: staging에 shutdown 로그 .xz 생성됨
+
+============================================
+ 결과: PASS=2  FAIL=0
+============================================
+
+[TC10-PRE 완료] reboot 실행 중... SSH 재접속 후 --tc10-post 실행
+Connection to 192.168.10.25 closed by remote host.
+
+[BOOT 대기]
+  REBOOT_WAIT: 13:39:52
+  PING_OK: 13:40:12
+  SSH_OK: 13:40:14
+  scp 재전송 + boot/merge 45초 대기 → 13:40:59
+
+[TC10-POST]
+Warning: Permanently added '192.168.10.25' (ECDSA) to the list of known hosts.
+============================================
+ system_log TC
+ Mon Jun 22 13:41:00 KST 2026
+============================================
+=== TC10-POST: 재부팅 후 boot 로그 병합 확인 ===
+[PASS] TC10-3: 재부팅 후 toupload .xz 파일 증가 (boot 로그 병합)
+  toupload before=2 after=3
+
+============================================
+ 결과: PASS=1  FAIL=0
+============================================
+
+############################################################
+# SECTION 4 — 사후 디바이스 상태 — FILE: post_info.log (79 lines)
+############################################################
+Warning: Permanently added '192.168.10.25' (ECDSA) to the list of known hosts.
+--- toupload ---
+total 60
+drwxr-xr-x 3 root root  4096 Jun 22 13:39 .
+drwxr-xr-x 4 root root  4096 Jun 16 17:11 ..
+drwxr-xr-x 2 root root  4096 Jun 22 13:39 nmon
+-rw-r--r-- 1 root root 26968 Jun 22 13:39 systemlog_20260622133937_20260623143916.log.xz
+-rw-r--r-- 1 root root   220 Jun 22 13:39 systemlog_20260622133937_20260623143916.log.xz.meta
+-rw-r--r-- 1 root root   944 Jun 23  2026 systemlog_20260623143808_20260623143812.log.xz
+-rw-r--r-- 1 root root   220 Jun 23  2026 systemlog_20260623143808_20260623143812.log.xz.meta
+-rw-r--r-- 1 root root  2804 Jun 23  2026 systemlog_20260623143812_20260623143850.log.xz
+-rw-r--r-- 1 root root   220 Jun 23  2026 systemlog_20260623143812_20260623143850.log.xz.meta
+
+--- staging ---
+ls: cannot access '/edge/log/system/shutdown_done': No such file or directory
+-rw-r--r-- 1 root root 10970830 Jun 19 17:15 /edge/log/system/systemlog_20260616171746_20260619171524.log
+-rw-r--r-- 1 root root 11262663 Jun 19 17:20 /edge/log/system/systemlog_20260616171746_20260619172033.log
+
+--- xz --test ---
+/edge/log/toupload/system/systemlog_20260622133937_20260623143916.log.xz: OK
+/edge/log/toupload/system/systemlog_20260623143808_20260623143812.log.xz: OK
+/edge/log/toupload/system/systemlog_20260623143812_20260623143850.log.xz: OK
+
+--- nmon toupload (top 15) ---
+total 1492
+drwxr-xr-x 2 root root   4096 Jun 22 13:39 .
+drwxr-xr-x 3 root root   4096 Jun 22 13:39 ..
+-rw-r--r-- 1 root root     47 Jun 22 11:59 dummy_tc11_1782097193_a.nmon
+-rw-r--r-- 1 root root    212 Jun 22 11:59 dummy_tc11_1782097193_a.nmon.meta
+-rw-r--r-- 1 root root     47 Jun 22 11:59 dummy_tc11_1782097193_b.nmon
+-rw-r--r-- 1 root root    212 Jun 22 11:59 dummy_tc11_1782097193_b.nmon.meta
+-rw-r--r-- 1 root root     47 Jun 22 11:59 dummy_tc11_1782097193_c.nmon
+-rw-r--r-- 1 root root    212 Jun 22 11:59 dummy_tc11_1782097193_c.nmon.meta
+-rw-r--r-- 1 root root     47 Jun 22 12:07 dummy_tc11_1782097625_a.nmon
+-rw-r--r-- 1 root root    212 Jun 22 12:07 dummy_tc11_1782097625_a.nmon.meta
+-rw-r--r-- 1 root root     47 Jun 22 12:07 dummy_tc11_1782097625_b.nmon
+-rw-r--r-- 1 root root    212 Jun 22 12:07 dummy_tc11_1782097625_b.nmon.meta
+-rw-r--r-- 1 root root     47 Jun 22 12:07 dummy_tc11_1782097625_c.nmon
+-rw-r--r-- 1 root root    212 Jun 22 12:07 dummy_tc11_1782097625_c.nmon.meta
+-rw-r--r-- 1 root root     47 Jun 23  2026 dummy_tc11_1782193129_a.nmon
+-rw-r--r-- 1 root root    212 Jun 23  2026 dummy_tc11_1782193129_a.nmon.meta
+-rw-r--r-- 1 root root     47 Jun 23  2026 dummy_tc11_1782193129_b.nmon
+-rw-r--r-- 1 root root    212 Jun 23  2026 dummy_tc11_1782193129_b.nmon.meta
+-rw-r--r-- 1 root root     47 Jun 23  2026 dummy_tc11_1782193129_c.nmon
+
+--- boot 0 SL log ---
+[13:39:54:190][I][SM] Restoring cellular_data_enabled=false
+[13:39:54:211][I][SM] Configuration updated via update_configuration
+[13:39:54:261][I][SL] [request_command_sync] cmd: journalctl --list-boots | head -n 1 | awk '{print $4, $5}' | sed 's/[-:]//g' | tr -d ' '
+[13:39:54:293][I][SM] Host command requested by system_log
+[13:39:54:293][I][SM] Executing host command: journalctl --list-boots | head -n 1 | awk '{print $4, $5}' | sed 's/[-:]//g' | tr -d ' ' (timeout: 5s)
+[13:39:54:294][I][SM] Connected to host_agent via UDS (slot 1)
+[13:39:54:308][I][SM] Boot: stopped quectel-cm (cellular disabled)
+[13:39:54:349][I][SM] [IPC pub res] tid=system_log_5 {"error_code":"NONE","payload":{"cmd":"journalctl --list-boots | head -n 1 | awk '{print $4, $5}' | sed 's/[-:]//g' | tr -d ' '","exit_code":0,"message":"20260622133937\n","status":"success"}}
+[13:39:54:351][I][SL] [request_command_sync] cmd: journalctl -o cat > /edge/log/system/systemlog_20260622133937_20260622133954.log
+[13:39:54:358][I][SM] Restoring ntp_enabled=true
+[13:39:54:397][I][SM] Host command requested by system_log
+[13:39:54:397][I][SM] Executing host command: journalctl -o cat > /edge/log/system/systemlog_20260622133937_20260622133954.log (timeout: 5s)
+[13:39:54:586][I][SM] [IPC pub res] tid=system_log_6 {"error_code":"NONE","payload":{"cmd":"journalctl -o cat > /edge/log/system/systemlog_20260622133937_20260622133954.log","exit_code":0,"message":"","status":"success"}}
+[13:39:54:590][I][SL] [request_command_sync] cmd: xz /edge/log/system/systemlog_20260622133937_20260622133954.log
+[13:39:54:637][I][SM] Host command requested by system_log
+[13:39:54:637][I][SM] Executing host command: xz /edge/log/system/systemlog_20260622133937_20260622133954.log (timeout: 5s)
+[13:39:54:925][I][SM] [IPC pub res] tid=system_log_7 {"error_code":"NONE","payload":{"cmd":"xz /edge/log/system/systemlog_20260622133937_20260622133954.log","exit_code":0,"message":"","status":"success"}}
+[13:39:54:927][I][SL] [request_command_sync] cmd: journalctl --rotate && journalctl --vacuum-files=1
+[13:39:54:969][I][SM] Host command requested by system_log
+[13:39:54:970][I][SM] Executing host command: journalctl --rotate && journalctl --vacuum-files=1 (timeout: 5s)
+[13:39:55:520][I][SM] [IPC pub res] tid=system_log_8 {"error_code":"NONE","payload":{"cmd":"journalctl --rotate && journalctl --vacuum-files=1","exit_code":0,"message":"Vacuuming done, freed 0B of archived journals from /var/log/journal.\nDeleted archived journal /var/log/journal/cf4fedc1435846d9b66906f5dbb2b0fc/system@fe5b730aa0ae4e3aa662c59ebe6e58b6-0000000000000001-000654d03ad68886.journal (3.3M).\nDeleted archived journal /var/log/journal/cf4fedc1435846d9b66906f5dbb2b0fc/system@000654d03add1ac4-26acc788ea92a35e.journal~ (8.0M).\nVacuuming done, freed 11.3M of archived journals from /var/log/journal/cf4fedc1435846d9b66906f5dbb2b0fc.\nVacuuming done, freed 0B of archived journals from /run/log/journal.\n","status":"success"}}
+[13:39:55:523][I][SL] [task_capture_boot_log] Done: /edge/log/system/systemlog_20260622133937_20260622133954.log.xz
+[13:39:55:524][I][SL] [task_merge_staged_logs] Start
+[13:39:55:525][I][SL] [task_merge_staged_logs] Merging 2 files: "systemlog_20260622133937_20260622133954.log.xz" ~ "systemlog_20260623143850_20260623143916.log.xz"
+[13:39:55:526][I][SL] [request_command_sync] cmd: xz -d /edge/log/system/systemlog_20260622133937_20260622133954.log.xz
+[13:39:55:565][I][SM] Host command requested by system_log
+[13:39:55:565][I][SM] Executing host command: xz -d /edge/log/system/systemlog_20260622133937_20260622133954.log.xz (timeout: 5s)
+[13:39:55:617][I][SM] [IPC pub res] tid=system_log_9 {"error_code":"NONE","payload":{"cmd":"xz -d /edge/log/system/systemlog_20260622133937_20260622133954.log.xz","exit_code":0,"message":"","status":"success"}}
+[13:39:55:619][I][SL] [request_command_sync] cmd: xz -d /edge/log/system/systemlog_20260623143850_20260623143916.log.xz
+[13:39:55:661][I][SM] Host command requested by system_log
+
+--- journal usage ---
+Archived and active journals take up 9.9M in the file system.
+
+############################################################
+# SECTION 5 — TC11 재실행 (TC12 검증 분리 보정 후 sanity check, md5=efb3..)
+# 13:52:17 ~ 13:52:24 (7s)
+############################################################
+Warning: Permanently added '192.168.10.25' (ECDSA) to the list of known hosts.
+============================================
+ system_log TC
+ Mon Jun 22 13:52:17 KST 2026
+============================================
+=== TC11: nmon 업로드 happy path ===
+  [TC11-절차1~2] baseline: old=3, toupload .nmon=22, .meta=22
+  [TC11-절차3] get_log_data 요청 송신...
+  [TC11-절차3] 응답: OK: {"error_code":"NONE","payload":{}}
+  [TC11-절차5] after: old=0, toupload .nmon=25 (new=3), .meta=25 (new=3)
+[PASS] TC11-1: nmon/old/*.nmon 모두 이동됨 (0개)
+[PASS] TC11-2: toupload .nmon 갯수 증가 (before<after)
+    .nmon: 22 → 25 (+3)
+[PASS] TC11-5: toupload .nmon.meta 갯수 증가 (before<after)
+    .meta: 22 → 25 (+3)
+  [TC11-절차5] meta 검증 대상: dummy_tc11_1782193129_b.nmon.meta
+[PASS] TC11-3: .meta upload_path=/ems-system/nmon/2026/06/ 매치
+[PASS] TC11-4: .meta 후처리 4개 필드 매치 (success/failure/move_dir/from)
+
+============================================
+ 결과: PASS=5  FAIL=0
+============================================
+
+############################################################
+# SECTION 6 — DUT raw 근거 보강 (현재 boot [SL] 로그 + ls -la + xz --test + meta cat)
+# 캡처: 2026-06-22 14:17:36, DUT 시간 동기 후
+############################################################
+Warning: Permanently added '192.168.10.25' (ECDSA) to the list of known hosts.
+############ boot list (vacuum 상태) ############
+  0 ee73a8bae4084c7589d5f16f0ac0aa8e Mon 2026-06-22 13:52:18 KST—Mon 2026-06-22 14:15:06 KST
+
+############ 현재 boot 의 [SL] 로그 전체 (시간+메시지) ############
+2026-06-22T13:52:19+0900 qcells-emsplus docker-loader[590]: [13:52:19:100][I][SM] [IPC pub res] tid=system_log_15 {"error_code":"NONE","payload":{"cmd":"journalctl --rotate && journalctl --vacuum-files=1","exit_code":0,"message":"Vacuuming done, freed 0B of archived journals from /var/log/journal.\nVacuuming done, freed 0B of archived journals from /run/log/journal.\nDeleted archived journal /var/log/journal/cf4fedc1435846d9b66906f5dbb2b0fc/system@fe5b730aa0ae4e3aa662c59ebe6e58b6-0000000000000720-000654d03be88ff0.journal (1.9M).\nDeleted archived journal /var/log/journal/cf4fedc1435846d9b66906f5dbb2b0fc/system@fe5b730aa0ae4e3aa662c59ebe6e58b6-00000000000007ba-000654d03bf5bf3b.journal (4.0M).\nVacuuming done, freed 5.9M of archived journals from /var/log/journal/cf4fedc1435846d9b66906f5dbb2b0fc.\n","status":"success"}}
+2026-06-22T13:52:19+0900 qcells-emsplus docker-loader[590]: [13:52:19:102][I][SL] Detected file, creating meta file: /edge/log/toupload/system/systemlog_20260622133955_20260622135218.log.xz.meta
+2026-06-22T13:52:19+0900 qcells-emsplus docker-loader[590]: [13:52:19:102][I][SL] Created meta file: /edge/log/toupload/system/systemlog_20260622133955_20260622135218.log.xz.meta
+2026-06-22T13:52:19+0900 qcells-emsplus docker-loader[590]: [13:52:19:198][I][SL] [move] success: "/edge/log/toupload/system/systemlog_20260622133955_20260622135218.log.xz" → "/edge/log/toupload/system/systemlog_20260622133955_20260622135218.log.xz"
+2026-06-22T13:52:19+0900 qcells-emsplus docker-loader[590]: [13:52:19:198][I][SL] [cleanup_if_low_disk_space] Free space: 93.8987%
+2026-06-22T13:52:19+0900 qcells-emsplus docker-loader[590]: [13:52:19:198][I][SL] [task_rotate_sync] End of Log rotate logic !!
+2026-06-22T13:52:19+0900 qcells-emsplus docker-loader[590]: [13:52:19:198][I][SL] [task_upload_nmon] Start nmon upload
+2026-06-22T13:52:19+0900 qcells-emsplus docker-loader[590]: [13:52:19:213][I][SL] Detected file, creating meta file: /edge/log/toupload/system/nmon/dummy_tc11_1782103937_b.nmon.meta
+2026-06-22T13:52:19+0900 qcells-emsplus docker-loader[590]: [13:52:19:213][I][SL] Created meta file: /edge/log/toupload/system/nmon/dummy_tc11_1782103937_b.nmon.meta
+2026-06-22T13:52:19+0900 qcells-emsplus docker-loader[590]: [13:52:19:213][I][SL] Detected file, creating meta file: /edge/log/toupload/system/nmon/dummy_tc11_1782103937_a.nmon.meta
+2026-06-22T13:52:19+0900 qcells-emsplus docker-loader[590]: [13:52:19:214][I][SL] Created meta file: /edge/log/toupload/system/nmon/dummy_tc11_1782103937_a.nmon.meta
+2026-06-22T13:52:19+0900 qcells-emsplus docker-loader[590]: [13:52:19:214][I][SL] Detected file, creating meta file: /edge/log/toupload/system/nmon/dummy_tc11_1782103937_c.nmon.meta
+2026-06-22T13:52:19+0900 qcells-emsplus docker-loader[590]: [13:52:19:214][I][SL] Created meta file: /edge/log/toupload/system/nmon/dummy_tc11_1782103937_c.nmon.meta
+2026-06-22T13:52:19+0900 qcells-emsplus docker-loader[590]: [13:52:19:215][I][SL] [handle_request_get_log_data] On-demand log upload finished.
+
+############ /edge/log/toupload/system/ 현재 상태 ############
+total 96
+drwxr-xr-x 3 root root  4096 Jun 22 13:52 .
+drwxr-xr-x 4 root root  4096 Jun 16 17:11 ..
+drwxr-xr-x 2 root root  4096 Jun 22 13:52 nmon
+-rw-r--r-- 1 root root 26968 Jun 22 13:39 systemlog_20260622133937_20260623143916.log.xz
+-rw-r--r-- 1 root root   220 Jun 22 13:39 systemlog_20260622133937_20260623143916.log.xz.meta
+-rw-r--r-- 1 root root 30164 Jun 22 13:52 systemlog_20260622133955_20260622135218.log.xz
+-rw-r--r-- 1 root root   220 Jun 22 13:52 systemlog_20260622133955_20260622135218.log.xz.meta
+-rw-r--r-- 1 root root   944 Jun 23  2026 systemlog_20260623143808_20260623143812.log.xz
+-rw-r--r-- 1 root root   220 Jun 23  2026 systemlog_20260623143808_20260623143812.log.xz.meta
+-rw-r--r-- 1 root root  2804 Jun 23  2026 systemlog_20260623143812_20260623143850.log.xz
+-rw-r--r-- 1 root root   220 Jun 23  2026 systemlog_20260623143812_20260623143850.log.xz.meta
+
+############ /edge/log/system/ 현재 상태 (staging) ############
+total 21788
+drwxr-xr-x  8 root root                4096 Jun 22 13:41 .
+drwxr-xr-x  7 root root                4096 Jun 16 17:14 ..
+lrwxrwxrwx  1 root root                  39 Jun 16 17:14 README -> ../../usr/share/doc/systemd/README.logs
+drwxrwxr--  2 adu  adu                 4096 Jun 16 17:14 adu
+-rw-rw----  1 root utmp                 400 Jun 17 16:01 btmp
+drwxr-xr-x  2 do   do                  4096 Jun 22 13:42 deliveryoptimization-agent
+drwxr-sr-x+ 4 root systemd-journal     4096 Jun 22 13:17 journal
+-rw-rw-r--  1 root utmp                 296 Jun 22 13:45 lastlog
+drwxr-xr-x  4 root root                4096 Jun 22 13:39 nmon
+drwx------  2 root root                4096 Jun 16 17:14 private
+drwxr-xr-x  2 root root                4096 Jun 22 09:23 sa
+-rw-r--r--  1 root root            10970830 Jun 19 17:15 systemlog_20260616171746_20260619171524.log
+-rw-r--r--  1 root root            11262663 Jun 19 17:20 systemlog_20260616171746_20260619172033.log
+-rw-rw-r--  1 root utmp               21200 Jun 22 13:45 wtmp
+
+############ /edge/log/system/nmon/old/ ############
+total 8
+drwxr-xr-x 2 root root 4096 Jun 22 13:52 .
+drwxr-xr-x 4 root root 4096 Jun 22 13:39 ..
+
+############ /edge/log/system/nmon/archive/ ############
+total 8
+drwxr-xr-x 2 root root 4096 Jun 23  2026 .
+drwxr-xr-x 4 root root 4096 Jun 22 13:39 ..
+
+############ /edge/log/toupload/system/nmon/ (top 30) ############
+total 1516
+drwxr-xr-x 2 root root   4096 Jun 22 13:52 .
+drwxr-xr-x 3 root root   4096 Jun 22 13:52 ..
+-rw-r--r-- 1 root root     47 Jun 22 11:59 dummy_tc11_1782097193_a.nmon
+-rw-r--r-- 1 root root    212 Jun 22 11:59 dummy_tc11_1782097193_a.nmon.meta
+-rw-r--r-- 1 root root     47 Jun 22 11:59 dummy_tc11_1782097193_b.nmon
+-rw-r--r-- 1 root root    212 Jun 22 11:59 dummy_tc11_1782097193_b.nmon.meta
+-rw-r--r-- 1 root root     47 Jun 22 11:59 dummy_tc11_1782097193_c.nmon
+-rw-r--r-- 1 root root    212 Jun 22 11:59 dummy_tc11_1782097193_c.nmon.meta
+-rw-r--r-- 1 root root     47 Jun 22 12:07 dummy_tc11_1782097625_a.nmon
+-rw-r--r-- 1 root root    212 Jun 22 12:07 dummy_tc11_1782097625_a.nmon.meta
+-rw-r--r-- 1 root root     47 Jun 22 12:07 dummy_tc11_1782097625_b.nmon
+-rw-r--r-- 1 root root    212 Jun 22 12:07 dummy_tc11_1782097625_b.nmon.meta
+-rw-r--r-- 1 root root     47 Jun 22 12:07 dummy_tc11_1782097625_c.nmon
+-rw-r--r-- 1 root root    212 Jun 22 12:07 dummy_tc11_1782097625_c.nmon.meta
+-rw-r--r-- 1 root root     47 Jun 22 13:52 dummy_tc11_1782103937_a.nmon
+-rw-r--r-- 1 root root    212 Jun 22 13:52 dummy_tc11_1782103937_a.nmon.meta
+-rw-r--r-- 1 root root     47 Jun 22 13:52 dummy_tc11_1782103937_b.nmon
+-rw-r--r-- 1 root root    212 Jun 22 13:52 dummy_tc11_1782103937_b.nmon.meta
+-rw-r--r-- 1 root root     47 Jun 22 13:52 dummy_tc11_1782103937_c.nmon
+-rw-r--r-- 1 root root    212 Jun 22 13:52 dummy_tc11_1782103937_c.nmon.meta
+-rw-r--r-- 1 root root     47 Jun 23  2026 dummy_tc11_1782193129_a.nmon
+-rw-r--r-- 1 root root    212 Jun 23  2026 dummy_tc11_1782193129_a.nmon.meta
+-rw-r--r-- 1 root root     47 Jun 23  2026 dummy_tc11_1782193129_b.nmon
+-rw-r--r-- 1 root root    212 Jun 23  2026 dummy_tc11_1782193129_b.nmon.meta
+-rw-r--r-- 1 root root     47 Jun 23  2026 dummy_tc11_1782193129_c.nmon
+-rw-r--r-- 1 root root    212 Jun 23  2026 dummy_tc11_1782193129_c.nmon.meta
+-rw-r--r-- 1 root root     47 Jun 22 11:28 dummy_tc11_a.nmon
+-rw-r--r-- 1 root root    201 Jun 22 11:28 dummy_tc11_a.nmon.meta
+-rw-r--r-- 1 root root     47 Jun 22 11:28 dummy_tc11_b.nmon
+-rw-r--r-- 1 root root    201 Jun 22 11:28 dummy_tc11_b.nmon.meta
+-rw-r--r-- 1 root root     47 Jun 22 11:28 dummy_tc11_c.nmon
+-rw-r--r-- 1 root root    201 Jun 22 11:28 dummy_tc11_c.nmon.meta
+-rw-r--r-- 1 root root  33432 Jun 16 17:09 qcells-emsplus_260616_1709.nmon
+-rw-r--r-- 1 root root    215 Jun 19 17:20 qcells-emsplus_260616_1709.nmon.meta
+
+############ xz --test 결과 ############
+/edge/log/toupload/system/systemlog_20260622133937_20260623143916.log.xz: OK
+/edge/log/toupload/system/systemlog_20260622133955_20260622135218.log.xz: OK
+/edge/log/toupload/system/systemlog_20260623143808_20260623143812.log.xz: OK
+/edge/log/toupload/system/systemlog_20260623143812_20260623143850.log.xz: OK
+
+############ 임의 .nmon.meta 파일 내용 (TC11 검증용) ############
+FILE: /edge/log/toupload/system/nmon/dummy_tc11_1782193129_b.nmon.meta
+upload_name=dummy_tc11_1782193129_b.nmon
+upload_path=/ems-system/nmon/2026/06/
+post_action_success=delete
+post_action_failure=move
+from=system_log
+move_dir_success=
+move_dir_failure=/edge/log/system/nmon/archive
+
+############ 임의 .log.xz.meta 파일 내용 (TC08 검증용) ############
+FILE: /edge/log/toupload/system/systemlog_20260623143812_20260623143850.log.xz.meta
+upload_name=systemlog_20260623143812_20260623143850.log.xz
+upload_path=/ems-system/2026/06/
+post_action_success=delete
+post_action_failure=move
+from=system_log
+move_dir_success=
+move_dir_failure=/edge/log/system/archive
+
+############ journalctl --disk-usage ############
+Archived and active journals take up 8.0M in the file system.
