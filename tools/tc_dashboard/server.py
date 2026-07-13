@@ -142,6 +142,8 @@ def _parse_results(text: str):
 
 
 TC_SECTION_RE = re.compile(r"^(?:===|---)\s*(TC\d+)(?:-\d+)?\s*[:：].*?(?:===|---)$")
+JOURNAL_TOKEN_RE = re.compile(r"[\w./\-]*\d[\w./\-]*\.(?:log(?:\.xz)?(?:\.meta)?|xz|meta|nmon(?:\.meta)?)\b")
+JOURNAL_EXCERPT_MAX_LINES = 8
 
 
 def _split_log_by_tc(text: str) -> dict:
@@ -165,6 +167,28 @@ def _split_log_by_tc(text: str) -> dict:
     if current_tc:
         blocks[current_tc] = "\n".join(current_lines).strip()
     return blocks
+
+
+def _filter_journal_for_tc(tc_block_text: str, sl_journal_text: str) -> str:
+    """전체 journald 캡처에서 해당 TC의 output.log 블록에 등장하는 실제 파일명(타임스탬프 포함,
+    즉 숫자를 포함하는 토큰)과 겹치는 라인만 추려 근거를 최소화한다 (default 실행처럼 여러 TC가
+    캡처 하나를 공유할 때 TC 무관 로그까지 전부 딸려오는 것을 방지).
+
+    tc-dev 스킬의 "evidence_full.log 에 실제로 있는 라인만 인용 — 추측/일반화 X" 원칙에 따라,
+    TC04처럼 output.log에 ".xz" 같은 확장자만 언급하고 실제 파일명을 남기지 않는 TC는
+    토큰이 안 잡혀 근거 없음(빈 문자열)으로 처리된다 — 원본 tc_system_log_result.md 에서도
+    TC04는 journald 근거 섹션이 없다.
+    """
+    tokens = set(JOURNAL_TOKEN_RE.findall(tc_block_text))
+    if not tokens:
+        return ""
+    matched = []
+    for line in sl_journal_text.splitlines():
+        if any(tok in line for tok in tokens):
+            matched.append(line)
+            if len(matched) >= JOURNAL_EXCERPT_MAX_LINES:
+                break
+    return "\n".join(matched)
 
 
 def _generate_result_md(run_id: str, meta: dict, cases: list, log_text: str, sl_journal_text: str = "") -> str:
@@ -204,7 +228,9 @@ def _generate_result_md(run_id: str, meta: dict, cases: list, log_text: str, sl_
         if block:
             lines += ["", "**근거 (output.log):**", "```", block, "```"]
         if sl_journal_text.strip():
-            lines += ["", "**근거 (journald — [SL]/[SM] 애플리케이션 로그):**", "```", sl_journal_text.strip(), "```"]
+            journal_excerpt = _filter_journal_for_tc(block or "", sl_journal_text)
+            if journal_excerpt:
+                lines += ["", "**근거 (journald — [SL]/[SM] 애플리케이션 로그):**", "```", journal_excerpt, "```"]
     lines.append("")
     return "\n".join(lines)
 
@@ -216,8 +242,24 @@ def _korean_font_path():
     return None
 
 
+PRE_CODE_RE = re.compile(r"(<pre><code>)(.*?)(</code></pre>)", re.DOTALL)
+PRE_LEADING_SPACES_RE = re.compile(r"^( +)", re.MULTILINE)
+
+
+def _fix_pre_linebreaks(html: str) -> str:
+    """xhtml2pdf는 <pre>의 white-space:pre-wrap을 지키지 않고 줄바꿈/들여쓰기를 뭉개버리므로,
+    <pre><code> 블록 안에서만 개행을 <br/>로, 앞 공백을 &nbsp;로 치환해 원본 로그 줄 구조를 보존한다.
+    """
+    def _replace(m):
+        body = PRE_LEADING_SPACES_RE.sub(lambda sm: "&nbsp;" * len(sm.group(1)), m.group(2))
+        body = body.replace("\n", "<br/>\n")
+        return m.group(1) + body + m.group(3)
+    return PRE_CODE_RE.sub(_replace, html)
+
+
 def _markdown_to_pdf(md_text: str) -> bytes:
     body_html = md_lib.markdown(md_text, extensions=["tables", "fenced_code"])
+    body_html = _fix_pre_linebreaks(body_html)
     font_path = _korean_font_path()
     font_css = (
         f'@font-face {{ font-family: "Korean"; src: url("{font_path}"); }}\n'
@@ -258,6 +300,8 @@ SL_TAG_RE = re.compile(r"\[SL\]|\[SM\]")
 
 async def _start_journal_capture():
     """DUT의 [SL]/[SM] 애플리케이션 로그를 별도 SSH 세션으로 실시간 캡처 시작.
+    캡처 자체는 둘 다 남기고, 보고서에 실릴 때는 _filter_journal_for_tc가 TC별로
+    관련 있는 라인만(최대 JOURNAL_EXCERPT_MAX_LINES줄) 추려서 방대해지지 않게 한다.
 
     tc-run 스킬이 시리얼에서 하는 '백그라운드 journalctl -f capture' 패턴을
     SSH 세션으로 재현한 것 — 실패해도 본 TC 실행에는 영향 주지 않는다(best-effort).
