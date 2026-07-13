@@ -10,6 +10,7 @@ DUT 접속 정보(SSH/시리얼)와 자동화 도구 위치는 [docs/device_ssh.
 - 스크립트 (`*.sh`): bash + busybox 호환. 마커는 `(?m)^M_...` 라인 시작 매칭 가능하도록 작성.
 - 결과 (`*_result.md`): evidence 단일 파일 `*_evidence_full.log` 의 `# FILE: <name>` 섹션을 인용.
 - 디렉토리 분산 없이 evidence 는 통합 단일 `*_evidence_full.log` 한 파일에 모은다.
+- 판정 근거는 서술문이 아니라 리눅스 명령 실행 결과(`dump_cmd`)여야 하며, journald(`[SL]`/`[SM]`)·spec(PASS/FAIL Criteria)과의 대조 방법론은 [docs/evidence_verification.md](docs/evidence_verification.md) 참고.
 
 ## 사용 가능한 스킬/에이전트
 

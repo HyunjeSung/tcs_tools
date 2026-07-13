@@ -28,11 +28,12 @@ pip install -r tools/tc_dashboard/requirements.txt
 | `tcs/` | 테스트 항목(스펙), 실행 스크립트, 실행 결과 |
 | `tools/tc_dashboard/` | 브라우저 기반 테스트 실행/확인 도구 |
 | `tools/serial/` | 장비 시리얼(COM 포트) 통신 스크립트 |
-| `docs/` | 설치 및 장비 접속 관련 문서 |
+| `docs/` | 설치, 장비 접속, TC 판정 근거 대조 관련 문서 |
 | `.claude/` | Claude Code가 인식하는 자동화 스킬 |
 
 ## 관련 문서
 
 - 설치 매뉴얼(단계별 절차/확인법/문제 해결): [docs/install.md](docs/install.md)
 - 장비 접속 정보(SSH/시리얼) 및 트러블슈팅: [docs/device_ssh.md](docs/device_ssh.md)
+- TC 판정 근거 대조 방법론(spec/리눅스 명령/journald): [docs/evidence_verification.md](docs/evidence_verification.md)
 - TC 작성/실행 규칙(개발자용): [CLAUDE.md](CLAUDE.md)
