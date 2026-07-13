@@ -14,6 +14,7 @@ TC10_SAVE="/edge/log/system/.tc10_before"
 NMON_OLD_DIR="/edge/log/system/nmon/old"
 NMON_TOUPLOAD_DIR="/edge/log/toupload/system/nmon"
 NMON_ARCHIVE_DIR="/edge/log/system/nmon/archive"
+JOURNAL_DIR="/var/log/journal"
 PASS=0
 FAIL=0
 
@@ -53,6 +54,18 @@ assert() {
     [ -n "$reason" ] && echo "  [REASON] $reason"
 }
 
+# 판정에 사용한 명령어를 그대로 실행하고 raw 출력을 evidence로 남긴다.
+# (서술문("~확인됨")만으로는 근거로 인정하지 않는다 — 반드시 명령어 실행 결과를 남길 것)
+dump_cmd() {
+    echo "  \$ $*"
+    "$@" > /tmp/tc_dump_out_$$ 2>&1
+    local rc=$?
+    sed 's/^/    /' /tmp/tc_dump_out_$$
+    rm -f /tmp/tc_dump_out_$$
+    echo "    exit_code:${rc}"
+    return "$rc"
+}
+
 # ============================================================
 # SETUP: get_log_data 1회 실행 (TC01~TC07 공용)
 # ============================================================
@@ -60,14 +73,24 @@ setup_rotate() {
     echo "[SETUP] get_log_data 요청 (응답 대기 30초 + 파일 생성 대기 10초)..."
 
     mkdir -p "${TOUPLOAD_DIR}"
-    JOURNAL_SIZE_BEFORE=$(journalctl --disk-usage 2>/dev/null | awk '/take up/{print $7}')
+    dump_cmd journalctl --disk-usage
+    JOURNAL_DISKUSAGE_BEFORE="$(journalctl --disk-usage 2>/dev/null)"
+    JOURNAL_SIZE_BEFORE=$(echo "$JOURNAL_DISKUSAGE_BEFORE" | awk '/take up/{print $7}')
+    dump_cmd du -sk "${JOURNAL_DIR}"
+    JOURNAL_KB_BEFORE=$(du -sk "${JOURNAL_DIR}" 2>/dev/null | awk '{print $1}')
+    dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log.xz
     FILES_BEFORE=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | wc -l)
 
     ROTATE_RESP=$(send_and_wait "get_log_data" "{}" 30)
     echo "[SETUP] 응답: $([ -n "$ROTATE_RESP" ] && echo "OK: $ROTATE_RESP" || echo 'TIMEOUT')"
     sleep 10
 
-    JOURNAL_SIZE_AFTER=$(journalctl --disk-usage 2>/dev/null | awk '/take up/{print $7}')
+    dump_cmd journalctl --disk-usage
+    JOURNAL_DISKUSAGE_AFTER="$(journalctl --disk-usage 2>/dev/null)"
+    JOURNAL_SIZE_AFTER=$(echo "$JOURNAL_DISKUSAGE_AFTER" | awk '/take up/{print $7}')
+    dump_cmd du -sk "${JOURNAL_DIR}"
+    JOURNAL_KB_AFTER=$(du -sk "${JOURNAL_DIR}" 2>/dev/null | awk '{print $1}')
+    dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log.xz
     FILES_AFTER=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | wc -l)
     LATEST_XZ=$(ls -t "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | head -1)
 
@@ -82,6 +105,7 @@ setup_rotate() {
 # ============================================================
 tc01_filename_format() {
     echo "=== TC01: 파일명 규칙 검증 ==="
+    dump_cmd ls -la "$LATEST_XZ"
 
     if echo "$LATEST_XZ" | grep -qE "systemlog_[0-9]{14}_[0-9]{14}\.log\.xz"; then
         assert "TC01-1: 파일명 형식 (systemlog_시작_저장.log.xz)" "PASS"
@@ -120,6 +144,7 @@ tc02_timer_running() {
 
     # 2. FILES_BEFORE 기록
     local files_before files_after t0 latest_before
+    dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log.xz
     files_before=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | wc -l)
     latest_before=$(ls -t "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | head -1)
     echo "  [TC02-절차2] files_before=${files_before}, latest=$(basename "${latest_before:-N/A}")"
@@ -142,6 +167,7 @@ tc02_timer_running() {
     sleep 70
 
     # 6. 신규 파일 + endtime 확인
+    dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log.xz
     files_after=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | wc -l)
     local latest_xz
     latest_xz=$(ls -t "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | head -1)
@@ -161,11 +187,32 @@ tc02_timer_running() {
         echo "    files_before=${files_before} files_after=${files_after}"
     fi
 
-    local expected_endtime
+    local expected_endtime actual_endtime expected_epoch actual_epoch diff_sec
     expected_endtime=$(date -d "@${t_shift}" '+%Y%m%d%H%M%S')
-    echo "  [TC02-2 수동확인] 최신 파일: $(basename "${latest_xz:-N/A}")"
-    echo "                   기대 endtime(+25h): ${expected_endtime} 근처"
-    assert "TC02-2: 파일명 endtime이 변경 시간 근처 (수동 확인)" "PASS"
+    actual_endtime=$(basename "${latest_xz:-}" | sed -n 's/systemlog_[0-9]*_\([0-9]\{14\}\)\.log\.xz/\1/p')
+    echo "  [TC02-2] 최신 파일: $(basename "${latest_xz:-N/A}")"
+    echo "  [TC02-2] 기대 endtime(+25h)=${expected_endtime}, 실제 endtime=${actual_endtime:-N/A}"
+    if [ -n "$actual_endtime" ]; then
+        expected_epoch="$t_shift"
+        dump_cmd date -d "${actual_endtime:0:4}-${actual_endtime:4:2}-${actual_endtime:6:2} ${actual_endtime:8:2}:${actual_endtime:10:2}:${actual_endtime:12:2}" "+%s"
+        actual_epoch=$(date -d "${actual_endtime:0:4}-${actual_endtime:4:2}-${actual_endtime:6:2} ${actual_endtime:8:2}:${actual_endtime:10:2}:${actual_endtime:12:2}" "+%s" 2>/dev/null)
+        if [ -n "$actual_epoch" ]; then
+            diff_sec=$((actual_epoch - expected_epoch))
+            diff_sec=${diff_sec#-}
+            echo "  [TC02-2] |expected - actual|=${diff_sec}초"
+            if [ "$diff_sec" -le 120 ]; then
+                assert "TC02-2: 파일명 endtime이 변경 시간 ±120초 이내" "PASS"
+            else
+                assert "TC02-2: 파일명 endtime이 변경 시간 ±120초 이내" "FAIL"
+            fi
+        else
+            assert "TC02-2: 파일명 endtime이 변경 시간 ±120초 이내" "FAIL"
+            echo "    actual_endtime 파싱 실패: ${actual_endtime}"
+        fi
+    else
+        assert "TC02-2: 파일명 endtime이 변경 시간 ±120초 이내" "FAIL"
+        echo "    latest_xz에서 endtime 추출 실패: ${latest_xz}"
+    fi
 }
 
 # ============================================================
@@ -207,14 +254,16 @@ tc04_timeout_large_log() {
         echo "  --- TC04-${idx}: 목표 journal ${label} (urandom ${raw_mb}MB 주입) ---"
 
         # 1. journal 초기화
-        journalctl --rotate 2>/dev/null
-        journalctl --vacuum-files=1 2>/dev/null
+        dump_cmd journalctl --rotate
+        dump_cmd journalctl --vacuum-files=1
         sleep 2
         local before_size
+        dump_cmd journalctl --disk-usage
         before_size=$(journalctl --disk-usage 2>/dev/null | awk '/take up/{print $7}')
         echo "    [SETUP] vacuum 후 journal: ${before_size}"
 
         local before_files
+        dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log.xz
         before_files=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | wc -l)
 
         # 2. systemd-cat 으로 실제 journal 데이터 주입
@@ -223,13 +272,14 @@ tc04_timeout_large_log() {
         head -c $((raw_mb * 1048576)) /dev/urandom | base64 -w 4096 | systemd-cat -t TC04_DUMMY
         sync
         sleep 3
-        journalctl --rotate 2>/dev/null
+        dump_cmd journalctl --rotate
         sleep 2
         t_inject_t1=$(date +%s)
         local after_size
+        dump_cmd journalctl --disk-usage
         after_size=$(journalctl --disk-usage 2>/dev/null | awk '/take up/{print $7}')
         echo "    [SETUP] 주입 took $((t_inject_t1 - t_inject_t0))s, journal: ${before_size} → ${after_size}"
-        df -h /edge 2>&1 | tail -1
+        dump_cmd df -h /edge
 
         # 3. get_log_data 요청
         echo "    [TC04-${idx}] get_log_data 요청 송신..."
@@ -242,6 +292,7 @@ tc04_timeout_large_log() {
         sleep 10
 
         local after_files
+        dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log.xz
         after_files=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | wc -l)
         echo "    [TC04-${idx}] after: files=${after_files}"
 
@@ -265,8 +316,13 @@ tc05_compression() {
     echo "=== TC05: 로그 파일 xz 압축 확인 ==="
 
     if [ -n "$LATEST_XZ" ] && [ -f "$LATEST_XZ" ]; then
+        dump_cmd ls -la "$LATEST_XZ"
         assert "TC05-1: .xz 파일 존재" "PASS"
-        if xz --test "$LATEST_XZ" 2>/dev/null; then
+
+        local xz_test_rc
+        dump_cmd xz --test "$LATEST_XZ"
+        xz_test_rc=$?
+        if [ "$xz_test_rc" -eq 0 ]; then
             assert "TC05-2: xz 파일 무결성 (xz --test)" "PASS"
         else
             local xz_size xz_age
@@ -275,7 +331,9 @@ tc05_compression() {
             assert "TC05-2: xz 파일 무결성 (xz --test)" "FAIL" \
                 "${xz_size}B, 마지막 수정 ${xz_age}초 전 — host_agent 압축 타임아웃(5s) 후에도 xz 프로세스가 취소되지 않고 계속 쓰는 중일 가능성"
         fi
+
         local log_file="${LATEST_XZ%.xz}"
+        dump_cmd ls -la "$log_file"
         if [ ! -f "$log_file" ]; then
             assert "TC05-3: 원본 .log 파일 삭제됨" "PASS"
         else
@@ -287,16 +345,27 @@ tc05_compression() {
     elif [ -z "$LATEST_XZ" ]; then
         echo "  [SKIP] TC05-1~3: setup_rotate 없이 단독 실행 — LATEST_XZ 미설정"
     else
+        dump_cmd ls -la "$LATEST_XZ"
         assert "TC05-1: .xz 파일 존재" "FAIL"
     fi
 
     # TC05-4: xz -f 덮어쓰기 — staging에 동명 .xz 존재 시 강제 덮어쓰기 성공
     local XZ_TEST_BASE="${STAGING_DIR}/systemlog_tc05xztest_tc05xztest"
     echo "small dummy content" | xz -c > "${XZ_TEST_BASE}.log.xz" 2>/dev/null
+    seq 1 5000 > "${XZ_TEST_BASE}.log" 2>/dev/null
+    echo "  [TC05-4] 덮어쓰기 전:"
+    dump_cmd ls -la "${XZ_TEST_BASE}.log" "${XZ_TEST_BASE}.log.xz"
     local DUMMY_SIZE
     DUMMY_SIZE=$(stat -c%s "${XZ_TEST_BASE}.log.xz" 2>/dev/null || echo 0)
-    seq 1 5000 > "${XZ_TEST_BASE}.log" 2>/dev/null
-    if xz -f "${XZ_TEST_BASE}.log" 2>/dev/null; then
+
+    local xzf_rc
+    dump_cmd xz -f "${XZ_TEST_BASE}.log"
+    xzf_rc=$?
+
+    echo "  [TC05-4] 덮어쓰기 후:"
+    dump_cmd ls -la "${XZ_TEST_BASE}.log.xz"
+
+    if [ "$xzf_rc" -eq 0 ]; then
         local SIZE_AFTER
         SIZE_AFTER=$(stat -c%s "${XZ_TEST_BASE}.log.xz" 2>/dev/null || echo 0)
         if [ "$SIZE_AFTER" -gt "$DUMMY_SIZE" ] && [ ! -f "${XZ_TEST_BASE}.log" ]; then
@@ -316,9 +385,13 @@ tc05_compression() {
 # ============================================================
 tc06_journal_rotation() {
     echo "=== TC06: journalctl rotate 후 저널 사용량 확인 ==="
-    echo "  rotate 전: ${JOURNAL_SIZE_BEFORE} → 후: ${JOURNAL_SIZE_AFTER}"
-    echo "  [수동 확인] 저널 사용량이 감소했거나 이미 최소 상태이면 PASS"
-    assert "TC06-1: journalctl rotate && vacuum 실행됨 (수동 확인)" "PASS"
+    echo "  journalctl --disk-usage: 전=${JOURNAL_SIZE_BEFORE} 후=${JOURNAL_SIZE_AFTER}"
+    echo "  du -sk ${JOURNAL_DIR}: 전=${JOURNAL_KB_BEFORE:-?}KB 후=${JOURNAL_KB_AFTER:-?}KB"
+    if [ -n "$JOURNAL_KB_BEFORE" ] && [ -n "$JOURNAL_KB_AFTER" ] && [ "$JOURNAL_KB_AFTER" -le "$JOURNAL_KB_BEFORE" ]; then
+        assert "TC06-1: journalctl rotate && vacuum 후 저널 사용량 감소 또는 유지 (du -sk 비교)" "PASS"
+    else
+        assert "TC06-1: journalctl rotate && vacuum 후 저널 사용량 감소 또는 유지 (du -sk 비교)" "FAIL"
+    fi
 }
 
 # ============================================================
@@ -332,10 +405,13 @@ tc07_retention_delete() {
 
     touch -d "31 days ago" "$dummy_31" 2>/dev/null
     touch -d "29 days ago" "$dummy_29" 2>/dev/null
-    echo "  더미 파일 생성 완료, get_log_data 트리거 (삭제 확인용)..."
+    echo "  더미 파일 생성 완료:"
+    dump_cmd ls -la "$dummy_31" "$dummy_29"
+    echo "  get_log_data 트리거 (삭제 확인용)..."
     send_and_wait "get_log_data" "{}" 30 > /dev/null
     sleep 10
 
+    dump_cmd ls -la "$dummy_31"
     if [ ! -f "$dummy_31" ]; then
         assert "TC07-1: 31일 경과 파일 자동 삭제됨" "PASS"
     else
@@ -343,6 +419,7 @@ tc07_retention_delete() {
         rm -f "$dummy_31"
     fi
 
+    dump_cmd ls -la "$dummy_29"
     if [ -f "$dummy_29" ]; then
         assert "TC07-2: 29일 경과 파일 유지됨" "PASS"
         rm -f "$dummy_29"
@@ -358,7 +435,9 @@ tc08_blob_upload() {
     echo "=== TC08: Azure Connector 업로드 대상 파일 생성 확인 ==="
 
     local xz_count meta_count
+    dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log.xz
     xz_count=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | wc -l)
+    dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log.xz.meta
     meta_count=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz.meta 2>/dev/null | wc -l)
 
     if [ "$xz_count" -gt 0 ]; then
@@ -395,6 +474,7 @@ tc09_factory_reset() {
         return
     fi
 
+    dump_cmd ls -la "${TOUPLOAD_DIR}"
     if [ ! -f "$dummy" ] && [ -z "$(ls "${TOUPLOAD_DIR}"/*.* 2>/dev/null)" ]; then
         assert "TC09-2: toupload 디렉토리 내 파일 전체 삭제" "PASS"
     else
@@ -412,7 +492,9 @@ tc10_pre() {
     echo "=== TC10-PRE: 리부트 전 로그 저장 ==="
 
     local before_staging before_toupload
+    dump_cmd ls -la "${STAGING_DIR}"/systemlog_*.log.xz
     before_staging=$(ls "${STAGING_DIR}"/systemlog_*.log.xz 2>/dev/null | wc -l)
+    dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log.xz
     before_toupload=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | wc -l)
 
     echo "  현재 staging .xz: $before_staging, toupload .xz: $before_toupload"
@@ -432,6 +514,7 @@ tc10_pre() {
     fi
 
     local after_staging
+    dump_cmd ls -la "${STAGING_DIR}"/systemlog_*.log.xz
     after_staging=$(ls "${STAGING_DIR}"/systemlog_*.log.xz 2>/dev/null | wc -l)
     if [ "$after_staging" -gt "$before_staging" ]; then
         assert "TC10-2: staging에 shutdown 로그 .xz 생성됨" "PASS"
@@ -466,10 +549,12 @@ tc10_post() {
     fi
 
     local before_toupload
+    dump_cmd cat "${TC10_SAVE}"
     before_toupload=$(cat "${TC10_SAVE}")
     rm -f "${TC10_SAVE}"
 
     local after_toupload
+    dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log.xz
     after_toupload=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | wc -l)
 
     if [ "$after_toupload" -gt "$before_toupload" ]; then
@@ -509,7 +594,9 @@ tc11_nmon_upload_happy_path() {
     done
 
     local old_before xfer_before meta_before
+    dump_cmd ls -la "${NMON_OLD_DIR}"
     old_before=$(ls "${NMON_OLD_DIR}"/*.nmon 2>/dev/null | wc -l)
+    dump_cmd ls -la "${NMON_TOUPLOAD_DIR}"
     xfer_before=$(ls "${NMON_TOUPLOAD_DIR}"/*.nmon 2>/dev/null | wc -l)
     meta_before=$(ls "${NMON_TOUPLOAD_DIR}"/*.nmon.meta 2>/dev/null | wc -l)
     echo "  [TC11-절차1~2] baseline: old=${old_before}, toupload .nmon=${xfer_before}, .meta=${meta_before}"
@@ -524,7 +611,9 @@ tc11_nmon_upload_happy_path() {
     sleep 5
 
     local old_after xfer_after meta_after
+    dump_cmd ls -la "${NMON_OLD_DIR}"
     old_after=$(ls "${NMON_OLD_DIR}"/*.nmon 2>/dev/null | wc -l)
+    dump_cmd ls -la "${NMON_TOUPLOAD_DIR}"
     xfer_after=$(ls "${NMON_TOUPLOAD_DIR}"/*.nmon 2>/dev/null | wc -l)
     meta_after=$(ls "${NMON_TOUPLOAD_DIR}"/*.nmon.meta 2>/dev/null | wc -l)
     local xfer_new meta_new
@@ -564,6 +653,7 @@ tc11_nmon_upload_happy_path() {
     any_meta=$(ls -t "${NMON_TOUPLOAD_DIR}"/*.nmon.meta 2>/dev/null | head -1)
     if [ -n "$any_meta" ] && [ -f "$any_meta" ]; then
         echo "  [TC11-절차5] meta 검증 대상: $(basename "$any_meta")"
+        dump_cmd cat "$any_meta"
         local yyyy mm
         yyyy=$(date '+%Y')
         mm=$(date '+%m')
@@ -629,6 +719,7 @@ tc12_nmon_retention() {
 
     local fail_old_nmon=0 fail_old_meta=0 fail_now_nmon=0 fail_now_meta=0
     for d in "${NMON_OLD_DIR}" "${NMON_ARCHIVE_DIR}" "${NMON_TOUPLOAD_DIR}"; do
+        dump_cmd ls -la "${d}/tc12_old40.nmon" "${d}/tc12_old40.nmon.meta" "${d}/tc12_now.nmon" "${d}/tc12_now.nmon.meta"
         old40="${d}/tc12_old40.nmon"
         old40_meta="${d}/tc12_old40.nmon.meta"
         now_file="${d}/tc12_now.nmon"
@@ -726,9 +817,17 @@ tc13_nmon_no_op() {
     fi
 
     # TC13-3: journald 에 task_upload_nmon ERROR 부재 (silent failure 가드)
+    echo "  \$ journalctl -u docker-loader --since '1 minute ago' -o cat | grep '[task_upload_nmon]'"
+    local nmon_all
+    nmon_all=$(journalctl -u docker-loader --since "1 minute ago" --no-pager -o cat 2>/dev/null \
+               | grep -F '[task_upload_nmon]')
+    if [ -n "$nmon_all" ]; then
+        echo "$nmon_all" | sed 's/^/    /'
+    else
+        echo "    (해당 로그 없음)"
+    fi
     local nmon_err
-    nmon_err=$(journalctl -u docker-loader --since "1 minute ago" --no-pager -o cat 2>/dev/null \
-               | grep -F '[task_upload_nmon]' | grep -E 'ERROR|Failed' | tail -5)
+    nmon_err=$(echo "$nmon_all" | grep -E 'ERROR|Failed' | tail -5)
     if [ -z "$nmon_err" ]; then
         assert "TC13-3: 최근 1분 journald 에 task_upload_nmon ERROR 부재" "PASS"
     else
@@ -753,6 +852,7 @@ tc14_rtc_same_start_merge() {
 
     # 2. BOOT_START 취득
     local BOOT_START
+    dump_cmd journalctl --list-boots
     BOOT_START=$(journalctl --list-boots | head -n 1 \
         | awk '{print $4, $5}' | sed 's/[-:]//g' | tr -d ' ')
     echo "  BOOT_START: $BOOT_START"
@@ -764,6 +864,7 @@ tc14_rtc_same_start_merge() {
 
     # 3. BEFORE 목록 기록 (ls -t 가 아닌 diff로 신규 파일 식별 — TC11 등 직전 TC가 만든 파일 오참조 방지)
     local BEFORE_TOUPLOAD BEFORE_LIST
+    dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log.xz
     BEFORE_LIST=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | sort)
     BEFORE_TOUPLOAD=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | wc -l)
 
@@ -806,6 +907,7 @@ tc14_rtc_same_start_merge() {
 
     # 8. 검증
     local staging_remain
+    dump_cmd ls -la "${STAGING_DIR}"/systemlog_*.log.xz
     staging_remain=$(ls "${STAGING_DIR}"/systemlog_*.log.xz 2>/dev/null | wc -l)
     if [ "$staging_remain" -eq 0 ]; then
         assert "TC14-1: staging systemlog_*.log.xz 모두 소비됨 (0개)" "PASS"
@@ -816,6 +918,7 @@ tc14_rtc_same_start_merge() {
     fi
 
     local AFTER_TOUPLOAD
+    dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log.xz
     AFTER_TOUPLOAD=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | wc -l)
     if [ "$AFTER_TOUPLOAD" -gt "$BEFORE_TOUPLOAD" ]; then
         assert "TC14-2: toupload .log.xz 신규 생성됨" "PASS"
@@ -839,7 +942,7 @@ tc14_rtc_same_start_merge() {
             echo "    실제 start_time: ${new_start}"
         fi
 
-        if xz --test "$NEW_XZ" 2>/dev/null; then
+        if dump_cmd xz --test "$NEW_XZ"; then
             assert "TC14-4: 병합 파일 xz 무결성 (xz --test)" "PASS"
         else
             assert "TC14-4: 병합 파일 xz 무결성 (xz --test)" "FAIL"
