@@ -179,12 +179,12 @@ def _generate_result_md(run_id: str, meta: dict, cases: list, log_text: str, sl_
         "",
         f"**총 결과: PASS={meta.get('pass', 0)} / FAIL={meta.get('fail', 0)} / {len(cases)}기준**",
         "",
-        "| TC | 기준 | 결과 |",
-        "|----|------|------|",
+        "| TC | 결과 |",
+        "|----|------|",
     ]
     for c in cases:
         desc = c.get("desc", "").replace("|", "\\|")
-        lines.append(f"| {c['case']} ({desc}) | | **{c['status']}** |")
+        lines.append(f"| {c['case']} ({desc}) | **{c['status']}** |")
 
     grouped: dict = {}
     for c in cases:
