@@ -19,7 +19,7 @@ git clone <repo-url> tcs_tools && cd tcs_tools
 pip install -r tools/tc_dashboard/requirements.txt
 ./tools/tc_dashboard/run.sh
 ```
-`http://localhost:8090` 접속 시 대시보드가 표시되면 정상.
+`http://localhost:8090` 접속 시 대시보드가 표시되면 정상. 화면 사용법은 [docs/dashboard_guide.md](docs/dashboard_guide.md) 참고.
 
 ## 폴더 구조
 
@@ -34,6 +34,7 @@ pip install -r tools/tc_dashboard/requirements.txt
 ## 관련 문서
 
 - 설치 매뉴얼(단계별 절차/확인법/문제 해결): [docs/install.md](docs/install.md)
+- 대시보드 사용법(버튼별 동작, 실시간 로그, 결과 다운로드): [docs/dashboard_guide.md](docs/dashboard_guide.md)
 - 장비 접속 정보(SSH/시리얼) 및 트러블슈팅: [docs/device_ssh.md](docs/device_ssh.md)
 - TC 판정 근거 대조 방법론(spec/리눅스 명령/journald): [docs/evidence_verification.md](docs/evidence_verification.md)
-- TC 작성/실행 규칙(개발자용): [CLAUDE.md](CLAUDE.md)
+- system_log TC 명세(사전조건/절차/PASS·FAIL Criteria): [tcs/system_log/tc_system_log.md](tcs/system_log/tc_system_log.md)
