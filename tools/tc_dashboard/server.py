@@ -59,6 +59,11 @@ _CONFIG = _load_config()
 
 DUT_HOST = _CONFIG.get("DUT_HOST", "192.168.10.25")
 SSH_KEY = str(Path(_CONFIG.get("SSH_KEY_PATH", "~/.ssh/emsplus_mass_nopass")).expanduser())
+# DUT가 SSH 연결을 짧은 간격으로 반복하면(성공/실패 무관) 한동안 새 연결을 거부하는
+# 패턴이 관찰됨(연속 실행 시 두 번째 연결부터 timeout, 수 분 뒤 자연 복구) — 매번 새로
+# TCP+인증을 맺는 대신 ControlMaster로 한 번 맺은 연결을 계속 재사용해서 이 문제를 우회한다.
+# ControlPersist=yes: 마지막 클라이언트(scp/ssh)가 끝나도 마스터 연결은 백그라운드에 계속 살아있음.
+SSH_CONTROL_PATH = str(BASE_DIR / "ssh_control.sock")
 SSH_OPTS = [
     "-i", SSH_KEY,
     "-o", "StrictHostKeyChecking=no",
@@ -70,6 +75,9 @@ SSH_OPTS = [
     # interval*countmax 로 최대 무응답 허용 시간을 넉넉히 잡는다.
     "-o", "ServerAliveInterval=15",
     "-o", "ServerAliveCountMax=80",
+    "-o", "ControlMaster=auto",
+    "-o", f"ControlPath={SSH_CONTROL_PATH}",
+    "-o", "ControlPersist=yes",
 ]
 REMOTE_SCRIPT = "/tmp/tc_system_log.sh"
 

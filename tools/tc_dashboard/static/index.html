@@ -17,6 +17,7 @@
   header .dut { font-size: 12px; color: var(--muted); }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
   .dot.on { background: var(--pass); } .dot.off { background: var(--fail); }
+  .dot.unknown { background: var(--muted); }
   main { display: grid; grid-template-columns: 320px 1fr; gap: 16px; padding: 16px 24px; }
   .cards { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 4px; }
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; }
@@ -60,7 +61,7 @@
 <body>
 <header>
   <h1>system_log TC Dashboard</h1>
-  <div class="dut"><span id="dutDot" class="dot off"></span>DUT 192.168.10.25 <span id="channelBadge" class="badge channel-ssh" title="TC 실행에 사용되는 연결 채널">SSH</span></div>
+  <div class="dut"><span id="dutDot" class="dot unknown" title="연결 상태 미확인 — 아직 실행 이력 없음"></span>DUT 192.168.10.25 <span id="channelBadge" class="badge channel-ssh" title="TC 실행에 사용되는 연결 채널">SSH</span></div>
 </header>
 
 <main>
@@ -143,7 +144,6 @@ function setButtonsDisabled(disabled) {
 async function runTc(tcId, btn) {
   setButtonsDisabled(true);
   $('#log').textContent = `[${tcId}] 시작 중...`;
-  refreshPing();   // TC 실행 시점에도 DUT 상태 갱신 (실행 자체를 기다리지 않음)
   try {
     const res = await fetch('/api/run', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -303,26 +303,23 @@ async function showRunLog(runId) {
   if (data.meta.status !== 'running') applyConnectionState(runId, data.meta);
 }
 
-async function refreshPing() {
-  // SSH(22)로는 여기서 절대 확인하지 않는다 — 헬스체크로 SSH를 건드리면 DUT lockout 유발 가능.
-  // ping만으로 DUT 전원/네트워크 생존만 표시한다 (SSH 가능 여부는 실제 TC 실행 시에만 알 수 있음).
-  const p = await fetch('/api/ping').then(r => r.json());
-  $('#dutDot').className = 'dot ' + (p.reachable ? 'on' : 'off');
-  $('#dutDot').title = p.reachable
-    ? 'ping OK (SSH 가능 여부는 별개 — TC 실행 시 확인됨)'
-    : 'ping 불가 (전원/네트워크 확인)';
+// ping은 전원/네트워크만 확인할 뿐 SSH 가능 여부를 보장하지 않아 오히려 오해를 준다
+// (ping은 되는데 SSH는 lockout으로 타임아웃나는 상황에서도 초록불이 떠버림) — 그래서 안 쓴다.
+// 페이지 로드 시엔 가장 최근 run의 실제 연결 결과로 LED를 초기화한다.
+async function initDutState() {
+  const { runs } = await fetch('/api/runs?page=1&page_size=1').then(r => r.json());
+  if (runs.length > 0 && runs[0].status !== 'running') {
+    applyConnectionState(runs[0].run_id, runs[0]);
+  }
 }
 
 async function init() {
   await loadCatalog();
   await refreshStatus();
   await refreshHistory();
-  await refreshPing();
-  // 다른 클라이언트가 실행 중일 수도 있으니 주기적으로 이력만 새로고침.
-  // ping은 ICMP라 SSH lockout 위험이 없으므로 주기적으로 갱신해도 안전하다 —
-  // 이 탭에서 직접 실행하지 않은 run(다른 탭/스크립트발) 의 연결 결과도 뒤늦게라도 LED에 반영되게 한다.
+  await initDutState();
+  // 다른 클라이언트가 실행 중일 수도 있으니 주기적으로 이력만 새로고침
   setInterval(refreshHistory, 15000);
-  setInterval(refreshPing, 20000);
 }
 init();
 </script>

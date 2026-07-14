@@ -2,6 +2,7 @@
 tools/tc_dashboard/runs/
 tools/tc_dashboard/latest_status.json
 tools/tc_dashboard/__pycache__/
+tools/tc_dashboard/ssh_control.sock
 *.pyc
 
 # python venv
