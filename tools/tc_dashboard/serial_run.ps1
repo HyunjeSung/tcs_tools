@@ -30,12 +30,15 @@ function Out-Utf8([string]$s) {
 # 이 한 조각만 조용히 포기한다 — 실시간 로그 한 줄보다 시리얼 pump 타이밍(80ms 주기)이 우선이라
 # 재시도도 최소한으로만 한다.
 function Write-LogSafe([string]$path, [string]$value, [switch]$NoNewline) {
+    # -ErrorAction Stop 필수 — 이게 없으면 Add-Content의 공유 위반은 논터미네이팅 에러라
+    # try/catch가 못 잡고, $ErrorActionPreference='Continue' 때문에 그냥 에러 텍스트만
+    # 찍힌 채로 넘어간다(재시도도 안 되고 에러도 안 지워짐).
     for ($i = 0; $i -lt 3; $i++) {
         try {
             if ($NoNewline) {
-                Add-Content -Path $path -Value $value -NoNewline -Encoding UTF8
+                Add-Content -Path $path -Value $value -NoNewline -Encoding UTF8 -ErrorAction Stop
             } else {
-                Add-Content -Path $path -Value $value -Encoding UTF8
+                Add-Content -Path $path -Value $value -Encoding UTF8 -ErrorAction Stop
             }
             return
         } catch {

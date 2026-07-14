@@ -420,7 +420,31 @@ async def _stop_journal_capture(proc, lines: list, task, run_dir: Path):
         (run_dir / "sl_journal.log").write_text("".join(sl_lines))
 
 
+async def _ensure_fresh_ssh_master():
+    """DUT가 재부팅되면 기존 ControlMaster 연결은 죽지만, 그 마스터 프로세스 자체는
+    ServerAliveCountMax(80회)를 다 채워야 스스로 종료돼 최대 20분간 좀비로 남는다 —
+    그동안 새 scp/ssh는 죽은 채널을 계속 재사용하려다 (타임아웃 없이) 멈춰버린다.
+    매 SSH run 시작 전에 `ssh -O check`로 마스터가 실제로 살아있는지 빠르게 확인하고,
+    죽어있으면 `-O exit`로 정리해서 다음 연결이 새로 맺어지게 한다.
+    """
+    try:
+        check = await asyncio.create_subprocess_exec(
+            "ssh", "-o", f"ControlPath={SSH_CONTROL_PATH}", "-O", "check", f"root@{DUT_HOST}",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        rc = await asyncio.wait_for(check.wait(), timeout=5)
+        if rc != 0:
+            exit_proc = await asyncio.create_subprocess_exec(
+                "ssh", "-o", f"ControlPath={SSH_CONTROL_PATH}", "-O", "exit", f"root@{DUT_HOST}",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(exit_proc.wait(), timeout=5)
+    except Exception:
+        pass  # 소켓이 아예 없거나 이미 정상이면 여기로 옴 — best-effort
+
+
 async def _run_ssh(entry: dict, log_path: Path, run_dir: Path) -> "int | None":
+    await _ensure_fresh_ssh_master()
     with open(log_path, "wb") as logf:
         logf.write(f"$ scp tc_system_log.sh -> root@{DUT_HOST}:{REMOTE_SCRIPT}\n".encode())
         logf.flush()
@@ -465,13 +489,14 @@ _SERIAL_DASH_MARKERS = {"M_RM_DONE", "M_DECODE_DONE", "M_DASH_RUN_END"}
 
 def _looks_corrupted(line: str) -> bool:
     """시리얼 라인 노이즈로 바이트가 깨지면 errors="replace"가 U+FFFD로 채운다.
-    한 줄이 그런 깨진 문자로 대부분 차 있으면(개행 없는 수천자짜리 덩어리가 되기도 함)
-    브라우저 렌더링만 무거워지고 정보도 없으므로 통째로 버린다.
+    개행 없는 수천자짜리 덩어리부터 짧은 순수 바이너리 조각까지 다 나올 수 있어
+    (전자는 낮은 비율로도 절대량이 많고, 후자는 절대량은 적어도 비율이 높다) 최소
+    길이만 짧게 잡고 비율 기준으로 판정한다.
     """
-    if len(line) < 20:
+    if len(line) < 8:
         return False
     bad = line.count("�")
-    return bad > 5 and bad / len(line) > 0.1
+    return bad >= 3 and bad / len(line) > 0.15
 
 
 def _filter_serial_noise(text: str, in_dump: bool) -> "tuple[str, bool]":
@@ -762,6 +787,21 @@ def api_runs(page: int = 1, page_size: int = 10):
     }
 
 
+def _read_clean_log(log_path: Path) -> str:
+    """output.log를 읽되 _looks_corrupted() 줄은 걸러서 반환한다.
+
+    _tail_serial_log()의 실시간 필터는 라이브 tee 스트림만 거치므로, base64 덤프
+    전송 자체가 시리얼 노이즈로 깨지면(디코딩은 성공하지만 내용이 깨진 경우) 그 최종
+    결과문은 child 프로세스 stdout으로 바로 들어가 필터를 안 거친다 — 읽을 때 한 번 더
+    걸러서 그런 케이스도 브라우저에 안 나가게 한다.
+    """
+    if not log_path.exists():
+        return ""
+    text = log_path.read_text(errors="replace")
+    lines = [l for l in text.splitlines() if not _looks_corrupted(l)]
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
 @app.get("/api/runs/{run_id}")
 def api_run_detail(run_id: str):
     run_dir = RUNS_DIR / run_id
@@ -770,7 +810,7 @@ def api_run_detail(run_id: str):
         raise HTTPException(404, "run not found")
     meta = json.loads(meta_path.read_text())
     log_path = run_dir / "output.log"
-    log_text = log_path.read_text(errors="replace") if log_path.exists() else ""
+    log_text = _read_clean_log(log_path)
     _, _, cases = _parse_results(log_text)
     return {"meta": meta, "log": log_text, "cases": cases}
 
@@ -784,7 +824,7 @@ def _load_finished_run(run_id: str):
     if meta.get("status") == "running":
         raise HTTPException(409, "run이 아직 진행 중")
     log_path = run_dir / "output.log"
-    log_text = log_path.read_text(errors="replace") if log_path.exists() else ""
+    log_text = _read_clean_log(log_path)
     _, _, cases = _parse_results(log_text)
     sl_journal_path = run_dir / "sl_journal.log"
     sl_journal_text = sl_journal_path.read_text(errors="replace") if sl_journal_path.exists() else ""

@@ -66,6 +66,14 @@ dump_cmd() {
     return "$rc"
 }
 
+# ls -t(수정시각) 기준 "최신"은 TC02가 시스템 시계를 조작하는 것과 상극이다 — 이전 run이
+# 시간 복원에 실패해 미래 mtime 파일이 남으면, 이후 run이 방금 만든 진짜 최신 파일보다
+# 그 잔재가 계속 "최신"으로 잡혀 endtime 비교가 어긋난다. 파일명에 박힌 endtime(마지막
+# _ 뒤 14자리, 항상 고정폭이라 사전순 정렬=시간순 정렬)으로 찾으면 시계 상태와 무관하다.
+find_latest_xz() {
+    ls "$1"/systemlog_*.log.xz 2>/dev/null | sort -t_ -k3 | tail -1
+}
+
 # ============================================================
 # SETUP: get_log_data 1회 실행 (TC01~TC07 공용)
 # ============================================================
@@ -92,7 +100,7 @@ setup_rotate() {
     JOURNAL_KB_AFTER=$(du -sk "${JOURNAL_DIR}" 2>/dev/null | awk '{print $1}')
     dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log.xz
     FILES_AFTER=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | wc -l)
-    LATEST_XZ=$(ls -t "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | head -1)
+    LATEST_XZ=$(find_latest_xz "${TOUPLOAD_DIR}")
 
     echo "[SETUP] 완료."
     echo "[SETUP] xz 파일: before=${FILES_BEFORE} after=${FILES_AFTER}"
@@ -142,12 +150,15 @@ tc02_timer_running() {
         echo "    [WARN] '[system_log_timer_loop] loop started' 로그 없음 — 부팅 직후 vacuum으로 사라졌을 가능성, 계속 진행"
     fi
 
-    # 2. FILES_BEFORE 기록
-    local files_before files_after t0 latest_before
+    # 2. BEFORE 목록 기록 — "최신 파일"을 mtime/파일명 중 뭘로 찾든 이전 run이 남긴
+    # 미래 날짜 잔재에 취약하다(find_latest_xz도 마찬가지). TC11/TC14와 동일하게
+    # before/after 목록을 통째로 저장해두고 diff(comm -13)로 "이번에 진짜 새로 생긴
+    # 파일"만 식별한다 — 잔재 존재 여부와 무관하게 항상 정확하다.
+    local files_before files_after t0 BEFORE_LIST
     dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log.xz
-    files_before=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | wc -l)
-    latest_before=$(ls -t "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | head -1)
-    echo "  [TC02-절차2] files_before=${files_before}, latest=$(basename "${latest_before:-N/A}")"
+    BEFORE_LIST=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | sort)
+    files_before=$(echo "$BEFORE_LIST" | grep -c .)
+    echo "  [TC02-절차2] files_before=${files_before}"
 
     # 3. 시스템 시간을 현재 시간(NTP)과 동기화
     echo "  [TC02-절차3] NTP로 시스템 시간 동기화..."
@@ -166,17 +177,38 @@ tc02_timer_running() {
     echo "  [TC02-절차5] 타이머 발화 대기 (70초)..."
     sleep 70
 
-    # 6. 신규 파일 + endtime 확인
+    # 6. 신규 파일 + endtime 확인 — comm -13 으로 BEFORE_LIST에 없던 파일만 골라낸다
+    # (TC14의 NEW_XZ 패턴과 동일). 여러 개면 그중 첫 번째를 본다 — TC14와 동일한 관례.
     dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log.xz
-    files_after=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | wc -l)
+    local AFTER_LIST
+    AFTER_LIST=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | sort)
+    files_after=$(echo "$AFTER_LIST" | grep -c .)
     local latest_xz
-    latest_xz=$(ls -t "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | head -1)
-    echo "  [TC02-절차6] files_after=${files_after}, latest=$(basename "${latest_xz:-N/A}")"
+    latest_xz=$(comm -13 <(echo "$BEFORE_LIST") <(echo "$AFTER_LIST") | head -1)
+    echo "  [TC02-절차6] files_after=${files_after}, 신규 파일=$(basename "${latest_xz:-none}")"
 
-    # 7. 시스템 시간을 현재 시간으로 복원 (NTP)
-    echo "  [TC02-절차7] NTP로 시스템 시간 복원..."
-    timedatectl set-ntp yes 2>/dev/null
-    sleep 2
+    # 7. 시스템 시간을 현재 시간으로 복원.
+    # 원래는 NTP(timedatectl set-ntp yes)만으로 복원했는데, 이 DUT는 NTP service가
+    # inactive라 아무리 기다려도 동기화가 안 끝나 시계가 미래에 계속 남는 문제가 있었다
+    # (find_latest_xz로 "최신 파일" 오판정은 막았지만 시계 자체는 여전히 틀어진 채 남음).
+    # 하드웨어 RTC는 이 조작과 무관하게 실제 시간을 유지하므로, RTC→시스템 시계로 즉시
+    # 동기화되는 hwclock -s 를 우선 쓰고, 실패할 때만 기존 NTP 대기로 폴백한다.
+    echo "  [TC02-절차7] 시스템 시간 복원..."
+    if hwclock -s 2>/dev/null; then
+        echo "    hwclock -s (RTC 기준) 로 복원 완료"
+    else
+        echo "    hwclock -s 실패 — NTP로 폴백"
+        timedatectl set-ntp yes 2>/dev/null
+        local ntp_synced=""
+        local wait_i=0
+        while [ "$wait_i" -lt 15 ]; do
+            sleep 1
+            ntp_synced=$(timedatectl show -p NTPSynchronized --value 2>/dev/null)
+            [ "$ntp_synced" = "yes" ] && break
+            wait_i=$((wait_i + 1))
+        done
+        echo "    NTPSynchronized=${ntp_synced:-N/A}"
+    fi
     echo "    복원 후 시간: $(date '+%F %T')"
 
     # PASS/FAIL Criteria
@@ -190,7 +222,7 @@ tc02_timer_running() {
     local expected_endtime actual_endtime expected_epoch actual_epoch diff_sec
     expected_endtime=$(date -d "@${t_shift}" '+%Y%m%d%H%M%S')
     actual_endtime=$(basename "${latest_xz:-}" | sed -n 's/systemlog_[0-9]*_\([0-9]\{14\}\)\.log\.xz/\1/p')
-    echo "  [TC02-2] 최신 파일: $(basename "${latest_xz:-N/A}")"
+    echo "  [TC02-2] 최신 파일: $(basename "${latest_xz:-none}")"
     echo "  [TC02-2] 기대 endtime(+25h)=${expected_endtime}, 실제 endtime=${actual_endtime:-N/A}"
     if [ -n "$actual_endtime" ]; then
         expected_epoch="$t_shift"
