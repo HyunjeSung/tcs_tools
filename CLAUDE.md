@@ -20,3 +20,4 @@ DUT 접속 정보(SSH/시리얼)와 자동화 도구 위치는 [docs/device_ssh.
 - `/tc-run <app>` — 시리얼/SSH로 DUT 실행 + evidence 수집
 - `/tc-harness <app>` — 위 사이클 전체를 한 번에 진행하는 dispatcher
 - `tc-plan` 에이전트 — 요구사항 문서 + 소스코드 기반 TC 명세 초안 생성
+- `tc-dashboard` 스킬 — `tools/tc_dashboard/` 웹 대시보드 개발 시 참고 (시리얼 라이브 로그 아키텍처, WSL/Windows interop 함정 정리)

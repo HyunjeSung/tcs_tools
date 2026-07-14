@@ -7,6 +7,7 @@ DUT(config.env의 DUT_HOST)에 SSH로 tc_system_log.sh 를 transfer+실행하고
 import asyncio
 import json
 import re
+import shutil
 import subprocess
 from datetime import datetime
 from io import BytesIO
@@ -35,6 +36,8 @@ RUNS_DIR = BASE_DIR / "runs"
 STATUS_FILE = BASE_DIR / "latest_status.json"
 STATIC_DIR = BASE_DIR / "static"
 RUNS_DIR.mkdir(exist_ok=True)
+
+MAX_RUNS = 50  # 이 개수를 넘는 오래된 run은 _prune_old_runs()가 디스크에서 삭제한다
 
 
 def _load_config() -> dict:
@@ -70,6 +73,26 @@ SSH_OPTS = [
 ]
 REMOTE_SCRIPT = "/tmp/tc_system_log.sh"
 
+SERIAL_COM_PORT = _CONFIG.get("SERIAL_COM_PORT", "COM6")
+SERIAL_RUN_PS1 = BASE_DIR / "serial_run.ps1"
+# serial_run.ps1이 시리얼 원문을 실시간으로 append하는 Windows 쪽 파일.
+# WIN_TEMP_LOG_PATH(config.env)와 같은 디렉토리를 쓰되 tc-run 스킬의 로그(tc_console.log)와
+# 겹치지 않도록 대시보드 전용 파일명을 쓴다.
+_WIN_TEMP_LOG_PATH = _CONFIG.get("WIN_TEMP_LOG_PATH", r"C:\Users\hyunje.sung\AppData\Local\Temp\tc_console.log")
+SERIAL_LIVE_LOG_WIN = _WIN_TEMP_LOG_PATH.rsplit("\\", 1)[0] + "\\tc_dashboard_serial.log"
+
+
+def _win_path(path: Path) -> str:
+    return subprocess.run(
+        ["wslpath", "-w", str(path)], capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+
+def _wsl_path(win_path: str) -> Path:
+    return Path(subprocess.run(
+        ["wslpath", "-u", win_path], capture_output=True, text=True, check=True,
+    ).stdout.strip())
+
 # tc_system_log.sh 가 실제로 지원하는 --flag 목록 (스크립트 case 문 기준).
 # TC01/02/03/06/07/08/09 는 단독 flag가 없어 기본(default) 실행에만 포함됨.
 CATALOG = [
@@ -104,6 +127,7 @@ current_run = {"run_id": None}
 
 class RunRequest(BaseModel):
     tc_id: str
+    channel: str = "ssh"
 
 
 def ssh_argv(remote_cmd: str):
@@ -119,25 +143,30 @@ REASON_RE = re.compile(r"^\[REASON\]\s*(.*)$")
 
 
 def _parse_results(text: str):
-    pass_n = fail_n = 0
-    cases = []
+    # case_id로 dedup — 시리얼 채널은 tee로 살린 라이브 스트림과 최종 base64 디코딩본에
+    # 같은 [PASS]/[FAIL] 블록이 두 번 나타날 수 있어(_tail_serial_log 참고), 같은 case가
+    # 중복 매칭되면 나중 것(더 뒤에 오는 최종 디코딩본, 항상 깨끗함)으로 덮어써 한 번만 센다.
+    cases_map: dict = {}
+    order: list = []
     for line in text.splitlines():
         stripped = line.strip()
         m = ASSERT_RE.match(stripped)
         if m:
             status, tc_no, sub_no, desc = m.groups()
-            if status == "PASS":
-                pass_n += 1
-            else:
-                fail_n += 1
-            cases.append({
-                "tc": f"TC{tc_no}", "case": f"TC{tc_no}-{sub_no}",
+            case_id = f"TC{tc_no}-{sub_no}"
+            if case_id not in cases_map:
+                order.append(case_id)
+            cases_map[case_id] = {
+                "tc": f"TC{tc_no}", "case": case_id,
                 "status": status, "desc": desc, "reason": "",
-            })
+            }
             continue
         rm = REASON_RE.match(stripped)
-        if rm and cases:
-            cases[-1]["reason"] = rm.group(1)
+        if rm and order:
+            cases_map[order[-1]]["reason"] = rm.group(1)
+    cases = [cases_map[cid] for cid in order]
+    pass_n = sum(1 for c in cases if c["status"] == "PASS")
+    fail_n = sum(1 for c in cases if c["status"] == "FAIL")
     return pass_n, fail_n, cases
 
 
@@ -279,10 +308,7 @@ pre {{ font-size: 8px; white-space: pre-wrap; background: #f2f2f2; border: 1px s
     return buf.getvalue()
 
 
-def _update_latest_status(run_id: str, meta: dict, cases: list):
-    status_map = {}
-    if STATUS_FILE.exists():
-        status_map = json.loads(STATUS_FILE.read_text())
+def _merge_case_status(status_map: dict, run_id: str, meta: dict, cases: list):
     for c in cases:
         status_map[c["case"]] = {
             "status": c["status"],
@@ -292,6 +318,45 @@ def _update_latest_status(run_id: str, meta: dict, cases: list):
             "run_id": run_id,
             "at": meta["finished_at"],
         }
+
+
+def _update_latest_status(run_id: str, meta: dict, cases: list):
+    status_map = {}
+    if STATUS_FILE.exists():
+        status_map = json.loads(STATUS_FILE.read_text())
+    _merge_case_status(status_map, run_id, meta, cases)
+    STATUS_FILE.write_text(json.dumps(status_map, ensure_ascii=False, indent=2))
+
+
+def _prune_old_runs(keep: int = MAX_RUNS):
+    """runs/ 아래 run_id(=YYYYMMDD_HHMMSS_... 접두라 이름순=시간순) 기준 최신 keep개만 남기고 나머지는 삭제."""
+    run_dirs = sorted((d for d in RUNS_DIR.iterdir() if d.is_dir()), key=lambda d: d.name, reverse=True)
+    for stale_dir in run_dirs[keep:]:
+        shutil.rmtree(stale_dir, ignore_errors=True)
+
+
+def _rebuild_latest_status():
+    """latest_status.json을 실제 runs/ 에 남아있는 run들만 기준으로 처음부터 다시 만든다.
+
+    _update_latest_status()는 누적(merge)만 하므로 _prune_old_runs()로 오래된 run 디렉토리를
+    지워도 그 run이 마지막으로 채운 케이스 항목은 그대로 남는다 — 존재하지 않는 run_id를
+    가리키는 stale 항목이 생기지 않도록, 남은 run들을 시간순으로 재생해 상태를 재구성한다.
+    """
+    status_map: dict = {}
+    run_dirs = sorted((d for d in RUNS_DIR.iterdir() if d.is_dir()), key=lambda d: d.name)
+    for run_dir in run_dirs:
+        meta_path = run_dir / "meta.json"
+        if not meta_path.exists():
+            continue
+        meta = json.loads(meta_path.read_text())
+        if meta.get("status") == "running" or not meta.get("finished_at"):
+            continue
+        log_path = run_dir / "output.log"
+        if not log_path.exists():
+            continue
+        _, _, cases = _parse_results(log_path.read_text(errors="replace"))
+        if cases:
+            _merge_case_status(status_map, run_dir.name, meta, cases)
     STATUS_FILE.write_text(json.dumps(status_map, ensure_ascii=False, indent=2))
 
 
@@ -347,7 +412,201 @@ async def _stop_journal_capture(proc, lines: list, task, run_dir: Path):
         (run_dir / "sl_journal.log").write_text("".join(sl_lines))
 
 
-async def run_tc(run_id: str, entry: dict):
+async def _run_ssh(entry: dict, log_path: Path, run_dir: Path) -> "int | None":
+    with open(log_path, "wb") as logf:
+        logf.write(f"$ scp tc_system_log.sh -> root@{DUT_HOST}:{REMOTE_SCRIPT}\n".encode())
+        logf.flush()
+        scp_proc = await asyncio.create_subprocess_exec(
+            "scp", *SSH_OPTS, str(TC_SCRIPT), f"root@{DUT_HOST}:{REMOTE_SCRIPT}",
+            stdout=logf, stderr=logf,
+        )
+        scp_rc = await asyncio.wait_for(scp_proc.wait(), timeout=30)
+        if scp_rc != 0:
+            raise RuntimeError(f"scp 전송 실패 (exit={scp_rc})")
+
+        chmod_proc = await asyncio.create_subprocess_exec(
+            *ssh_argv(f"chmod +x {REMOTE_SCRIPT}"), stdout=logf, stderr=logf,
+        )
+        await asyncio.wait_for(chmod_proc.wait(), timeout=15)
+
+        journal_proc, journal_lines, collector_task = await _start_journal_capture()
+
+        flag = entry["flag"] or ""
+        remote_cmd = f"sh {REMOTE_SCRIPT} {flag} 2>&1".strip()
+        logf.write(f"\n$ ssh root@{DUT_HOST} '{remote_cmd}'\n\n".encode())
+        logf.flush()
+        run_proc = await asyncio.create_subprocess_exec(
+            *ssh_argv(remote_cmd), stdout=logf, stderr=logf,
+        )
+        try:
+            exit_code = await asyncio.wait_for(run_proc.wait(), timeout=entry["timeout"])
+        except asyncio.TimeoutError:
+            run_proc.kill()
+            await run_proc.wait()
+            logf.write(b"\n[DASHBOARD] TIMEOUT - \xed\x94\x84\xeb\xa1\x9c\xec\x84\xb8\xec\x8a\xa4 \xea\xb0\x95\xec\xa0\x9c \xec\xa2\x85\xeb\xa3\x8c\n")
+            exit_code = None
+
+        await _stop_journal_capture(journal_proc, journal_lines, collector_task, run_dir)
+    return exit_code
+
+
+_SERIAL_NOISE_LINE_RE = re.compile(r"docker-loader\[")
+_SERIAL_PROMPT_PREFIX_RE = re.compile(r"^(?:P>\s*)+")
+_SERIAL_DASH_MARKERS = {"M_RM_DONE", "M_DECODE_DONE", "M_DASH_RUN_END"}
+
+
+def _looks_corrupted(line: str) -> bool:
+    """시리얼 라인 노이즈로 바이트가 깨지면 errors="replace"가 U+FFFD로 채운다.
+    한 줄이 그런 깨진 문자로 대부분 차 있으면(개행 없는 수천자짜리 덩어리가 되기도 함)
+    브라우저 렌더링만 무거워지고 정보도 없으므로 통째로 버린다.
+    """
+    if len(line) < 20:
+        return False
+    bad = line.count("�")
+    return bad > 5 and bad / len(line) > 0.1
+
+
+def _filter_serial_noise(text: str, in_dump: bool) -> "tuple[str, bool]":
+    """시리얼 콘솔은 DUT의 docker-loader 저널(`[DM]/[MCU]/...`)이 우리 명령 입출력과 무관하게 계속
+    끼어들고, echo 꺼도 프롬프트(`P> `)/`^C` 에코가 섞인다. tee로 살린 TC 스크립트 자체 출력만
+    골라내 SSH 채널과 비슷하게 보이도록, 그런 잡음 줄과 대시보드 내부 프로토콜 마커
+    (M_RM_DONE 등, M_DUMPBEG~M_DUMPEND 사이 base64 덤프 — 어차피 최종 디코딩본이 뒤이어 깨끗하게
+    나옴)는 버린다. base64 덤프가 여러 tail 주기(1초)에 걸쳐 나뉠 수 있어 in_dump 상태를 호출 간
+    이어받는다.
+    """
+    kept = []
+    for line in text.splitlines():
+        # 마커/노이즈 판별 전에 프롬프트 접두부터 벗긴다 — "P> M_DUMPBEG"처럼 마커 앞에
+        # 프롬프트가 그대로 붙어 나오는 경우가 흔해서, 벗기기 전에 startswith를 하면 못 잡는다.
+        line = _SERIAL_PROMPT_PREFIX_RE.sub("", line)
+        s = line.strip()
+        if s.startswith("M_DUMPBEG"):
+            in_dump = True
+            continue
+        if s.startswith("M_DUMPEND"):
+            in_dump = False
+            continue
+        if in_dump:
+            continue
+        if s in _SERIAL_DASH_MARKERS:
+            continue
+        if _SERIAL_NOISE_LINE_RE.search(line):
+            continue
+        if not line.strip() or line.strip() == "^C":
+            continue
+        if _looks_corrupted(line):
+            continue
+        kept.append(line)
+    filtered = ("\n".join(kept) + "\n") if kept else ""
+    return filtered, in_dump
+
+
+async def _tail_serial_log(wsl_log_path: Path, start_offset: int, log_path: Path, stop_event: asyncio.Event):
+    """serial_run.ps1이 Windows 로컬 디스크(SERIAL_LIVE_LOG_WIN)에 실시간으로 append하는 시리얼 원문을
+    1초 간격으로 tail해, 잡음을 걸러낸 뒤 output.log에 이어붙인다.
+
+    쓰기(시리얼 pump)는 여전히 Windows 로컬 디스크로만 가서 타이밍에 영향 없고, 읽기(tail)만
+    WSL의 /mnt/c 브릿지를 거친다 — 쓰기 경로를 WSL 쪽으로 바꾸면 pump 주기(80ms)마다 9P 왕복이
+    붙어 시리얼 타이밍이 깨질 수 있어 피한다. 그 파일은 run 간 공유·누적(append-only, 안 지워짐)
+    이므로 이번 run 시작 시점의 크기(start_offset) 이후분만 읽는다.
+    """
+    offset = start_offset
+    in_dump = False
+    pending = ""  # 청크 경계에서 잘린 미완성 줄 — 다음 주기에 이어붙여야 노이즈 필터가 온전한 줄로 판단 가능
+
+    def _read_new() -> bytes:
+        if not wsl_log_path.exists():
+            return b""
+        size = wsl_log_path.stat().st_size
+        if size <= offset:
+            return b""
+        with open(wsl_log_path, "rb") as f:
+            f.seek(offset)
+            return f.read()
+
+    def _flush(text: str):
+        nonlocal in_dump
+        filtered, in_dump = _filter_serial_noise(text, in_dump)
+        if filtered:
+            try:
+                with open(log_path, "ab") as f:
+                    f.write(filtered.encode("utf-8"))
+            except Exception:
+                pass
+
+    loop = asyncio.get_event_loop()
+    while True:
+        await asyncio.sleep(1)
+        try:
+            # asyncio.to_thread()는 3.9+ 전용이라(이 venv는 3.8) run_in_executor로 대체
+            chunk = await loop.run_in_executor(None, _read_new)
+        except Exception:
+            chunk = b""
+        if chunk:
+            offset += len(chunk)
+            pending += chunk.decode("utf-8", errors="replace")
+            if "\n" in pending:
+                complete, _, pending = pending.rpartition("\n")
+                _flush(complete + "\n")
+        if stop_event.is_set():
+            if pending:
+                _flush(pending)
+                pending = ""
+            break
+
+
+async def _run_serial(entry: dict, log_path: Path) -> "int | None":
+    """COM 포트로 transfer+실행. SSH 를 전혀 쓰지 않으므로 SSH lockout 상태에서도 동작한다
+    (journal capture 등 SSH 기반 부가 기능은 지원하지 않음)."""
+    flag = entry["flag"] or ""
+    argv = [
+        "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", _win_path(SERIAL_RUN_PS1),
+        "-ComPort", SERIAL_COM_PORT,
+        "-ScriptPath", _win_path(TC_SCRIPT),
+        "-Flag", flag,
+        "-TimeoutMs", str(entry["timeout"] * 1000),
+        "-LogFile", SERIAL_LIVE_LOG_WIN,
+    ]
+
+    tail_task = None
+    stop_tail = asyncio.Event()
+    try:
+        wsl_live_log = _wsl_path(SERIAL_LIVE_LOG_WIN)
+        start_offset = wsl_live_log.stat().st_size if wsl_live_log.exists() else 0
+        tail_task = asyncio.create_task(_tail_serial_log(wsl_live_log, start_offset, log_path, stop_tail))
+    except Exception:
+        tail_task = None  # best-effort — 실시간 tail 실패해도 최종 결과 수신엔 영향 없음
+
+    # "ab"(O_APPEND) 필수 — 자식 프로세스가 이 fd를 물려받아 stdout으로 쓰는 것과
+    # _tail_serial_log()가 별도 fd로 append하는 게 동시에 일어나므로, O_APPEND 없이 "wb"로 열면
+    # 둘 중 하나가 캐시된 오프셋으로 써서 상대방이 방금 append한 내용을 덮어쓸 수 있다.
+    with open(log_path, "ab") as logf:
+        logf.write(f"$ powershell.exe serial_run.ps1 -ComPort {SERIAL_COM_PORT} -Flag '{flag}' (SSH 미사용)\n\n".encode())
+        logf.flush()
+        proc = await asyncio.create_subprocess_exec(*argv, stdout=logf, stderr=logf)
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=entry["timeout"] + 90)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            logf.write(b"\n[DASHBOARD] TIMEOUT - \xed\x94\x84\xeb\xa1\x9c\xec\x84\xb8\xec\x8a\xa4 \xea\xb0\x95\xec\xa0\x9c \xec\xa2\x85\xeb\xa3\x8c\n")
+
+    if tail_task:
+        stop_tail.set()
+        try:
+            await asyncio.wait_for(tail_task, timeout=3)
+        except (asyncio.TimeoutError, Exception):
+            tail_task.cancel()
+
+    text = log_path.read_text(errors="replace")
+    if "SERIAL_RUN_OK=True" in text:
+        return 0
+    if "SERIAL_RUN_OK=False" in text:
+        return None
+    return None
+
+
+async def run_tc(run_id: str, entry: dict, channel: str = "ssh"):
     run_dir = RUNS_DIR / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     log_path = run_dir / "output.log"
@@ -356,6 +615,7 @@ async def run_tc(run_id: str, entry: dict):
         "tc_id": entry["id"],
         "label": entry["label"],
         "flag": entry["flag"],
+        "channel": channel,
         "started_at": datetime.now().isoformat(timespec="seconds"),
         "finished_at": None,
         "status": "running",
@@ -366,40 +626,10 @@ async def run_tc(run_id: str, entry: dict):
     _write_meta(run_dir, meta)
 
     try:
-        with open(log_path, "wb") as logf:
-            logf.write(f"$ scp tc_system_log.sh -> root@{DUT_HOST}:{REMOTE_SCRIPT}\n".encode())
-            logf.flush()
-            scp_proc = await asyncio.create_subprocess_exec(
-                "scp", *SSH_OPTS, str(TC_SCRIPT), f"root@{DUT_HOST}:{REMOTE_SCRIPT}",
-                stdout=logf, stderr=logf,
-            )
-            scp_rc = await asyncio.wait_for(scp_proc.wait(), timeout=30)
-            if scp_rc != 0:
-                raise RuntimeError(f"scp 전송 실패 (exit={scp_rc})")
-
-            chmod_proc = await asyncio.create_subprocess_exec(
-                *ssh_argv(f"chmod +x {REMOTE_SCRIPT}"), stdout=logf, stderr=logf,
-            )
-            await asyncio.wait_for(chmod_proc.wait(), timeout=15)
-
-            journal_proc, journal_lines, collector_task = await _start_journal_capture()
-
-            flag = entry["flag"] or ""
-            remote_cmd = f"{REMOTE_SCRIPT} {flag} 2>&1".strip()
-            logf.write(f"\n$ ssh root@{DUT_HOST} '{remote_cmd}'\n\n".encode())
-            logf.flush()
-            run_proc = await asyncio.create_subprocess_exec(
-                *ssh_argv(remote_cmd), stdout=logf, stderr=logf,
-            )
-            try:
-                exit_code = await asyncio.wait_for(run_proc.wait(), timeout=entry["timeout"])
-            except asyncio.TimeoutError:
-                run_proc.kill()
-                await run_proc.wait()
-                logf.write(b"\n[DASHBOARD] TIMEOUT - \xed\x94\x84\xeb\xa1\x9c\xec\x84\xb8\xec\x8a\xa4 \xea\xb0\x95\xec\xa0\x9c \xec\xa2\x85\xeb\xa3\x8c\n")
-                exit_code = None
-
-            await _stop_journal_capture(journal_proc, journal_lines, collector_task, run_dir)
+        if channel == "serial":
+            exit_code = await _run_serial(entry, log_path)
+        else:
+            exit_code = await _run_ssh(entry, log_path, run_dir)
 
         meta["exit_code"] = exit_code
         text = log_path.read_text(errors="replace")
@@ -412,7 +642,9 @@ async def run_tc(run_id: str, entry: dict):
             meta["status"] = "timeout"
         elif fail_n > 0:
             meta["status"] = "fail"
-        elif exit_code != 0 and pass_n == 0 and fail_n == 0:
+        elif pass_n == 0:
+            # exit_code가 0이어도(예: 시리얼 결과 dump가 노이즈로 깨진 경우) 파싱된 케이스가
+            # 하나도 없으면 "결과 없음"이지 "pass"가 아니다.
             meta["status"] = "error"
         else:
             meta["status"] = "pass"
@@ -428,6 +660,8 @@ async def run_tc(run_id: str, entry: dict):
             logf.write(f"\n[DASHBOARD ERROR] {e}\n".encode())
     finally:
         current_run["run_id"] = None
+        _prune_old_runs()
+        _rebuild_latest_status()
 
 
 SUMMARY_RE = re.compile(r"PASS=(\d+)\s+FAIL=(\d+)")
@@ -474,6 +708,8 @@ def _reconcile_stale_runs():
 def _on_startup():
     current_run["run_id"] = None
     _reconcile_stale_runs()
+    _prune_old_runs()
+    _rebuild_latest_status()
 
 
 @app.get("/api/tcs")
@@ -490,24 +726,32 @@ def api_status():
 
 @app.get("/api/ping")
 def api_ping():
-    try:
-        rc = subprocess.run(
-            ["ping", "-c", "1", "-W", "1", DUT_HOST],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        ).returncode
-        return {"reachable": rc == 0, "host": DUT_HOST}
-    except Exception:
-        return {"reachable": False, "host": DUT_HOST}
+    # SSH(22번 포트) 연결 시도는 절대 여기서 하지 않는다 — DUT는 SSH 연결 시도가 3회 이상
+    # 실패하면 리부트 전까지 lockout 되므로, 실제 TC 실행(run_tc) 외에는 SSH를 건드리지 않는다.
+    # 이 헬스체크는 ICMP ping만으로 DUT 전원/네트워크 생존 여부만 확인한다 (SSH 가능 여부 보장 아님).
+    ping_rc = subprocess.run(
+        ["ping", "-c", "1", "-W", "1", DUT_HOST],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    ).returncode
+    return {"reachable": ping_rc == 0, "host": DUT_HOST}
 
 
 @app.get("/api/runs")
-def api_runs():
+def api_runs(page: int = 1, page_size: int = 10):
     runs = []
     for d in sorted(RUNS_DIR.iterdir(), reverse=True):
         meta_path = d / "meta.json"
         if meta_path.exists():
             runs.append(json.loads(meta_path.read_text()))
-    return runs[:50]
+    total = len(runs)
+    page = max(1, page)
+    start = (page - 1) * page_size
+    return {
+        "runs": runs[start:start + page_size],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 @app.get("/api/runs/{run_id}")
@@ -555,11 +799,13 @@ def api_run_result_pdf(run_id: str):
 async def api_run(req: RunRequest):
     if req.tc_id not in CATALOG_MAP:
         raise HTTPException(400, "unknown tc_id")
+    if req.channel not in ("ssh", "serial"):
+        raise HTTPException(400, "unknown channel")
     if current_run["run_id"] is not None:
         raise HTTPException(409, f"이미 실행 중인 run: {current_run['run_id']}")
     run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{req.tc_id}"
     current_run["run_id"] = run_id
-    asyncio.create_task(run_tc(run_id, CATALOG_MAP[req.tc_id]))
+    asyncio.create_task(run_tc(run_id, CATALOG_MAP[req.tc_id], req.channel))
     return {"run_id": run_id}
 
 
