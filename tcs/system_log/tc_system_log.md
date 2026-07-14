@@ -77,18 +77,19 @@ toupload에 `.log.xz` 파일을 생성하는지 확인한다.
 - NTP 자동 동기화 정지/복원 권한 (`timedatectl set-ntp false/yes`, `systemctl start/stop chronyd systemd-timesyncd`)
 - `journalctl -u docker-loader` 에서 `[system_log_timer_loop] loop started` 라인 확인 가능
    — 즉 system_log 어플리케이션의 timer thread 가 부팅 직후 정상 시작되어 24h 주기 check 루프가 돌고 있는 상태
-- **TC02 는 다른 TC 들의 SETUP(`get_log_data`)보다 먼저 실행되어야 함** — SETUP 의 `task_rotate_sync()` 호출이 timer thread 의 `last_run_time` 갱신에 영향을 줄 수 있어 +25h shift 후에도 `elapsed < 24h` 가 되어 발화 누락 가능
+- `system_log` 프로세스를 kill할 권한 (root) — 절차 0에서 사용
 - 환경변수: 없음 (TC 진입 시 자동으로 NTP off)
 
 ### 절차
 
+0. `system_log` 재시작 (내부 타이머 상태 초기화 — 다른 TC 실행 이력과 무관하게 항상 깨끗한 상태에서 시작)
 1. `journalctl -u docker-loader --no-pager | grep '[system_log_timer_loop] loop started'` 로 timer thread 시작 로그 확인
-2. `FILES_BEFORE` = 현재 toupload `.log.xz` 파일 수 및 최신 파일명 기록
+2. `FILES_BEFORE` = 현재 toupload `.log.xz` 파일 수 및 목록 기록
 3. 시스템 시간을 현재 시간과 동기화 (NTP `set-ntp yes` → 잠시 대기 → `set-ntp false` 로 변경 가능 상태)
 4. 현재 epoch `t0` 저장 후 시스템 시간을 `t0 + 25*3600` 로 변경 (`date -s @<epoch>`)
 5. 타이머 발화 대기 (70초) — system_log_timer_loop 의 1초 sleep_for + `elapsed >= 24h` check 후 `task_rotate_sync()` 호출 완료 대기
 6. toupload 에 신규 `.log.xz` 파일 생성 확인 및 파일명의 endtime 이 변경한 시간(+25h) 근처인지 확인
-7. 시스템 시간을 현재 시간으로 복원 (NTP `set-ntp yes`)
+7. 시스템 시간을 현재 시간으로 복원
 
 ### 기대 결과
 

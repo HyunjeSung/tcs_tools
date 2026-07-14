@@ -107,6 +107,8 @@ CATALOG = [
     {"id": "default", "label": "전체 실행 (TC01,02,03,04,05,06,07,08,09,12,13)", "flag": None,
      "timeout": 1800, "reboot": False,
      "note": "기본 회귀 세트. TC04 대기 포함, 수 분 소요"},
+    {"id": "tc02", "label": "TC02 24시간 타이머", "flag": "--tc02",
+     "timeout": 180, "reboot": False, "note": "system_log 프로세스 kill 수반 (내부 타이머 상태 초기화)"},
     {"id": "tc04", "label": "TC04 대용량 journal timeout", "flag": "--tc04",
      "timeout": 300, "reboot": False, "note": None},
     {"id": "tc05", "label": "TC05 압축 (TC05-4 단독)", "flag": "--tc05",

@@ -139,6 +139,39 @@ tc01_filename_format() {
 tc02_timer_running() {
     echo "=== TC02: 24시간 타이머 동작 확인 ==="
 
+    # 0. system_log 재시작 (내부 last_run_time 타이머 상태 초기화).
+    # 직전 run(들)이 이미 get_log_data/task_rotate_sync를 호출했으면 last_run_time이
+    # 최근 실시각으로 갱신돼 있어서, 이번 +25h shift로도 elapsed>=24h 조건이 안 잡혀
+    # 발화가 누락될 수 있다(스펙에 명시된 한계 — TC02가 다른 TC SETUP보다 먼저 실행돼야
+    # 하는 이유). system_log를 kill하면 edge_runtime이 컨테이너를 재시작해(TC14와 동일
+    # 메커니즘) last_run_time이 fresh 상태가 되므로, TC02가 실행 순서와 무관하게
+    # 항상 스스로 깨끗한 상태에서 시작하도록 매번 이걸 먼저 한다.
+    echo "  [TC02-절차0] system_log 재시작 (타이머 상태 초기화)..."
+    local sl_pid_before sl_pid_after wait_i
+    sl_pid_before=$(pgrep -f /edge/app/bin/system_log | head -1)
+    if [ -n "$sl_pid_before" ]; then
+        kill -9 "$sl_pid_before" 2>/dev/null
+        wait_i=0
+        sl_pid_after=""
+        while [ "$wait_i" -lt 60 ]; do
+            sleep 1
+            # kill한 PID가 완전히 정리되기 전까지 pgrep에 잠깐 같이 잡히는 경우가 있어서
+            # (좀비 상태), head -1로 첫 번째 값만 보면 그 옛날 PID를 계속 집을 수 있다.
+            # sl_pid_before를 제외한 나머지 중에서 새 PID를 찾는다.
+            sl_pid_after=$(pgrep -f /edge/app/bin/system_log | grep -v "^${sl_pid_before}$" | head -1)
+            [ -n "$sl_pid_after" ] && break
+            wait_i=$((wait_i + 1))
+        done
+        if [ -n "$sl_pid_after" ]; then
+            echo "    system_log 재시작 완료 (PID ${sl_pid_before} -> ${sl_pid_after}, ${wait_i}초 소요)"
+            sleep 3  # edge_runtime의 나머지 서브시스템도 안정화될 시간
+        else
+            echo "    [WARN] system_log 재시작 확인 실패(60초 대기) — 계속 진행하나 발화 보장 안 됨"
+        fi
+    else
+        echo "    [WARN] system_log PID 확인 실패 — 재시작 스킵, 계속 진행"
+    fi
+
     # 1. system_log_timer_loop 실행 확인
     echo "  [TC02-절차1] system_log_timer_loop 실행 로그 확인..."
     local loop_log
@@ -1024,6 +1057,14 @@ case "${1}" in
         echo " 결과: PASS=${PASS}  FAIL=${FAIL}"
         echo "============================================"
         ;;
+    --tc02)
+        tc02_timer_running
+
+        echo ""
+        echo "============================================"
+        echo " 결과: PASS=${PASS}  FAIL=${FAIL}"
+        echo "============================================"
+        ;;
     --tc04)
         tc04_timeout_large_log
 
@@ -1076,7 +1117,8 @@ case "${1}" in
         ;;
     *)
         verify_timer_loop_started
-        # TC02를 가장 먼저 — SETUP의 task_rotate_sync 가 last_run_time 갱신 가능성 회피
+        # TC02는 자체적으로 system_log를 재시작해 매번 깨끗한 상태에서 시작하므로 순서 무관하지만,
+        # 관례상 가장 먼저 실행한다.
         tc02_timer_running
 
         # TC02 이후 나머지 TC들의 사전 조건(toupload .xz 1개)을 위한 SETUP
