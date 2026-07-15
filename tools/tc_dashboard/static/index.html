@@ -7,6 +7,12 @@
   :root {
     --bg: #0f1420; --panel: #171d2e; --border: #2a3348; --text: #e6e9f0;
     --muted: #8891a7; --pass: #2ecc71; --fail: #e74c3c; --warn: #f39c12; --accent: #4d8dff;
+    --btn-bg: #1e2740; --log-bg: #0a0e17; --hover-bg: #1c2438; --selected-bg: #22304f;
+  }
+  :root[data-theme="light"] {
+    --bg: #f4f5f9; --panel: #ffffff; --border: #dde1eb; --text: #1a2033;
+    --muted: #6b7280; --pass: #1a9850; --fail: #d63b2f; --warn: #c9770a; --accent: #2f6fed;
+    --btn-bg: #eef1f8; --log-bg: #f7f8fb; --hover-bg: #eef1f8; --selected-bg: #e2e8f7;
   }
   * { box-sizing: border-box; }
   body { margin: 0; font-family: -apple-system, "Segoe UI", Pretendard, sans-serif;
@@ -26,13 +32,13 @@
   .card.pass .num { color: var(--pass); } .card.fail .num { color: var(--fail); }
   section { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
   section h2 { font-size: 13px; margin: 0 0 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
-  .tc-btn { display: block; width: 100%; text-align: left; background: #1e2740; border: 1px solid var(--border);
+  .tc-btn { display: block; width: 100%; text-align: left; background: var(--btn-bg); border: 1px solid var(--border);
             color: var(--text); padding: 9px 10px; border-radius: 6px; margin-bottom: 6px; cursor: pointer; font-size: 13px; }
   .tc-btn:hover:not(:disabled) { border-color: var(--accent); }
   .tc-btn:disabled { opacity: .45; cursor: not-allowed; }
   .tc-btn .note { display: block; font-size: 11px; color: var(--warn); margin-top: 2px; }
   .right-col { display: flex; flex-direction: column; gap: 16px; }
-  #log { background: #0a0e17; border: 1px solid var(--border); border-radius: 6px; padding: 10px;
+  #log { background: var(--log-bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px;
          font-family: "SF Mono", Consolas, monospace; font-size: 12px; white-space: pre-wrap;
          max-height: 340px; overflow-y: auto; }
   table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
@@ -48,20 +54,25 @@
   .badge.channel-ssh { background: rgba(77,141,255,.15); color: var(--accent); }
   .badge.channel-serial { background: rgba(46,204,113,.15); color: var(--pass); }
   .run-row { cursor: pointer; }
-  .run-row:hover { background: #1c2438; }
-  .run-row.selected { background: #22304f; }
+  .run-row:hover { background: var(--hover-bg); }
+  .run-row.selected { background: var(--selected-bg); }
   .muted { color: var(--muted); }
   .pager { display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 10px; font-size: 12.5px; }
-  .pager button { background: #1e2740; border: 1px solid var(--border); color: var(--text);
+  .pager button { background: var(--btn-bg); border: 1px solid var(--border); color: var(--text);
                   padding: 4px 10px; border-radius: 5px; cursor: pointer; font-size: 12px; }
   .pager button:hover:not(:disabled) { border-color: var(--accent); }
   .pager button:disabled { opacity: .4; cursor: not-allowed; }
+  #themeToggle { background: transparent; border: none; color: var(--muted);
+                 width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center;
+                 border-radius: 6px; cursor: pointer; margin-left: 12px; padding: 0; vertical-align: middle; }
+  #themeToggle:hover { color: var(--text); background: var(--hover-bg); }
+  #themeToggle svg { width: 16px; height: 16px; }
 </style>
 </head>
 <body>
 <header>
   <h1>system_log TC Dashboard</h1>
-  <div class="dut"><span id="dutDot" class="dot unknown" title="연결 상태 미확인 — 아직 실행 이력 없음"></span>DUT 192.168.10.25 <span id="channelBadge" class="badge channel-ssh" title="TC 실행에 사용되는 연결 채널">SSH</span></div>
+  <div class="dut"><span id="dutDot" class="dot unknown" title="연결 상태 미확인 — 아직 실행 이력 없음"></span>DUT 192.168.10.25 <span id="channelBadge" class="badge channel-ssh" title="TC 실행에 사용되는 연결 채널">SSH</span><button id="themeToggle" type="button" title="테마 전환"></button></div>
 </header>
 
 <main>
@@ -104,6 +115,21 @@
 
 <script>
 const $ = (sel) => document.querySelector(sel);
+
+const ICON_SUN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>';
+const ICON_MOON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>';
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  $('#themeToggle').innerHTML = theme === 'light' ? ICON_MOON : ICON_SUN;
+  localStorage.setItem('theme', theme);
+}
+$('#themeToggle').onclick = () => {
+  const next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+  applyTheme(next);
+};
+applyTheme(localStorage.getItem('theme') || 'dark');
+
 let pollTimer = null;
 let selectedRunId = null;   // 실행 이력에서 클릭해 선택한 run (없으면 전체 최신 현황판 표시)
 let selectedChannel = 'ssh';   // 다음 실행에 쓸 채널 (ssh/serial) — 항상 ssh로 시작, 버튼 클릭으로만 전환(새로고침하면 초기화)
