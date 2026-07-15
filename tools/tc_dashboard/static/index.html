@@ -62,17 +62,32 @@
                   padding: 4px 10px; border-radius: 5px; cursor: pointer; font-size: 12px; }
   .pager button:hover:not(:disabled) { border-color: var(--accent); }
   .pager button:disabled { opacity: .4; cursor: not-allowed; }
-  #themeToggle { background: transparent; border: none; color: var(--muted);
-                 width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center;
-                 border-radius: 6px; cursor: pointer; margin-left: 12px; padding: 0; vertical-align: middle; }
-  #themeToggle:hover { color: var(--text); background: var(--hover-bg); }
-  #themeToggle svg { width: 16px; height: 16px; }
+  #themeToggle { position: relative; width: 44px; height: 22px; margin-left: 12px; padding: 0 4px;
+                 display: inline-flex; align-items: center; justify-content: space-between;
+                 background: var(--panel); border: 1px solid var(--border); border-radius: 11px;
+                 cursor: pointer; vertical-align: middle; }
+  #themeToggle:hover { border-color: var(--accent); }
+  #themeToggle svg { width: 12px; height: 12px; color: var(--muted); position: relative; z-index: 1;
+                      opacity: 0; stroke-width: 2; transition: opacity .15s ease, color .15s ease; }
+  #themeToggle .thumb { position: absolute; top: 1px; left: 1px; width: 18px; height: 18px; border-radius: 50%;
+                         box-shadow: 0 1px 3px rgba(0,0,0,.35);
+                         transition: transform .18s ease, background .18s ease; }
+  #themeToggle[data-active="light"] .thumb { transform: translateX(0); background: var(--muted); }
+  #themeToggle[data-active="dark"] .thumb { transform: translateX(22px); background: var(--btn-bg); }
+  #themeToggle[data-active="light"] .icon-sun,
+  #themeToggle[data-active="dark"] .icon-moon { opacity: 1; color: #fff; stroke-width: 2.5; }
 </style>
 </head>
 <body>
 <header>
   <h1>system_log TC Dashboard</h1>
-  <div class="dut"><span id="dutDot" class="dot unknown" title="연결 상태 미확인 — 아직 실행 이력 없음"></span>DUT 192.168.10.25 <span id="channelBadge" class="badge channel-ssh" title="TC 실행에 사용되는 연결 채널">SSH</span><button id="themeToggle" type="button" title="테마 전환"></button></div>
+  <div class="dut"><span id="dutDot" class="dot unknown" title="연결 상태 미확인 — 아직 실행 이력 없음"></span>DUT 192.168.10.25 <span id="channelBadge" class="badge channel-ssh" title="TC 실행에 사용되는 연결 채널">SSH</span>
+    <button id="themeToggle" type="button" title="테마 전환">
+      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+      <span class="thumb"></span>
+      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>
+    </button>
+  </div>
 </header>
 
 <main>
@@ -116,12 +131,9 @@
 <script>
 const $ = (sel) => document.querySelector(sel);
 
-const ICON_SUN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>';
-const ICON_MOON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>';
-
 function applyTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
-  $('#themeToggle').innerHTML = theme === 'light' ? ICON_MOON : ICON_SUN;
+  $('#themeToggle').setAttribute('data-active', theme);
   localStorage.setItem('theme', theme);
 }
 $('#themeToggle').onclick = () => {
