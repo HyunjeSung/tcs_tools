@@ -37,6 +37,33 @@
   .tc-btn:hover:not(:disabled) { border-color: var(--accent); }
   .tc-btn:disabled { opacity: .45; cursor: not-allowed; }
   .tc-btn .note { display: block; font-size: 11px; color: var(--warn); margin-top: 2px; }
+  .custom-hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+  .custom-label { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  .custom-dropdown { position: relative; margin-bottom: 10px; }
+  .custom-dropdown-btn { width: 100%; display: flex; align-items: center; justify-content: space-between;
+                          gap: 8px; background: var(--btn-bg); border: 1px solid var(--border); color: var(--text);
+                          padding: 9px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; text-align: left; }
+  .custom-dropdown-btn:hover:not(:disabled) { border-color: var(--accent); }
+  .custom-dropdown-btn:disabled { opacity: .45; cursor: not-allowed; }
+  .custom-dropdown-btn .placeholder { color: var(--muted); }
+  .custom-dropdown-btn .caret { width: 13px; height: 13px; flex-shrink: 0; stroke: currentColor; fill: none;
+                                 stroke-width: 2.5; transition: transform .15s ease; }
+  .custom-dropdown.open .custom-dropdown-btn { border-color: var(--accent); }
+  .custom-dropdown.open .custom-dropdown-btn .caret { transform: rotate(180deg); }
+  .custom-dropdown-panel { display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0;
+                            background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+                            padding: 6px; max-height: 260px; overflow-y: auto; z-index: 20;
+                            box-shadow: 0 8px 24px rgba(0,0,0,.3); }
+  .custom-dropdown.open .custom-dropdown-panel { display: block; }
+  .custom-item { padding: 7px 8px; border-radius: 5px; cursor: pointer; font-size: 13px; user-select: none; }
+  .custom-item:hover { background: var(--hover-bg); }
+  .custom-item.selected { background: var(--selected-bg); color: var(--accent); font-weight: 600; }
+  .custom-actions { display: flex; gap: 8px; align-items: center; }
+  .custom-actions button.link { background: none; border: none; color: var(--accent); cursor: pointer;
+                                 font-size: 12px; padding: 0; text-decoration: underline; }
+  #customRunBtn { flex: 1; background: var(--accent); border: none; color: #fff; padding: 9px 10px;
+                  border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; }
+  #customRunBtn:disabled { opacity: .45; cursor: not-allowed; }
   .right-col { display: flex; flex-direction: column; gap: 16px; }
   #log { background: var(--log-bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px;
          font-family: "SF Mono", Consolas, monospace; font-size: 12px; white-space: pre-wrap;
@@ -100,7 +127,26 @@
 
   <section>
     <h2>TC 실행</h2>
-    <div id="tcButtons"></div>
+
+    <div class="custom-label">선택 실행 (TC01~16 중 1개 선택 — TC10은 reboot로 별도 실행)</div>
+    <div id="customDropdown" class="custom-dropdown">
+      <button id="customDropdownBtn" type="button" class="custom-dropdown-btn">
+        <span id="customDropdownLabel" class="placeholder">TC 선택...</span>
+        <svg class="caret" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+      </button>
+      <div id="customDropdownPanel" class="custom-dropdown-panel">
+        <div id="customList"></div>
+      </div>
+    </div>
+    <div class="custom-actions">
+      <button id="customRunBtn" type="button" disabled>선택 실행</button>
+    </div>
+
+    <hr class="custom-hr">
+
+    <button id="fullRunBtn" class="tc-btn" type="button">전체 실행 (TC01~09, 11~16)<span class="note">TC10(reboot) 제외 전체 회귀 세트. TC04/11/14/15/16 대기 포함 — 20분 이상 소요</span></button>
+    <button id="tc10Btn" class="tc-btn" type="button">TC10-pre (reboot 발생)<span class="note">실행 후 DUT 재부팅. 부팅 완료 후 TC10-post 실행</span></button>
+    <button id="tc10PostBtn" class="tc-btn" type="button">TC10-post (reboot 후)<span class="note">TC10-pre 실행 + DUT 재부팅 완료 후 사용</span></button>
   </section>
 
   <div class="right-col">
@@ -161,22 +207,66 @@ $('#channelBadge').onclick = () => {
 $('#channelBadge').style.cursor = 'pointer';
 applyChannelBadge();
 
-async function loadCatalog() {
-  const tcs = await fetch('/api/tcs').then(r => r.json());
-  const box = $('#tcButtons');
-  box.innerHTML = '';
-  tcs.forEach(tc => {
-    const btn = document.createElement('button');
-    btn.className = 'tc-btn';
-    btn.dataset.id = tc.id;
-    btn.innerHTML = tc.label + (tc.note ? `<span class="note">${tc.note}</span>` : '');
-    btn.onclick = () => runTc(tc.id, btn);
-    box.appendChild(btn);
+let selectedCustom = null;   // 단일 선택 — 선택된 TC id 하나 또는 null
+
+function updateCustomUi() {
+  const labelEl = $('#customDropdownLabel');
+  if (selectedCustom) {
+    labelEl.textContent = selectedCustom;
+    labelEl.classList.remove('placeholder');
+  } else {
+    labelEl.textContent = 'TC 선택...';
+    labelEl.classList.add('placeholder');
+  }
+  $('#customRunBtn').disabled = !selectedCustom;
+  document.querySelectorAll('#customList .custom-item').forEach(el => {
+    el.classList.toggle('selected', el.dataset.id === selectedCustom);
   });
 }
 
+function openCustomDropdown(open) {
+  $('#customDropdown').classList.toggle('open', open);
+}
+
+async function loadCustomOptions() {
+  const tcs = await fetch('/api/custom_tcs').then(r => r.json());
+  const list = $('#customList');
+  list.innerHTML = '';
+  tcs.forEach(tc => {
+    const item = document.createElement('div');
+    item.className = 'custom-item';
+    item.dataset.id = tc.id;
+    item.textContent = tc.id;
+    item.onclick = () => {
+      selectedCustom = tc.id;
+      updateCustomUi();
+      openCustomDropdown(false);
+    };
+    list.appendChild(item);
+  });
+  updateCustomUi();
+}
+
+$('#customDropdownBtn').onclick = (e) => {
+  e.stopPropagation();
+  openCustomDropdown(!$('#customDropdown').classList.contains('open'));
+};
+$('#customDropdownPanel').onclick = (e) => e.stopPropagation();   // 패널 안 클릭은 바깥클릭 취급 안 함
+document.addEventListener('click', () => openCustomDropdown(false));
+
+$('#customRunBtn').onclick = () => runCustomTc();
+
+$('#fullRunBtn').onclick = () => runTc('default', $('#fullRunBtn'));
+$('#tc10Btn').onclick = () => runTc('tc10-pre', $('#tc10Btn'));
+$('#tc10PostBtn').onclick = () => runTc('tc10-post', $('#tc10PostBtn'));
+
 function setButtonsDisabled(disabled) {
-  document.querySelectorAll('.tc-btn').forEach(b => b.disabled = disabled);
+  $('#fullRunBtn').disabled = disabled;
+  $('#tc10Btn').disabled = disabled;
+  $('#tc10PostBtn').disabled = disabled;
+  $('#customDropdownBtn').disabled = disabled;
+  $('#customRunBtn').disabled = disabled || !selectedCustom;
+  if (disabled) openCustomDropdown(false);
 }
 
 async function runTc(tcId, btn) {
@@ -197,6 +287,33 @@ async function runTc(tcId, btn) {
     selectedRunId = run_id;   // 방금 시작한 run 을 현황판에 바로 반영
     $('#runningLabel').textContent = `— ${run_id}`;
     historyPage = 1;   // 방금 시작한 run이 이력 1페이지 맨 위에 오도록
+    refreshHistory();
+    pollRun(run_id);
+  } catch (e) {
+    $('#log').textContent = `요청 오류: ${e}`;
+    setButtonsDisabled(false);
+  }
+}
+
+async function runCustomTc() {
+  if (!selectedCustom) return;
+  setButtonsDisabled(true);
+  $('#log').textContent = `[선택 실행: ${selectedCustom}] 시작 중...`;
+  try {
+    const res = await fetch('/api/run', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tc_id: 'custom', tc_ids: [selectedCustom], channel: selectedChannel }),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      $('#log').textContent = `실행 실패: ${err.detail}`;
+      setButtonsDisabled(false);
+      return;
+    }
+    const { run_id } = await res.json();
+    selectedRunId = run_id;
+    $('#runningLabel').textContent = `— ${run_id}`;
+    historyPage = 1;
     refreshHistory();
     pollRun(run_id);
   } catch (e) {
@@ -352,7 +469,7 @@ async function initDutState() {
 }
 
 async function init() {
-  await loadCatalog();
+  await loadCustomOptions();
   await refreshStatus();
   await refreshHistory();
   await initDutState();

@@ -12,6 +12,7 @@ import subprocess
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
+from typing import List, Optional
 
 import markdown as md_lib
 from fastapi import FastAPI, HTTPException, Response
@@ -103,10 +104,11 @@ def _wsl_path(win_path: str) -> Path:
 
 # tc_system_log.sh 가 실제로 지원하는 --flag 목록 (스크립트 case 문 기준).
 # TC01/02/03/06/07/08/09 는 단독 flag가 없어 기본(default) 실행에만 포함됨.
+# TC10은 reboot로 SSH 세션이 끊겨 default 실행 안에서 이어갈 수 없어 유일하게 제외.
 CATALOG = [
-    {"id": "default", "label": "전체 실행 (TC01,02,03,04,05,06,07,08,09,12,13)", "flag": None,
-     "timeout": 1800, "reboot": False,
-     "note": "기본 회귀 세트. TC04 대기 포함, 수 분 소요"},
+    {"id": "default", "label": "전체 실행 (TC01~09, 11~16)", "flag": None,
+     "timeout": 3600, "reboot": False,
+     "note": "TC10(reboot) 제외 전체 회귀 세트. TC04/11/14/15/16 대기 포함 — 20분 이상 소요"},
     {"id": "tc02", "label": "TC02 24시간 타이머", "flag": "--tc02",
      "timeout": 180, "reboot": False, "note": "system_log 프로세스 kill 수반 (내부 타이머 상태 초기화)"},
     {"id": "tc04", "label": "TC04 대용량 journal timeout", "flag": "--tc04",
@@ -127,8 +129,25 @@ CATALOG = [
      "timeout": 420, "reboot": False, "note": None},
     {"id": "tc14", "label": "TC14 RTC 동일 시작 병합", "flag": "--tc14",
      "timeout": 180, "reboot": False, "note": "system_log 프로세스 kill 수반"},
+    {"id": "tc15", "label": "TC15 rotate_sync compress 실패 보존", "flag": "--tc15",
+     "timeout": 420, "reboot": False,
+     "note": "journal 대량(raw ~210MB) 주입으로 180s 압축 타임아웃 강제 유발, 5분+ 소요"},
+    {"id": "tc16", "label": "TC16 boot_log compress 실패 보존", "flag": "--tc16",
+     "timeout": 450, "reboot": False,
+     "note": "TC15와 동일 주입 + system_log kill 수반, 5분+ 소요"},
 ]
 CATALOG_MAP = {c["id"]: c for c in CATALOG}
+
+# 대시보드 "선택 실행" 체크박스용 — tc_system_log.sh 의 `--only TC01,TC03,...` 가 지원하는
+# TC 목록과 대략적인 개별 소요시간(초). TC10은 reboot로 세션이 끊겨 다른 TC와 한 번에
+# 묶을 수 없으므로 선택 대상에서 제외(--tc10-pre/post 전용 버튼만 사용).
+# 순서 = tc_system_log.sh 의 표준 실행 순서와 동일.
+CUSTOM_TC_TIMEOUTS = {
+    "TC01": 90, "TC02": 180, "TC03": 90, "TC04": 300, "TC05": 120,
+    "TC06": 90, "TC07": 90, "TC08": 90, "TC09": 90,
+    "TC11": 420, "TC12": 120, "TC13": 120, "TC14": 180, "TC15": 420, "TC16": 450,
+}
+CUSTOM_TC_ORDER = list(CUSTOM_TC_TIMEOUTS.keys())
 
 app = FastAPI(title="system_log TC Dashboard")
 
@@ -138,6 +157,7 @@ current_run = {"run_id": None}
 class RunRequest(BaseModel):
     tc_id: str
     channel: str = "ssh"
+    tc_ids: Optional[List[str]] = None  # tc_id == "custom" 일 때만 사용 — 선택된 TC 목록(예: ["TC01","TC03"])
 
 
 def ssh_argv(remote_cmd: str):
@@ -752,6 +772,12 @@ def api_tcs():
     return CATALOG
 
 
+@app.get("/api/custom_tcs")
+def api_custom_tcs():
+    """'선택 실행' 체크박스 목록 — id/타임아웃을 서버(CUSTOM_TC_TIMEOUTS)에서 그대로 내려준다."""
+    return [{"id": tc, "timeout": CUSTOM_TC_TIMEOUTS[tc]} for tc in CUSTOM_TC_ORDER]
+
+
 @app.get("/api/status")
 def api_status():
     if STATUS_FILE.exists():
@@ -847,15 +873,38 @@ def api_run_result_pdf(run_id: str):
 
 @app.post("/api/run")
 async def api_run(req: RunRequest):
-    if req.tc_id not in CATALOG_MAP:
-        raise HTTPException(400, "unknown tc_id")
     if req.channel not in ("ssh", "serial"):
         raise HTTPException(400, "unknown channel")
     if current_run["run_id"] is not None:
         raise HTTPException(409, f"이미 실행 중인 run: {current_run['run_id']}")
+
+    if req.tc_id == "custom":
+        selected = req.tc_ids or []
+        unknown = [t for t in selected if t not in CUSTOM_TC_TIMEOUTS]
+        if unknown:
+            raise HTTPException(400, f"지원하지 않는 TC: {', '.join(unknown)}")
+        # 사용자가 체크박스를 어떤 순서로 눌렀든, 스크립트가 실행할 표준 순서(TC01~16)로 정렬.
+        ordered = [t for t in CUSTOM_TC_ORDER if t in selected]
+        if not ordered:
+            raise HTTPException(400, "선택된 TC가 없음")
+        # verify_timer_loop_started + (필요시) setup_rotate 오버헤드 여유분.
+        timeout = 90 + sum(CUSTOM_TC_TIMEOUTS[t] for t in ordered)
+        entry = {
+            "id": "custom",
+            "label": f"선택 실행 ({', '.join(ordered)})",
+            "flag": f"--only {','.join(ordered)}",
+            "timeout": timeout,
+            "reboot": False,
+            "note": None,
+        }
+    else:
+        if req.tc_id not in CATALOG_MAP:
+            raise HTTPException(400, "unknown tc_id")
+        entry = CATALOG_MAP[req.tc_id]
+
     run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{req.tc_id}"
     current_run["run_id"] = run_id
-    asyncio.create_task(run_tc(run_id, CATALOG_MAP[req.tc_id], req.channel))
+    asyncio.create_task(run_tc(run_id, entry, req.channel))
     return {"run_id": run_id}
 
 

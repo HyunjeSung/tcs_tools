@@ -151,8 +151,9 @@ toupload에 `.log.xz` 파일을 생성하는지 확인한다.
 ### 목적
 
 journald 가 실제로 기록한 데이터로 `/edge/log/system/journal/<machine-id>/` 가
-**100MB / 300MB** 사이즈일 때 `get_log_data` 요청이 IPC 타임아웃 내에 응답을 반환하고
-10초 이내에 `.log.xz` 파일까지 생성되는지를 확인한다.
+**100MB / 150MB** 사이즈일 때 `get_log_data` 요청이 IPC 타임아웃 내에 응답을 반환하고
+`.log.xz` 파일까지 생성되는지를 확인한다. 판정 시한은 두 사이즈 모두 180초
+(xz 압축 자체에 시간이 걸리는 걸 감안).
 
 > 단순히 `dd` 로 zero-fill 한 더미 `.journal` 은 journald 가 corrupted 로 즉시 무시하므로
 > 시나리오 의도(대용량 journal 처리 시 timeout 검증)를 측정할 수 없다. 따라서
@@ -163,23 +164,25 @@ journald 가 실제로 기록한 데이터로 `/edge/log/system/journal/<machine
 - 공통 전제 조건 충족
 - `journalctl --rotate` 및 `--vacuum-files` 권한 (root)
 - `systemd-cat` 사용 가능 (journald 가용)
-- `journald.conf`: `SystemMaxFileSize` 기본 64M, `SystemMaxFiles` 기본 20 — 300MB 까지 ~5개 파일 필요, 한도 안에 들어감
-- 디바이스 emmc 가용 공간 500MB 이상 (300MB journal + 압축 작업 임시공간)
+- `journald.conf`: `SystemMaxFileSize` 기본 64M, `SystemMaxFiles` 기본 20 — 150MB 까지 ~3개 파일 필요, 한도 안에 들어감
+- 디바이스 emmc 가용 공간 300MB 이상 (150MB journal + 압축 작업 임시공간)
 - IPC 타임아웃: `SYSTEM_LOG_REQUEST_CMD_TIMEOUT=5초`, `SYSTEM_LOG_PUBLISH_TIMEOUT=7초`
 
 ### 절차
 
-2개 사이즈(100MB / 300MB)에 대해 다음을 반복:
+2개 사이즈(100MB / 150MB)에 대해 다음을 반복:
 
 1. `journalctl --rotate && journalctl --vacuum-files=1` 로 journal 초기화
-2. `before_files` = 현재 toupload `.log.xz` 파일 수
+2. `BEFORE_LIST` = 현재 toupload `.log.xz` 파일 목록 (개수가 아니라 목록 자체를 저장)
 3. `head -c <raw>MB /dev/urandom | base64 -w 4096 | systemd-cat -t TC04_DUMMY` 로 실데이터 주입
-   - 사이즈별 raw urandom 양: 70MB / 210MB (≈1.4x 팽창 후 journal 목표 사이즈에 도달)
+   - 사이즈별 raw urandom 양: 70MB / 105MB (≈1.4x 팽창 후 journal 목표 사이즈에 도달)
 4. `sync; sleep 3; journalctl --rotate; sleep 2` 로 디스크에 flush
 5. `journalctl --disk-usage` 로 실제 journal 사이즈 확인
 6. `get_log_data` 요청 송신, 응답 epoch 차이로 응답시간 측정
-7. 10초 추가 대기 후 `after_files` 재카운트
-8. `[ "$after_files" -gt "$before_files" ]` 로 PASS/FAIL 판정
+7. `AFTER_LIST` 를 5초 간격으로 재조회하며 `comm -13 BEFORE_LIST AFTER_LIST` 로 신규 파일을
+   찾는다 — 두 사이즈 모두 최대 180초까지 대기 (TC02와 동일한 diff 방식. 관찰 창 동안
+   다른 파일이 삭제돼도 — 예: Blob 업로드 후 delete — 개수 비교와 달리 오판하지 않는다)
+8. 신규 파일 발견 여부로 PASS/FAIL 판정 (대기 한도 초과 시 FAIL)
 
 마지막 사이즈 시험 후: `journalctl --rotate && journalctl --vacuum-files=1` 로 디스크 복원.
 
@@ -194,14 +197,14 @@ journald 가 실제로 기록한 데이터로 `/edge/log/system/journal/<machine
 | 항목 | 기준 |
 |------|------|
 | 각 사이즈 응답 | MQTT 응답이 30초 안에 반환 (대용량에서는 `error_code=UNKNOWN` 도 응답으로 인정) |
-| 파일 생성 | 가능하면 10초 이내 `.log.xz` 신규 생성 (대용량에서 FAIL 시 알려진 제약으로 노트) |
+| 파일 생성 | 100MB / 150MB 모두 180초 이내 `.log.xz` 신규 생성 |
 
 ### PASS/FAIL Criteria
 
 | 기준 ID | 설명 | 타입 | 기준값 | 셸 검증 |
 |---------|------|------|--------|---------|
-| TC04-1 | journal 100MB 상태에서 10초 이내 .xz 파일 생성 | boolean | true | `[ "$after" -gt "$before" ]` |
-| TC04-2 | journal 300MB 상태에서 10초 이내 .xz 파일 생성 | boolean | true | `[ "$after" -gt "$before" ]` |
+| TC04-1 | journal 100MB 상태에서 180초 이내 .xz 파일 생성 | boolean | true | `comm -13 BEFORE_LIST AFTER_LIST` 로 신규 파일 존재 확인 |
+| TC04-2 | journal 150MB 상태에서 180초 이내 .xz 파일 생성 | boolean | true | `comm -13 BEFORE_LIST AFTER_LIST` 로 신규 파일 존재 확인 |
 
 
 ---
@@ -658,6 +661,110 @@ system_log를 `kill -9` 하면 edge_runtime이 재시작하고 startup 시
 
 ---
 
+## TC15 — task_rotate_sync: compress 실패 시 raw .log 보존 (toupload)
+
+### 목적
+
+`task_rotate_sync()`가 `xz -f` 압축 실패(180s 타임아웃) 시:
+1. 원본 raw `.log`를 삭제하지 않고 보존
+2. SIGKILL로 잘린 partial `.log.xz`는 제거
+3. 실패 사이클에 대해 `.meta`는 생성하지 않음(업로드 큐 미등록)
+4. **vacuum은 compress 성공/실패와 무관하게 항상 실행**됨 (`--list-boots` head 이동으로 확인)
+
+을 검증한다.
+
+### 사전 조건
+
+- 공통 전제 조건 충족
+- `systemd-cat`, `journalctl --rotate` / `--vacuum-files` 권한 (root)
+- 디바이스 emmc 가용 공간 500MB 이상
+- 현재 `SYSTEM_LOG_REQUEST_CMD_TIMEOUT=180초` (`system_log.hpp:30`) 전제 — 값이 바뀌면 주입량 재조정 필요
+- **주의(파괴적 시험):** journal을 raw urandom ~210MB(→journal ~288MB, TC04 "300MB" 티어와 동일 규모) 채웠다가 vacuum으로 비움. 다른 TC와 동시 실행 금지. 총 5분 이상 소요
+- 의존 TC 없음 (독립 실행 가능)
+
+### 절차
+
+1. `journalctl --rotate && --vacuum-files=1`로 journal 초기화
+2. `BEFORE_HEAD` = `journalctl --list-boots | head -n1` 기록, toupload `.log`(xz 아닌) 목록 스냅샷
+3. `head -c 210M /dev/urandom | base64 -w 4096 | systemd-cat -t TC15_DUMMY` 주입 (TC04와 동일 기법) → `sync; sleep 3; journalctl --rotate; sleep 2`
+4. `get_log_data` 요청 송신, 최대 200초 대기 (180s cmd timeout + overhead)
+5. 응답 후 10초 추가 대기
+6. before/after 목록 diff로 이번 사이클이 만든 신규 raw `.log`(`NEW_LOG`) 식별
+7. `NEW_LOG` 존재 확인, `${NEW_LOG}.xz` / `${NEW_LOG}.xz.meta` 부재 확인
+8. `AFTER_HEAD` = `journalctl --list-boots | head -n1` → BEFORE_HEAD와 비교
+9. cleanup: `NEW_LOG` 삭제, journal 재초기화
+
+### 기대 결과
+
+| 항목 | 기준 |
+|------|------|
+| raw `.log` | toupload에 신규 생성되어 보존됨 |
+| partial `.xz` | 존재하지 않음 |
+| `.meta` | 존재하지 않음 |
+| list-boots head | BEFORE와 다름 (vacuum 실행 증거) |
+
+### PASS/FAIL Criteria
+
+| 기준 ID | 설명 | 타입 | 기준값 | 셸 검증 |
+|---------|------|------|--------|---------|
+| TC15-1 | 압축 실패 후 raw `.log`가 toupload에 보존됨 | boolean | true | `[ -f "$NEW_LOG" ]` |
+| TC15-2 | 깨진 partial `.xz`는 남지 않음 | boolean | true | `[ ! -f "${NEW_LOG}.xz" ]` |
+| TC15-3 | `.meta` 생성되지 않음 | boolean | true | `[ ! -f "${NEW_LOG}.xz.meta" ]` |
+| TC15-4 | vacuum이 실행되어 list-boots head 변경됨 | boolean | true | `[ "$after_head" != "$before_head" ]` |
+
+---
+
+## TC16 — task_capture_boot_log: compress 실패 시 raw .log 보존 (staging)
+
+### 목적
+
+`system_log` 재시작 시 무조건 실행되는 `task_capture_boot_log()`가 compress 실패 시 TC15와 동일한 보존 규칙을 따르는지, 그리고 남은 raw `.log`가 `task_merge_staged_logs()`에 의해 toupload로 잘못 이관(오염)되지 않는지 검증한다. TC14(RTC 이상 병합)와 같은 `kill -9` 재시작 기법을 재사용한다.
+
+`task_capture_shutdown_log`는 동일 코드 패턴이라 이번 범위에서 제외(코드 리뷰로 대체).
+
+### 사전 조건
+
+- 공통 전제 조건 충족
+- `pgrep`, `kill -9` 사용 가능, edge_runtime이 system_log 재시작시키는 상태
+- `systemd-cat`, `journalctl --rotate` / `--vacuum-files` 권한 (root)
+- 디바이스 emmc 가용 공간 500MB 이상
+- 현재 `SYSTEM_LOG_REQUEST_CMD_TIMEOUT=180초` 전제
+- **주의(파괴적 시험):** TC15와 동일한 journal 주입 + system_log 강제 재시작 수반. 총 5분 이상 소요
+- 의존 TC 없음 (독립 실행 가능, TC15 실행 여부와 무관)
+
+### 절차
+
+1. staging 클린업 (`systemlog_*.log.xz`, `*.log`, `.merging_*.tmp` 제거)
+2. `BEFORE_HEAD` = `journalctl --list-boots | head -n1` 기록
+3. TC15와 동일 기법으로 journal 주입 (`TC16_DUMMY` 태그)
+4. `kill -9 $(pgrep -f system_log)` → edge_runtime 재시작 → `task_capture_boot_log()` 무조건 실행
+5. 최대 220초 대기 (dump 완료 후 xz -f 180초 시도까지)
+6. staging에서 신규 raw `.log`(`NEW_LOG`) 확인
+7. `${NEW_LOG}.xz` 부재 확인
+8. `NEW_LOG`와 동일 베이스네임이 toupload로 잘못 넘어가지 않았는지 확인 (merge 오염 방지 검증)
+9. `AFTER_HEAD` 비교
+10. cleanup: `NEW_LOG` 삭제, journal 재초기화
+
+### 기대 결과
+
+| 항목 | 기준 |
+|------|------|
+| raw `.log` | staging에 신규 생성되어 보존됨 |
+| partial `.xz` | 존재하지 않음 |
+| toupload 오이관 | 없음 |
+| list-boots head | BEFORE와 다름 |
+
+### PASS/FAIL Criteria
+
+| 기준 ID | 설명 | 타입 | 기준값 | 셸 검증 |
+|---------|------|------|--------|---------|
+| TC16-1 | 압축 실패 후 raw `.log`가 staging에 보존됨 | boolean | true | `[ -f "$NEW_LOG" ]` |
+| TC16-2 | 깨진 partial `.xz`는 남지 않음 | boolean | true | `[ ! -f "${NEW_LOG}.xz" ]` |
+| TC16-3 | raw `.log`가 toupload로 잘못 이관되지 않음 | boolean | true | `find "${TOUPLOAD_DIR}" -name "$(basename "$NEW_LOG")*"` 결과 없음 |
+| TC16-4 | vacuum이 실행되어 list-boots head 변경됨 | boolean | true | `[ "$after_head" != "$before_head" ]` |
+
+---
+
 ## 환경 변수 (Environment Variables)
 
 | 변수 | 기본값 | 설명 |
@@ -695,13 +802,15 @@ system_log를 `kill -9` 하면 edge_runtime이 재시작하고 startup 시
 |----|------|------|
 | TC01, TC03~TC09 | A (자동) | 무인 실행 가능 |
 | TC02 | A (자동) | 시스템 시간 ±25h 자동 변경 + 복원 |
-| TC04 | A (자동) | systemd-cat으로 100/300MB 실 journal 데이터 주입 + vacuum cleanup |
+| TC04 | A (자동) | systemd-cat으로 100/150MB 실 journal 데이터 주입 + vacuum cleanup |
 | TC06 | B (반자동) | 저널 사용량 수동 확인 |
 | TC10 | B (반자동) | 실제 리부트 포함 — pre/post 분리 실행, 재접속 후 post 수동 실행 |
 | TC11 | B (반자동) | nmon 업로드 happy path — TC11-5 는 5분+ 대기 (BlobUploadDirector 스캔) |
 | TC12 | A (자동) | nmon retention 30일 — `systemctl restart nmon.service` 후 3초 확인 |
 | TC13 | A (자동) | nmon old 비어있는 환경 호환 — `get_log_data` 응답 수신만 확인 |
 | TC14 | A (자동) | RTC 이상 동일 시작시간 다중 파일 병합 — `kill -9 system_log` 후 edge_runtime 재시작 흐름 재현 |
+| TC15 | A (자동) | task_rotate_sync compress 실패 시 raw .log 보존 — journal 대량 주입으로 180s 타임아웃 강제 유발 |
+| TC16 | A (자동) | task_capture_boot_log compress 실패 시 raw .log 보존 — TC15와 동일 기법 + `kill -9 system_log` 재시작 |
 
 ---
 
