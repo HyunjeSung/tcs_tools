@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
-<title>system_log TC Dashboard</title>
+<title>AC Gen2 EMS TC Dashboard</title>
 <style>
   :root {
     --bg: #0f1420; --panel: #171d2e; --border: #2a3348; --text: #e6e9f0;
@@ -15,8 +15,50 @@
     --btn-bg: #eef1f8; --log-bg: #f7f8fb; --hover-bg: #eef1f8; --selected-bg: #e2e8f7;
   }
   * { box-sizing: border-box; }
-  body { margin: 0; font-family: -apple-system, "Segoe UI", Pretendard, sans-serif;
+  html, body { margin: 0; height: 100%; }
+  body { font-family: -apple-system, "Segoe UI", Pretendard, sans-serif;
          background: var(--bg); color: var(--text); font-size: 14px; }
+
+  /* ---------- app shell (sidebar + content) ---------- */
+  .app-shell { display: flex; min-height: 100vh; align-items: stretch; position: relative; }
+  .sidebar { width: 220px; flex-shrink: 0; background: var(--panel);
+             display: flex; flex-direction: column; overflow: hidden;
+             transition: width .18s ease; }
+  /* 접으면 아이콘 레일이 아니라 완전히 사라짐 — 남는 건 아래 고정 토글 버튼 하나뿐. */
+  .sidebar.collapsed { width: 0; }
+  .sidebar-head { display: flex; align-items: center; justify-content: center; gap: 8px;
+                  padding: 14px 12px 14px 46px; min-height: 51px; }
+  .sidebar-head .brand { font-size: 13px; font-weight: 700; color: var(--muted); text-transform: uppercase;
+                          letter-spacing: .04em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* 사이드바 안팎 어디서든 같은 자리(좌상단 고정)에 떠서 접기/펼치기를 담당하는 버튼.
+     배경 없이 아이콘만 반투명하게 숨죽이고 있다가 hover하면 또렷해짐 — cursor.com/agents 스타일 참고. */
+  .floating-toggle { position: fixed; top: 14px; left: 14px; z-index: 100;
+                      background: none; border: 1px solid transparent; color: var(--muted);
+                      border-radius: 7px; padding: 7px; cursor: pointer;
+                      display: flex; align-items: center; justify-content: center;
+                      opacity: .5; box-shadow: none;
+                      transition: opacity .15s ease, border-color .15s ease, color .15s ease, background .15s ease; }
+  .floating-toggle:hover { opacity: 1; background: var(--hover-bg); color: var(--text); }
+  .floating-toggle svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 2; }
+  .app-list { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 3px; }
+  .app-item { display: flex; align-items: center; gap: 10px; padding: 8px 9px; border-radius: 7px;
+              cursor: pointer; color: var(--text); border: 1px solid transparent; white-space: nowrap; }
+  .app-item:hover { background: var(--hover-bg); }
+  .app-item.active { background: var(--selected-bg); color: var(--accent); }
+  .app-item .avatar { width: 26px; height: 26px; border-radius: 7px; background: var(--btn-bg);
+                       display: flex; align-items: center; justify-content: center; font-size: 11px;
+                       font-weight: 700; flex-shrink: 0; color: var(--muted); }
+  .app-item.active .avatar { background: var(--accent); color: #fff; }
+  .app-item .meta { min-width: 0; overflow: hidden; }
+  .app-item .name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .app-item .sub { font-size: 10.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .app-item.active .sub { color: var(--accent); opacity: .8; }
+  .content { flex: 1; min-width: 0; display: flex; flex-direction: column; transition: padding-left .18s ease; }
+  /* 사이드바가 접히면 고정 토글 버튼이 헤더 타이틀과 같은 자리에 겹치므로, 접힌 동안만
+     content 전체를 버튼 폭만큼 오른쪽으로 밀어낸다 (펼쳐진 상태는 사이드바 자체가 이미
+     공간을 차지하므로 그대로 둠). */
+  .sidebar.collapsed ~ .content { padding-left: 46px; }
+
   header { display: flex; align-items: center; justify-content: space-between;
            padding: 14px 24px; border-bottom: 1px solid var(--border); background: var(--panel); }
   header h1 { font-size: 17px; margin: 0; }
@@ -24,7 +66,7 @@
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
   .dot.on { background: var(--pass); } .dot.off { background: var(--fail); }
   .dot.unknown { background: var(--muted); }
-  main { display: grid; grid-template-columns: 320px 1fr; gap: 16px; padding: 16px 24px; }
+  main { display: grid; grid-template-columns: 320px 1fr; gap: 16px; padding: 16px 24px; align-content: start; }
   .cards { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 4px; }
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; }
   .card .num { font-size: 24px; font-weight: 700; }
@@ -37,6 +79,7 @@
   .tc-btn:hover:not(:disabled) { border-color: var(--accent); }
   .tc-btn:disabled { opacity: .45; cursor: not-allowed; }
   .tc-btn .note { display: block; font-size: 11px; color: var(--warn); margin-top: 2px; }
+  .empty-hint { font-size: 12.5px; color: var(--muted); padding: 6px 2px; }
   .custom-hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
   .custom-label { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
   .custom-dropdown { position: relative; margin-bottom: 10px; }
@@ -103,76 +146,93 @@
   #themeToggle[data-active="dark"] .thumb { transform: translateX(22px); background: var(--btn-bg); }
   #themeToggle[data-active="light"] .icon-sun,
   #themeToggle[data-active="dark"] .icon-moon { opacity: 1; color: #fff; stroke-width: 2.5; }
+
+  @media (max-width: 860px) {
+    main { grid-template-columns: 1fr; }
+  }
 </style>
 </head>
 <body>
-<header>
-  <h1>system_log TC Dashboard</h1>
-  <div class="dut"><span id="dutDot" class="dot unknown" title="연결 상태 미확인 — 아직 실행 이력 없음"></span>DUT 192.168.10.25 <span id="channelBadge" class="badge channel-ssh" title="TC 실행에 사용되는 연결 채널">SSH</span>
-    <button id="themeToggle" type="button" title="테마 전환">
-      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
-      <span class="thumb"></span>
-      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>
-    </button>
-  </div>
-</header>
+<div class="app-shell">
+  <button id="sidebarToggle" class="floating-toggle" type="button" title="사이드바 접기/펼치기">
+    <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+  </button>
+  <aside id="sidebar" class="sidebar">
+    <div class="sidebar-head">
+      <div class="brand">Unified Edge APPS</div>
+    </div>
+    <nav id="appList" class="app-list"></nav>
+  </aside>
 
-<main>
-  <div class="cards">
-    <div class="card"><div class="num" id="cardTotal">-</div><div class="lbl">전체 케이스</div></div>
-    <div class="card pass"><div class="num" id="cardPass">-</div><div class="lbl">PASS</div></div>
-    <div class="card fail"><div class="num" id="cardFail">-</div><div class="lbl">FAIL</div></div>
-    <div class="card"><div class="num" id="cardLast">-</div><div class="lbl">최근 실행</div></div>
-  </div>
-
-  <section>
-    <h2>TC 실행</h2>
-
-    <div class="custom-label">선택 실행 (TC01~16 중 1개 선택 — TC10은 reboot로 별도 실행)</div>
-    <div id="customDropdown" class="custom-dropdown">
-      <button id="customDropdownBtn" type="button" class="custom-dropdown-btn">
-        <span id="customDropdownLabel" class="placeholder">TC 선택...</span>
-        <svg class="caret" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
-      </button>
-      <div id="customDropdownPanel" class="custom-dropdown-panel">
-        <div id="customList"></div>
+  <div class="content">
+    <header>
+      <h1 id="pageTitle">system_log TC Dashboard</h1>
+      <div class="dut"><span id="dutDot" class="dot unknown" title="연결 상태 미확인 — 아직 실행 이력 없음"></span>DUT 192.168.10.25 <span id="channelBadge" class="badge channel-ssh" title="TC 실행에 사용되는 연결 채널">SSH</span>
+        <button id="themeToggle" type="button" title="테마 전환">
+          <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+          <span class="thumb"></span>
+          <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>
+        </button>
       </div>
-    </div>
-    <div class="custom-actions">
-      <button id="customRunBtn" type="button" disabled>선택 실행</button>
-    </div>
+    </header>
 
-    <hr class="custom-hr">
+    <main>
+      <div class="cards">
+        <div class="card"><div class="num" id="cardTotal">-</div><div class="lbl">전체 케이스</div></div>
+        <div class="card pass"><div class="num" id="cardPass">-</div><div class="lbl">PASS</div></div>
+        <div class="card fail"><div class="num" id="cardFail">-</div><div class="lbl">FAIL</div></div>
+        <div class="card"><div class="num" id="cardLast">-</div><div class="lbl">최근 실행</div></div>
+      </div>
 
-    <button id="fullRunBtn" class="tc-btn" type="button">전체 실행 (TC01~09, 11~16)<span class="note">TC10(reboot) 제외 전체 회귀 세트. TC04/11/14/15/16 대기 포함 — 20분 이상 소요</span></button>
-    <button id="tc10Btn" class="tc-btn" type="button">TC10-pre (reboot 발생)<span class="note">실행 후 DUT 재부팅. 부팅 완료 후 TC10-post 실행</span></button>
-    <button id="tc10PostBtn" class="tc-btn" type="button">TC10-post (reboot 후)<span class="note">TC10-pre 실행 + DUT 재부팅 완료 후 사용</span></button>
-  </section>
+      <section>
+        <h2>TC 실행</h2>
 
-  <div class="right-col">
-    <section>
-      <h2>실행 로그 <span id="runningLabel" class="muted"></span></h2>
-      <div id="log">실행할 TC를 선택하세요.</div>
-    </section>
+        <div id="customSection">
+          <div class="custom-label" id="customLabel">선택 실행</div>
+          <div id="customDropdown" class="custom-dropdown">
+            <button id="customDropdownBtn" type="button" class="custom-dropdown-btn">
+              <span id="customDropdownLabel" class="placeholder">TC 선택...</span>
+              <svg class="caret" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+            </button>
+            <div id="customDropdownPanel" class="custom-dropdown-panel">
+              <div id="customList"></div>
+            </div>
+          </div>
+          <div class="custom-actions">
+            <button id="customRunBtn" type="button" disabled>선택 실행</button>
+          </div>
+          <hr class="custom-hr">
+        </div>
 
-    <section>
-      <h2>결과 현황판 <span id="statusLabel" class="muted">(최신 케이스별)</span></h2>
-      <table id="statusTable">
-        <thead><tr><th>TC</th><th>Case</th><th>설명</th><th>결과</th><th>Run</th><th>시각</th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </section>
+        <div id="catalogButtons"></div>
+      </section>
 
-    <section>
-      <h2>실행 이력</h2>
-      <table id="historyTable">
-        <thead><tr><th>Run ID</th><th>대상</th><th>채널</th><th>상태</th><th>PASS/FAIL</th><th>시작</th><th>종료</th><th>소요시간</th><th>결과</th></tr></thead>
-        <tbody></tbody>
-      </table>
-      <div id="historyPager" class="pager"></div>
-    </section>
+      <div class="right-col">
+        <section>
+          <h2>실행 로그 <span id="runningLabel" class="muted"></span></h2>
+          <div id="log">실행할 TC를 선택하세요.</div>
+        </section>
+
+        <section>
+          <h2>결과 현황판 <span id="statusLabel" class="muted">(최신 케이스별)</span></h2>
+          <table id="statusTable">
+            <thead><tr><th>TC</th><th>Case</th><th>설명</th><th>결과</th><th>Run</th><th>시각</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </section>
+
+        <section>
+          <h2>실행 이력</h2>
+          <table id="historyTable">
+            <thead><tr><th>Run ID</th><th>대상</th><th>채널</th><th>상태</th><th>PASS/FAIL</th><th>시작</th><th>종료</th><th>소요시간</th><th>결과</th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <div id="historyPager" class="pager"></div>
+        </section>
+      </div>
+    </main>
   </div>
-</main>
+</div>
 
 <script>
 const $ = (sel) => document.querySelector(sel);
@@ -187,6 +247,67 @@ $('#themeToggle').onclick = () => {
   applyTheme(next);
 };
 applyTheme(localStorage.getItem('theme') || 'dark');
+
+// ---------- sidebar ----------
+function applySidebarState(collapsed) {
+  $('#sidebar').classList.toggle('collapsed', collapsed);
+  localStorage.setItem('sidebarCollapsed', collapsed ? '1' : '0');
+}
+$('#sidebarToggle').onclick = () => {
+  applySidebarState(!$('#sidebar').classList.contains('collapsed'));
+};
+applySidebarState(localStorage.getItem('sidebarCollapsed') === '1');
+
+let apps = [];               // /api/apps 결과 캐시
+let currentAppId = localStorage.getItem('appId') || 'system_log';
+let currentAppLabel = currentAppId;
+let currentAppHasCustom = false;
+
+function renderAppList() {
+  const list = $('#appList');
+  list.innerHTML = '';
+  apps.forEach(a => {
+    const item = document.createElement('div');
+    item.className = 'app-item' + (a.id === currentAppId ? ' active' : '');
+    item.title = a.label;
+    item.innerHTML = `<div class="avatar">${escapeHtml(a.label.slice(0, 2).toUpperCase())}</div>
+      <div class="meta"><div class="name">${escapeHtml(a.label)}</div></div>`;
+    item.onclick = () => { if (a.id !== currentAppId) switchApp(a.id); };
+    list.appendChild(item);
+  });
+}
+
+async function loadApps() {
+  apps = await fetch('/api/apps').then(r => r.json());
+  if (!apps.find(a => a.id === currentAppId)) {
+    currentAppId = apps.length ? apps[0].id : 'system_log';
+  }
+  renderAppList();
+}
+
+async function switchApp(appId) {
+  currentAppId = appId;
+  localStorage.setItem('appId', appId);
+  selectedRunId = null;
+  selectedCustom = null;
+  historyPage = 1;
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  renderAppList();
+  await refreshAppMeta();
+  $('#log').textContent = '실행할 TC를 선택하세요.';
+  $('#runningLabel').textContent = '';
+  $('#statusLabel').textContent = '(최신 케이스별)';
+  await Promise.all([loadCustomOptions(), loadCatalogButtons(), refreshStatus(), refreshHistory()]);
+  await initDutState();
+}
+
+async function refreshAppMeta() {
+  const meta = apps.find(a => a.id === currentAppId);
+  currentAppLabel = meta ? meta.label : currentAppId;
+  currentAppHasCustom = meta ? meta.has_custom : false;
+  $('#pageTitle').textContent = `${currentAppLabel} TC Dashboard`;
+  $('#customSection').style.display = currentAppHasCustom ? '' : 'none';
+}
 
 let pollTimer = null;
 let selectedRunId = null;   // 실행 이력에서 클릭해 선택한 run (없으면 전체 최신 현황판 표시)
@@ -229,7 +350,9 @@ function openCustomDropdown(open) {
 }
 
 async function loadCustomOptions() {
-  const tcs = await fetch('/api/custom_tcs').then(r => r.json());
+  if (!currentAppHasCustom) { $('#customList').innerHTML = ''; return; }
+  const tcs = await fetch(`/api/custom_tcs?app_id=${encodeURIComponent(currentAppId)}`).then(r => r.json());
+  $('#customLabel').textContent = `선택 실행 (${tcs.map(t => t.id).join(', ')} 중 1개 선택)`;
   const list = $('#customList');
   list.innerHTML = '';
   tcs.forEach(tc => {
@@ -256,14 +379,28 @@ document.addEventListener('click', () => openCustomDropdown(false));
 
 $('#customRunBtn').onclick = () => runCustomTc();
 
-$('#fullRunBtn').onclick = () => runTc('default', $('#fullRunBtn'));
-$('#tc10Btn').onclick = () => runTc('tc10-pre', $('#tc10Btn'));
-$('#tc10PostBtn').onclick = () => runTc('tc10-post', $('#tc10PostBtn'));
+// 앱마다 지원하는 catalog(=/api/tcs)가 다르므로 버튼을 고정 HTML이 아니라 매번 새로 그린다.
+async function loadCatalogButtons() {
+  const tcs = await fetch(`/api/tcs?app_id=${encodeURIComponent(currentAppId)}`).then(r => r.json());
+  const container = $('#catalogButtons');
+  container.innerHTML = '';
+  if (!tcs.length) {
+    container.innerHTML = '<div class="empty-hint">등록된 TC가 없습니다.</div>';
+    return;
+  }
+  tcs.forEach(tc => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'tc-btn';
+    btn.dataset.tcId = tc.id;
+    btn.innerHTML = escapeHtml(tc.label) + (tc.note ? `<span class="note">${escapeHtml(tc.note)}</span>` : '');
+    btn.onclick = () => runTc(tc.id, btn);
+    container.appendChild(btn);
+  });
+}
 
 function setButtonsDisabled(disabled) {
-  $('#fullRunBtn').disabled = disabled;
-  $('#tc10Btn').disabled = disabled;
-  $('#tc10PostBtn').disabled = disabled;
+  document.querySelectorAll('#catalogButtons .tc-btn').forEach(b => b.disabled = disabled);
   $('#customDropdownBtn').disabled = disabled;
   $('#customRunBtn').disabled = disabled || !selectedCustom;
   if (disabled) openCustomDropdown(false);
@@ -275,7 +412,7 @@ async function runTc(tcId, btn) {
   try {
     const res = await fetch('/api/run', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tc_id: tcId, channel: selectedChannel }),
+      body: JSON.stringify({ app_id: currentAppId, tc_id: tcId, channel: selectedChannel }),
     });
     if (!res.ok) {
       const err = await res.json();
@@ -302,7 +439,7 @@ async function runCustomTc() {
   try {
     const res = await fetch('/api/run', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tc_id: 'custom', tc_ids: [selectedCustom], channel: selectedChannel }),
+      body: JSON.stringify({ app_id: currentAppId, tc_id: 'custom', tc_ids: [selectedCustom], channel: selectedChannel }),
     });
     if (!res.ok) {
       const err = await res.json();
@@ -335,8 +472,10 @@ function applyConnectionState(runId, meta) {
 
 async function pollRun(runId) {
   if (pollTimer) clearInterval(pollTimer);
+  const appIdAtStart = currentAppId;
   pollTimer = setInterval(async () => {
-    const data = await fetch(`/api/runs/${runId}`).then(r => r.json());
+    if (currentAppId !== appIdAtStart) { clearInterval(pollTimer); return; }   // 폴링 중 다른 앱으로 전환하면 중단
+    const data = await fetch(`/api/runs/${runId}?app_id=${encodeURIComponent(appIdAtStart)}`).then(r => r.json());
     renderRunView(runId, data);
     if (data.meta.status !== 'running') {
       clearInterval(pollTimer);
@@ -384,7 +523,7 @@ function renderRunView(runId, data) {
 }
 
 async function refreshStatus() {
-  const status = await fetch('/api/status').then(r => r.json());
+  const status = await fetch(`/api/status?app_id=${encodeURIComponent(currentAppId)}`).then(r => r.json());
   const entries = Object.entries(status).sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }));
   let pass = 0, fail = 0, lastAt = null;
   const rows = entries.map(([caseId, v]) => {
@@ -426,7 +565,9 @@ function renderHistoryPager(page, totalPages) {
 }
 
 async function refreshHistory() {
-  const { runs, total, page } = await fetch(`/api/runs?page=${historyPage}&page_size=${HISTORY_PAGE_SIZE}`).then(r => r.json());
+  const appIdAtCall = currentAppId;
+  const { runs, total, page } = await fetch(`/api/runs?app_id=${encodeURIComponent(appIdAtCall)}&page=${historyPage}&page_size=${HISTORY_PAGE_SIZE}`).then(r => r.json());
+  if (appIdAtCall !== currentAppId) return;   // 응답 도착 전에 다른 앱으로 전환됐으면 버림
   const tbody = $('#historyTable tbody');
   tbody.innerHTML = '';
   runs.forEach(r => {
@@ -434,7 +575,7 @@ async function refreshHistory() {
     tr.className = 'run-row';
     tr.dataset.runId = r.run_id;
     const dlCell = r.finished_at
-      ? `<a href="/api/runs/${r.run_id}/result.pdf" download class="muted" style="text-decoration:underline;" onclick="event.stopPropagation()">다운로드</a>`
+      ? `<a href="/api/runs/${r.run_id}/result.pdf?app_id=${encodeURIComponent(appIdAtCall)}" download class="muted" style="text-decoration:underline;" onclick="event.stopPropagation()">다운로드</a>`
       : '-';
     const channel = r.channel || 'ssh';
     tr.innerHTML = `<td>${r.run_id}</td><td>${r.label || r.tc_id}</td>
@@ -453,7 +594,7 @@ async function refreshHistory() {
 
 async function showRunLog(runId) {
   selectedRunId = runId;
-  const data = await fetch(`/api/runs/${runId}`).then(r => r.json());
+  const data = await fetch(`/api/runs/${runId}?app_id=${encodeURIComponent(currentAppId)}`).then(r => r.json());
   renderRunView(runId, data);
   if (data.meta.status !== 'running') applyConnectionState(runId, data.meta);
 }
@@ -462,16 +603,19 @@ async function showRunLog(runId) {
 // (ping은 되는데 SSH는 lockout으로 타임아웃나는 상황에서도 초록불이 떠버림) — 그래서 안 쓴다.
 // 페이지 로드 시엔 가장 최근 run의 실제 연결 결과로 LED를 초기화한다.
 async function initDutState() {
-  const { runs } = await fetch('/api/runs?page=1&page_size=1').then(r => r.json());
+  const { runs } = await fetch(`/api/runs?app_id=${encodeURIComponent(currentAppId)}&page=1&page_size=1`).then(r => r.json());
   if (runs.length > 0 && runs[0].status !== 'running') {
     applyConnectionState(runs[0].run_id, runs[0]);
+  } else if (runs.length === 0) {
+    $('#dutDot').className = 'dot unknown';
+    $('#dutDot').title = '연결 상태 미확인 — 아직 실행 이력 없음';
   }
 }
 
 async function init() {
-  await loadCustomOptions();
-  await refreshStatus();
-  await refreshHistory();
+  await loadApps();
+  await refreshAppMeta();
+  await Promise.all([loadCustomOptions(), loadCatalogButtons(), refreshStatus(), refreshHistory()]);
   await initDutState();
   // 다른 클라이언트가 실행 중일 수도 있으니 주기적으로 이력만 새로고침
   setInterval(refreshHistory, 15000);

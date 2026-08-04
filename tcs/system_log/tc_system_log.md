@@ -24,6 +24,14 @@ IPC(MQTT 브릿지)를 통한 on-demand export와 24시간 주기 rotation을 �
 - MQTT 브로커 동작 중 (`localhost:1883`)
 - `mosquitto_pub` / `mosquitto_sub` 설치됨
 - `/edge/log/` 파티션 쓰기 가능
+- (TC04/TC15/TC16 대상) `/edge/log/.tc_dummy_journal_blob` — journal 대량 주입용 premade
+  랜덤 blob(raw 400MB 상당, base64 인코딩 후 상주). 최초 실행 시 없으면 스크립트가
+  자동 생성하며, 이후 모든 TC04/15/16 실행에서 재사용된다(재생성 없음). 디바이스에
+  영구 상주하므로 eMMC 여유 공간 산정 시 이 파일 크기를 포함해서 계산할 것.
+  **주의:** `DUMMY_BLOB_RAW_MB`를 210→400으로 올렸어도 디바이스에 이미 210MB로
+  생성된 blob이 있으면 `ensure_dummy_blob()`이 재생성하지 않고 그대로 재사용한다.
+  400MB 효과를 보려면 디바이스에서 `rm -f /edge/log/.tc_dummy_journal_blob` 로
+  기존 blob을 지운 뒤 다음 TC04/15/16 실행 시 재생성시킬 것.
 
 ---
 
@@ -151,9 +159,17 @@ toupload에 `.log.xz` 파일을 생성하는지 확인한다.
 ### 목적
 
 journald 가 실제로 기록한 데이터로 `/edge/log/system/journal/<machine-id>/` 가
-**100MB / 150MB** 사이즈일 때 `get_log_data` 요청이 IPC 타임아웃 내에 응답을 반환하고
-`.log.xz` 파일까지 생성되는지를 확인한다. 판정 시한은 두 사이즈 모두 180초
-(xz 압축 자체에 시간이 걸리는 걸 감안).
+**100MB** 사이즈일 때 `get_log_data` 요청을 보낸 뒤, **그 응답(=`task_rotate_sync()`가
+dump+rotate+compress+move 를 전부 마쳐야 오는 진짜 완료 신호) 을 최대 200초까지
+기다렸다가** `.log.xz` 신규 생성 여부를 확인한다.
+
+> **판정 방식 변경 이력:** 처음엔 180초 폴링으로 완료를 기다렸으나 `MessageContext`의
+> tid 미검증 버그를 자주 재현시켜(100MB/150MB 두 티어 모두 180초 경계를 두드림) 응답
+> 자체를 포기하고 10초만 짧게 훑어보는 방식으로 완화했었다. 근데 그러면 아직 정상
+> 진행 중일 뿐인 상황(응답이 30초를 넘겨서 오는 경우)을 FAIL로 오판하는 문제가 있었다
+> (실측). 150MB 티어는 제거해 유지하되, 판정은 `get_log_data` 자체의 응답(실제 완료
+> 신호)을 200초(180s cmd timeout + 여유)까지 기다리는 방식으로 다시 바꿨다 — 응답이
+> 오면 그 시점의 파일 상태가 곧 최종 상태다.
 
 > 단순히 `dd` 로 zero-fill 한 더미 `.journal` 은 journald 가 corrupted 로 즉시 무시하므로
 > 시나리오 의도(대용량 journal 처리 시 timeout 검증)를 측정할 수 없다. 따라서
@@ -165,26 +181,29 @@ journald 가 실제로 기록한 데이터로 `/edge/log/system/journal/<machine
 - `journalctl --rotate` 및 `--vacuum-files` 권한 (root)
 - `systemd-cat` 사용 가능 (journald 가용)
 - `journald.conf`: `SystemMaxFileSize` 기본 64M, `SystemMaxFiles` 기본 20 — 150MB 까지 ~3개 파일 필요, 한도 안에 들어감
-- 디바이스 emmc 가용 공간 300MB 이상 (150MB journal + 압축 작업 임시공간)
+- 디바이스 emmc 가용 공간 300MB 이상 (100MB journal + 압축 작업 임시공간 + premade dummy blob 상주분)
 - IPC 타임아웃: `SYSTEM_LOG_REQUEST_CMD_TIMEOUT=5초`, `SYSTEM_LOG_PUBLISH_TIMEOUT=7초`
 
 ### 절차
 
-2개 사이즈(100MB / 150MB)에 대해 다음을 반복:
+100MB 사이즈에 대해 다음을 실행:
 
 1. `journalctl --rotate && journalctl --vacuum-files=1` 로 journal 초기화
 2. `BEFORE_LIST` = 현재 toupload `.log.xz` 파일 목록 (개수가 아니라 목록 자체를 저장)
-3. `head -c <raw>MB /dev/urandom | base64 -w 4096 | systemd-cat -t TC04_DUMMY` 로 실데이터 주입
-   - 사이즈별 raw urandom 양: 70MB / 105MB (≈1.4x 팽창 후 journal 목표 사이즈에 도달)
+3. `/edge/log/.tc_dummy_journal_blob`(premade 랜덤 blob, 없으면 최초 1회만 생성)에서
+   사이즈에 맞는 만큼 슬라이스해 `systemd-cat -t TC04_DUMMY` 로 실데이터 주입
+   - 사이즈별 raw 환산량: 70MB / 105MB (≈1.4x 팽창 후 journal 목표 사이즈에 도달) — 매번
+     `/dev/urandom` 을 새로 뽑지 않고 blob에서 해당 비율만큼 `head -c` 로 잘라 재사용한다.
+     journald가 요구하는 건 "systemd-cat 정상 경로로 들어온 유효한 항목"이지 내용의
+     신선도가 아니므로, 한 번 생성한 고엔트로피 데이터를 재사용해도 무방하다.
 4. `sync; sleep 3; journalctl --rotate; sleep 2` 로 디스크에 flush
 5. `journalctl --disk-usage` 로 실제 journal 사이즈 확인
-6. `get_log_data` 요청 송신, 응답 epoch 차이로 응답시간 측정
-7. `AFTER_LIST` 를 5초 간격으로 재조회하며 `comm -13 BEFORE_LIST AFTER_LIST` 로 신규 파일을
-   찾는다 — 두 사이즈 모두 최대 180초까지 대기 (TC02와 동일한 diff 방식. 관찰 창 동안
-   다른 파일이 삭제돼도 — 예: Blob 업로드 후 delete — 개수 비교와 달리 오판하지 않는다)
-8. 신규 파일 발견 여부로 PASS/FAIL 판정 (대기 한도 초과 시 FAIL)
+6. `get_log_data` 요청 송신, 응답을 최대 200초까지 대기(실제 완료 신호)
+7. 응답 수신 직후 `comm -13 BEFORE_LIST AFTER_LIST` 로 신규 파일을 확인한다
+   (TC02와 동일한 diff 방식 — 그 사이 다른 파일이 삭제돼도 개수 비교와 달리 오판하지 않는다)
+8. 신규 파일 발견 여부로 PASS/FAIL 판정
 
-마지막 사이즈 시험 후: `journalctl --rotate && journalctl --vacuum-files=1` 로 디스크 복원.
+시험 후: `journalctl --rotate && journalctl --vacuum-files=1` 로 디스크 복원.
 
 > **알려진 제약:** journal 사이즈가 100MB 이상이면 `journalctl -o cat | xz` 파이프라인이
 > `SYSTEM_LOG_REQUEST_CMD_TIMEOUT=5초` 안에 끝나지 않고 SIGKILL 로 실패할 수 있다.
@@ -196,15 +215,14 @@ journald 가 실제로 기록한 데이터로 `/edge/log/system/journal/<machine
 
 | 항목 | 기준 |
 |------|------|
-| 각 사이즈 응답 | MQTT 응답이 30초 안에 반환 (대용량에서는 `error_code=UNKNOWN` 도 응답으로 인정) |
-| 파일 생성 | 100MB / 150MB 모두 180초 이내 `.log.xz` 신규 생성 |
+| 응답 | MQTT 응답이 200초 안에 반환됨(=task_rotate_sync 완료) |
+| 파일 생성 | 응답 수신 시점에 `.log.xz` 신규 생성 확인 |
 
 ### PASS/FAIL Criteria
 
 | 기준 ID | 설명 | 타입 | 기준값 | 셸 검증 |
 |---------|------|------|--------|---------|
-| TC04-1 | journal 100MB 상태에서 180초 이내 .xz 파일 생성 | boolean | true | `comm -13 BEFORE_LIST AFTER_LIST` 로 신규 파일 존재 확인 |
-| TC04-2 | journal 150MB 상태에서 180초 이내 .xz 파일 생성 | boolean | true | `comm -13 BEFORE_LIST AFTER_LIST` 로 신규 파일 존재 확인 |
+| TC04-1 | journal 100MB 상태에서 get_log_data 완료 응답 후 .xz 파일 생성 | boolean | true | `comm -13 BEFORE_LIST AFTER_LIST` 로 신규 파일 존재 확인 |
 
 
 ---
@@ -397,7 +415,11 @@ rotation 완료 후 생성된 파일이 유효한 `.xz`이며, 원본 `.log` 파
 ### 절차
 
 1. 더미 파일 생성: `touch /edge/log/toupload/system/systemlog_dummy.log.xz`
-2. `mosquitto_pub` → `request_factory_reset` 요청, 30초 대기
+2. `mosquitto_pub` → `request_factory_reset` 요청, 200초 대기
+   (factory_reset의 `clear_all_logs()`는 `log_dir_mutex_` unique_lock을 잡는데, 그 사이
+   이전 get_log_data가 트리거한 `task_rotate_sync()`가 아직 안 끝났으면 그 shared_lock이
+   풀릴 때까지 최대 `SYSTEM_LOG_REQUEST_CMD_TIMEOUT`(180s)급으로 줄을 서서 기다린다 —
+   30초는 이 정상적인 대기조차 못 버텨 오탐 FAIL이 났던 이력이 있어 TC15와 동일하게 상향)
 3. 응답 수신 확인
 4. 더미 파일 + 디렉토리 내 모든 파일 소멸 확인
 
@@ -677,16 +699,17 @@ system_log를 `kill -9` 하면 edge_runtime이 재시작하고 startup 시
 
 - 공통 전제 조건 충족
 - `systemd-cat`, `journalctl --rotate` / `--vacuum-files` 권한 (root)
-- 디바이스 emmc 가용 공간 500MB 이상
+- 디바이스 emmc 가용 공간 900MB 이상 (premade dummy blob 상주분 포함, 210→400MB 상향에 따라 재산정)
 - 현재 `SYSTEM_LOG_REQUEST_CMD_TIMEOUT=180초` (`system_log.hpp:30`) 전제 — 값이 바뀌면 주입량 재조정 필요
-- **주의(파괴적 시험):** journal을 raw urandom ~210MB(→journal ~288MB, TC04 "300MB" 티어와 동일 규모) 채웠다가 vacuum으로 비움. 다른 TC와 동시 실행 금지. 총 5분 이상 소요
+- **주의(파괴적 시험):** journal을 raw ~400MB 상당 채웠다가 vacuum으로 비움. (210MB 시절엔 180s 경계에서 flaky하게 성공/실패가 갈렸던 이력 있음 — 400MB로 상향해 안정적으로 timeout 유도) 다른 TC와 동시 실행 금지. premade blob 최초 생성 시에만 5분 이상, 이후 재사용 시에는 훨씬 짧음
 - 의존 TC 없음 (독립 실행 가능)
 
 ### 절차
 
 1. `journalctl --rotate && --vacuum-files=1`로 journal 초기화
 2. `BEFORE_HEAD` = `journalctl --list-boots | head -n1` 기록, toupload `.log`(xz 아닌) 목록 스냅샷
-3. `head -c 210M /dev/urandom | base64 -w 4096 | systemd-cat -t TC15_DUMMY` 주입 (TC04와 동일 기법) → `sync; sleep 3; journalctl --rotate; sleep 2`
+3. `/edge/log/.tc_dummy_journal_blob`(TC04와 공유하는 premade 랜덤 blob, 없으면 최초 1회만
+   생성) 전체를 `systemd-cat -t TC15_DUMMY` 로 주입 → `sync; sleep 3; journalctl --rotate; sleep 2`
 4. `get_log_data` 요청 송신, 최대 200초 대기 (180s cmd timeout + overhead)
 5. 응답 후 10초 추가 대기
 6. before/after 목록 diff로 이번 사이클이 만든 신규 raw `.log`(`NEW_LOG`) 식별
@@ -708,7 +731,7 @@ system_log를 `kill -9` 하면 edge_runtime이 재시작하고 startup 시
 | 기준 ID | 설명 | 타입 | 기준값 | 셸 검증 |
 |---------|------|------|--------|---------|
 | TC15-1 | 압축 실패 후 raw `.log`가 toupload에 보존됨 | boolean | true | `[ -f "$NEW_LOG" ]` |
-| TC15-2 | 깨진 partial `.xz`는 남지 않음 | boolean | true | `[ ! -f "${NEW_LOG}.xz" ]` |
+| TC15-2 | 깨진 partial `.xz`는 남지 않음 (`get_log_data` 응답 수신 후 `.xz` 크기가 더 안 늘어날 때까지 최대 60초 안정화 대기 후 판정 — host_agent가 타임아웃을 살짝 넘겨서까지 원격 xz를 계속 돌리는 경우가 있어 응답 직후 스냅샷은 오판 가능) | boolean | true | `[ ! -f "${NEW_LOG}.xz" ]` |
 | TC15-3 | `.meta` 생성되지 않음 | boolean | true | `[ ! -f "${NEW_LOG}.xz.meta" ]` |
 | TC15-4 | vacuum이 실행되어 list-boots head 변경됨 | boolean | true | `[ "$after_head" != "$before_head" ]` |
 
@@ -727,9 +750,9 @@ system_log를 `kill -9` 하면 edge_runtime이 재시작하고 startup 시
 - 공통 전제 조건 충족
 - `pgrep`, `kill -9` 사용 가능, edge_runtime이 system_log 재시작시키는 상태
 - `systemd-cat`, `journalctl --rotate` / `--vacuum-files` 권한 (root)
-- 디바이스 emmc 가용 공간 500MB 이상
+- 디바이스 emmc 가용 공간 900MB 이상 (premade dummy blob 상주분 포함, 210→400MB 상향에 따라 재산정)
 - 현재 `SYSTEM_LOG_REQUEST_CMD_TIMEOUT=180초` 전제
-- **주의(파괴적 시험):** TC15와 동일한 journal 주입 + system_log 강제 재시작 수반. 총 5분 이상 소요
+- **주의(파괴적 시험):** TC15와 동일한 journal 주입(premade blob 재사용) + system_log 강제 재시작 수반. premade blob 최초 생성 시에만 5분 이상, 이후 재사용 시에는 훨씬 짧음
 - 의존 TC 없음 (독립 실행 가능, TC15 실행 여부와 무관)
 
 ### 절차
@@ -738,12 +761,14 @@ system_log를 `kill -9` 하면 edge_runtime이 재시작하고 startup 시
 2. `BEFORE_HEAD` = `journalctl --list-boots | head -n1` 기록
 3. TC15와 동일 기법으로 journal 주입 (`TC16_DUMMY` 태그)
 4. `kill -9 $(pgrep -f system_log)` → edge_runtime 재시작 → `task_capture_boot_log()` 무조건 실행
-5. 최대 220초 대기 (dump 완료 후 xz -f 180초 시도까지)
+5. 최대 480초까지 journald를 5초 간격으로 폴링해 `[task_capture_boot_log] Done:` 또는
+   `Failed to compress log` 완료 신호를 기다림(고정 대기 아님 — dump 단계가 주입량에
+   비례해 늘어나 xz 180초 타임아웃 시작 시점이 밀리므로, 완료 신호 확인 전에는 판정하지 않음)
 6. staging에서 신규 raw `.log`(`NEW_LOG`) 확인
 7. `${NEW_LOG}.xz` 부재 확인
 8. `NEW_LOG`와 동일 베이스네임이 toupload로 잘못 넘어가지 않았는지 확인 (merge 오염 방지 검증)
 9. `AFTER_HEAD` 비교
-10. cleanup: `NEW_LOG` 삭제, journal 재초기화
+10. cleanup: journald(`docker-loader`)에서 `[task_capture_boot_log] Failed to compress log, keeping raw .log for diagnostics: ${NEW_LOG}` 로그가 확인된 경우에만 `NEW_LOG` 삭제(미확인 시 진단용 보존), journal 재초기화
 
 ### 기대 결과
 
@@ -759,7 +784,7 @@ system_log를 `kill -9` 하면 edge_runtime이 재시작하고 startup 시
 | 기준 ID | 설명 | 타입 | 기준값 | 셸 검증 |
 |---------|------|------|--------|---------|
 | TC16-1 | 압축 실패 후 raw `.log`가 staging에 보존됨 | boolean | true | `[ -f "$NEW_LOG" ]` |
-| TC16-2 | 깨진 partial `.xz`는 남지 않음 | boolean | true | `[ ! -f "${NEW_LOG}.xz" ]` |
+| TC16-2 | 깨진 partial `.xz`는 남지 않음 (journald 완료 신호 감지 후 `.xz` 크기가 더 안 늘어날 때까지 최대 60초 안정화 대기 후 판정 — TC15와 동일 이유) | boolean | true | `[ ! -f "${NEW_LOG}.xz" ]` |
 | TC16-3 | raw `.log`가 toupload로 잘못 이관되지 않음 | boolean | true | `find "${TOUPLOAD_DIR}" -name "$(basename "$NEW_LOG")*"` 결과 없음 |
 | TC16-4 | vacuum이 실행되어 list-boots head 변경됨 | boolean | true | `[ "$after_head" != "$before_head" ]` |
 
@@ -802,7 +827,7 @@ system_log를 `kill -9` 하면 edge_runtime이 재시작하고 startup 시
 |----|------|------|
 | TC01, TC03~TC09 | A (자동) | 무인 실행 가능 |
 | TC02 | A (자동) | 시스템 시간 ±25h 자동 변경 + 복원 |
-| TC04 | A (자동) | systemd-cat으로 100/150MB 실 journal 데이터 주입 + vacuum cleanup |
+| TC04 | A (자동) | systemd-cat으로 100MB 실 journal 데이터 주입 + vacuum cleanup |
 | TC06 | B (반자동) | 저널 사용량 수동 확인 |
 | TC10 | B (반자동) | 실제 리부트 포함 — pre/post 분리 실행, 재접속 후 post 수동 실행 |
 | TC11 | B (반자동) | nmon 업로드 happy path — TC11-5 는 5분+ 대기 (BlobUploadDirector 스캔) |

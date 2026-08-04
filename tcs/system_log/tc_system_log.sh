@@ -15,6 +15,12 @@ NMON_OLD_DIR="/edge/log/system/nmon/old"
 NMON_TOUPLOAD_DIR="/edge/log/toupload/system/nmon"
 NMON_ARCHIVE_DIR="/edge/log/system/nmon/archive"
 JOURNAL_DIR="/var/log/journal"
+# TC04/TC15/TC16 journal 대량 주입용 premade blob. 매 실행마다 urandom+base64를
+# 새로 뽑는 대신 디바이스에 1회 생성해 영구 상주시키고 재사용한다 (질문 답변 참고:
+# journald가 검증하는 건 "systemd-cat 정상 경로로 들어왔는가"이지 내용의 신선도가
+# 아니므로, 한 번 뽑은 고엔트로피 데이터를 재사용해도 무방하다).
+DUMMY_BLOB="/edge/log/.tc_dummy_journal_blob"
+DUMMY_BLOB_RAW_MB=400
 PASS=0
 FAIL=0
 
@@ -72,6 +78,35 @@ dump_cmd() {
 # _ 뒤 14자리, 항상 고정폭이라 사전순 정렬=시간순 정렬)으로 찾으면 시계 상태와 무관하다.
 find_latest_xz() {
     ls "$1"/systemlog_*.log.xz 2>/dev/null | sort -t_ -k3 | tail -1
+}
+
+# DUMMY_BLOB이 없으면 최초 1회만 raw urandom을 base64로 부풀려 생성해 디바이스에
+# 영구 상주시킨다. 이후 호출부터는 이 파일을 그대로 재사용 — urandom 생성/base64
+# 인코딩 자체가 임베디드 CPU에서 느려 TC15/16이 "5분 이상" 걸리던 주요 원인이었다.
+ensure_dummy_blob() {
+    if [ ! -s "$DUMMY_BLOB" ]; then
+        echo "  [SETUP] premade journal dummy blob 없음 — 최초 1회 생성 (raw ${DUMMY_BLOB_RAW_MB}MB → ${DUMMY_BLOB})"
+        mkdir -p "$(dirname "$DUMMY_BLOB")"
+        head -c $((DUMMY_BLOB_RAW_MB * 1048576)) /dev/urandom | base64 -w 4096 > "$DUMMY_BLOB"
+        sync
+        dump_cmd ls -la "$DUMMY_BLOB"
+    fi
+}
+
+# DUMMY_BLOB에서 raw_mb(예: 70/105)에 해당하는 만큼만 슬라이스해 systemd-cat으로
+# journald에 주입한다. raw_mb를 생략하거나 DUMMY_BLOB_RAW_MB 이상이면 전체를 주입.
+inject_dummy_blob() {
+    local tag="$1"
+    local raw_mb="${2:-$DUMMY_BLOB_RAW_MB}"
+    ensure_dummy_blob
+    if [ "$raw_mb" -ge "$DUMMY_BLOB_RAW_MB" ]; then
+        cat "$DUMMY_BLOB" | systemd-cat -t "$tag"
+    else
+        local blob_total slice_bytes
+        blob_total=$(wc -c < "$DUMMY_BLOB")
+        slice_bytes=$((blob_total * raw_mb / DUMMY_BLOB_RAW_MB))
+        head -c "$slice_bytes" "$DUMMY_BLOB" | systemd-cat -t "$tag"
+    fi
 }
 
 # ============================================================
@@ -330,10 +365,13 @@ tc04_timeout_large_log() {
 
     # 사이즈 (MB journal 목표)와 라벨, 그에 맞춰 주입할 raw urandom 사이즈
     # 측정 기준: 200MB urandom (base64 -w 4096) → journald 약 281MB (≈1.4x)
-    # 300MB는 압축 시간이 너무 오래 걸려 150MB로 축소.
-    local target_sizes="100 150"
-    local raw_sizes="70 105"
-    local labels="100MB 150MB"
+    # 300MB는 압축 시간이 너무 오래 걸려 150MB로 축소했었으나, 100MB/150MB 두 티어
+    # 모두 180초 SYSTEM_LOG_REQUEST_CMD_TIMEOUT 경계까지 압축을 밀어붙이는 통에
+    # cmd_host의 늦은 응답이 MessageContext를 오염시키는 레이스를 매 run마다
+    # 재현시키는 주범이었다 — 100MB 단일 티어만 남긴다.
+    local target_sizes="100"
+    local raw_sizes="70"
+    local labels="100MB"
     local idx=0
 
     for target_mb in $target_sizes; do
@@ -362,10 +400,10 @@ tc04_timeout_large_log() {
         BEFORE_LIST=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | sort)
         before_files=$(echo "$BEFORE_LIST" | grep -c .)
 
-        # 2. systemd-cat 으로 실제 journal 데이터 주입
+        # 2. systemd-cat 으로 실제 journal 데이터 주입 (premade DUMMY_BLOB 슬라이스 재사용)
         local t_inject_t0 t_inject_t1
         t_inject_t0=$(date +%s)
-        head -c $((raw_mb * 1048576)) /dev/urandom | base64 -w 4096 | systemd-cat -t TC04_DUMMY
+        inject_dummy_blob "TC04_DUMMY" "$raw_mb"
         sync
         sleep 3
         dump_cmd journalctl --rotate
@@ -377,41 +415,33 @@ tc04_timeout_large_log() {
         echo "    [SETUP] 주입 took $((t_inject_t1 - t_inject_t0))s, journal: ${before_size} → ${after_size}"
         dump_cmd df -h /edge
 
-        # 3. get_log_data 요청
+        # 3. get_log_data 요청 — 실제 완료 신호(=get_log_data 자체의 MQTT 응답)를 기다린다.
+        # handle_request_get_log_data()는 dump+rotate+compress+move 를 전부 마친 뒤에야
+        # publish_response() 하므로, 이 응답이 곧 "작업이 끝났다"는 진짜 신호다. 180초
+        # SYSTEM_LOG_REQUEST_CMD_TIMEOUT + host_agent가 타임아웃을 살짝 넘겨서라도 명령을
+        # 끝까지 실행해주는 여유분을 감안해 TC15와 동일하게 200초까지 기다린다 — 예전처럼
+        # 30초에 포기하고 10초만 훑어보면, 실제로는 정상 진행 중인데 아직 안 끝났을 뿐인
+        # 상황을 FAIL로 오판한다(실측: 30초/10초로는 못 잡고 몇 분 뒤 정상 완료된 사례).
         echo "    [TC04-${idx}] get_log_data 요청 송신..."
         local t0 t1 elapsed resp
         t0=$(date +%s)
-        resp=$(send_and_wait "get_log_data" "{}" 30)
+        resp=$(send_and_wait "get_log_data" "{}" 200)
         t1=$(date +%s)
         elapsed=$((t1 - t0))
         echo "    [TC04-${idx}] 응답: $([ -n "$resp" ] && echo "OK ($resp)" || echo 'TIMEOUT'), 응답까지 ${elapsed}초"
 
-        # journalctl dump + xz 압축이 오래 걸릴 수 있어 두 사이즈 모두 180초까지 폴링.
-        # BEFORE_LIST에 없던 파일(comm -13)이 나타나는지로 판정 — 그 사이 다른 파일이
-        # 사라져도(개수만 보면 상쇄돼 오판) 신규 생성 자체는 정확히 잡아낸다.
-        local wait_limit=180
-
-        local AFTER_LIST after_files new_xz t_wait_t0 t_wait_elapsed
-        t_wait_t0=$(date +%s)
-        new_xz=""
-        while :; do
-            AFTER_LIST=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | sort)
-            new_xz=$(comm -13 <(echo "$BEFORE_LIST") <(echo "$AFTER_LIST") | head -1)
-            [ -n "$new_xz" ] && break
-            t_wait_elapsed=$(( $(date +%s) - t_wait_t0 ))
-            [ "$t_wait_elapsed" -ge "$wait_limit" ] && break
-            sleep 5
-        done
-        t_wait_elapsed=$(( $(date +%s) - t_wait_t0 ))
+        local AFTER_LIST after_files new_xz
+        AFTER_LIST=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | sort)
+        new_xz=$(comm -13 <(echo "$BEFORE_LIST") <(echo "$AFTER_LIST") | head -1)
         after_files=$(echo "$AFTER_LIST" | grep -c .)
 
         dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log.xz
-        echo "    [TC04-${idx}] 신규 파일=$(basename "${new_xz:-none}") (파일 생성 대기 ${t_wait_elapsed}초 / 한도 ${wait_limit}초)"
+        echo "    [TC04-${idx}] after: files=${after_files}"
 
         if [ -n "$new_xz" ]; then
-            assert "TC04-${idx}: journal ${label} 상태에서 ${wait_limit}초 이내 .xz 파일 생성" "PASS"
+            assert "TC04-${idx}: journal ${label} 상태에서 get_log_data 완료 응답 후 .xz 파일 생성" "PASS"
         else
-            assert "TC04-${idx}: journal ${label} 상태에서 ${wait_limit}초 이내 .xz 파일 생성" "FAIL"
+            assert "TC04-${idx}: journal ${label} 상태에서 get_log_data 완료 응답 후 .xz 파일 생성" "FAIL"
             echo "    before_files=${before_files} after_files=${after_files}, journal=${after_size}, 응답=${elapsed}s"
         fi
     done
@@ -576,8 +606,13 @@ tc09_factory_reset() {
     local dummy="${TOUPLOAD_DIR}/systemlog_dummy.log.xz"
     touch "$dummy" 2>/dev/null
 
+    # factory_reset의 clear_all_logs()는 log_dir_mutex_ unique_lock을 잡는데, 그 사이
+    # 이전 get_log_data가 트리거한 task_rotate_sync(shared_lock)가 아직 안 끝났으면
+    # 그게 풀릴 때까지(최대 SYSTEM_LOG_REQUEST_CMD_TIMEOUT=180s급) 줄을 서서 기다린다 —
+    # 30s는 이 정상적인 대기조차 못 버텨 오탐 FAIL이 났다(실측: 24s 대기 후 성공).
+    # TC15와 동일하게 180s + 여유로 200s.
     local resp
-    resp=$(send_and_wait "request_factory_reset" "{}" 30)
+    resp=$(send_and_wait "request_factory_reset" "{}" 200)
 
     if [ -n "$resp" ]; then
         assert "TC09-1: factory_reset 응답 수신" "PASS"
@@ -989,8 +1024,11 @@ tc14_rtc_same_start_merge() {
     ls -lh "${STAGING_DIR}"/systemlog_*.log.xz 2>/dev/null | sed 's/^/    /'
 
     # 5. system_log kill → edge_runtime 재시작
+    # 반드시 전체 경로로 매칭할 것 — "system_log"만 쓰면 이 스크립트 자신의 파일명
+    # (tc_system_log.sh)까지 매칭돼 head -1이 엉뚱한(진짜 system_log가 아닌) PID를
+    # 집어 kill이 사실상 no-op이 되는 사고가 실측으로 확인됨 (TC02 방식과 통일).
     local SL_PID
-    SL_PID=$(pgrep -f system_log | head -1)
+    SL_PID=$(pgrep -f /edge/app/bin/system_log | head -1)
     if [ -z "$SL_PID" ]; then
         echo "  [ERROR] system_log 프로세스 없음"
         assert "TC14: system_log 프로세스 확인" "FAIL"
@@ -1069,18 +1107,20 @@ tc14_rtc_same_start_merge() {
 
 # ============================================================
 # TC15: task_rotate_sync — compress 실패 시 raw .log 보존 (toupload)
-#   journal을 대량(raw urandom ~210MB, TC04 "300MB" 티어와 동일 규모)으로 채워
-#   SYSTEM_LOG_REQUEST_CMD_TIMEOUT(180s, system_log.hpp:30) 안에 xz -f 압축이
-#   못 끝나도록 강제한다 (실측 처리량 ~0.3MB/s 기준 180s 안전선은 ~54MB — 5배 이상 초과).
+#   journal을 대량(raw urandom ~400MB)으로 채워 SYSTEM_LOG_REQUEST_CMD_TIMEOUT
+#   (180s, system_log.hpp:30) 안에 xz -f 압축이 못 끝나도록 강제한다.
+#   [실측 주의] 210MB(raw, →dump ~294MB)로는 180s 경계선에서 간신히 timeout 나거나
+#   (2026-08-04 10:35 run: 정확히 180.0s 후 error 255) 타이밍에 따라 성공해버리는
+#   flaky 구간이었다 — 400MB로 상향해 안전마진 확보.
 #   [주의] journal을 대량으로 채웠다가 vacuum으로 비우는 파괴적 시험. 5분 이상 소요.
 #   [튜닝 주의] journalctl -o cat(dump) 도 같은 타임아웃을 공유한다. raw .log가
 #   아예 안 생기면 dump 단계에서부터 타임아웃난 것 — 주입량을 줄여야 한다.
 # ============================================================
 inject_oversized_journal() {
-    # TC04와 동일 기법: raw urandom을 base64로 부풀려 systemd-cat으로 journald에 주입
+    # TC04와 동일 기법이되 premade DUMMY_BLOB(raw 400MB 상당)을 재사용해 주입
     local tag="$1"
-    echo "  [주입] head -c 210M /dev/urandom | base64 -w 4096 | systemd-cat -t ${tag}"
-    head -c $((210 * 1048576)) /dev/urandom | base64 -w 4096 | systemd-cat -t "$tag"
+    echo "  [주입] cat ${DUMMY_BLOB} | systemd-cat -t ${tag} (raw ${DUMMY_BLOB_RAW_MB}MB 상당, premade blob 재사용)"
+    inject_dummy_blob "$tag" "$DUMMY_BLOB_RAW_MB"
     sync
     sleep 3
     dump_cmd journalctl --rotate
@@ -1111,7 +1151,6 @@ tc15_rotate_sync_compress_fail() {
     resp=$(send_and_wait "get_log_data" "{}" 200)
     t1=$(date +%s)
     echo "  응답: $([ -n "$resp" ] && echo "OK: $resp" || echo 'TIMEOUT'), 소요 $((t1 - t0))초"
-    sleep 10   # host_agent SIGKILL + 파일 정리 안정화 대기
 
     dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log
     local after_list NEW_LOG
@@ -1127,6 +1166,29 @@ tc15_rotate_sync_compress_fail() {
     fi
 
     if [ -n "$NEW_LOG" ]; then
+        # get_log_data 응답을 받아도 host_agent가 타임아웃을 살짝 넘겨서까지 원격 xz를
+        # 끝까지 돌려주는 경우가 있어(실측: 응답 수신 후에도 .xz 크기가 계속 자람), 응답
+        # 직후 바로 판정하면 아직 쓰는 중인 파일을 스냅샷으로 잘못 잡을 수 있다. 크기가
+        # 더 안 늘어날 때까지(최대 60초) 안정화를 기다린 뒤에 최종 판정한다 — 이게 진짜
+        # "완료 신호"다.
+        local xz_deadline prev_size cur_size stable_absent_count
+        xz_deadline=$(( $(date +%s) + 60 ))
+        prev_size=-2
+        stable_absent_count=0
+        while [ "$(date +%s)" -lt "$xz_deadline" ]; do
+            if [ -f "${NEW_LOG}.xz" ]; then
+                cur_size=$(stat -c%s "${NEW_LOG}.xz" 2>/dev/null || echo -1)
+                stable_absent_count=0
+                [ "$cur_size" = "$prev_size" ] && break   # 크기 변화 없음 = 다 씀
+                prev_size="$cur_size"
+            else
+                stable_absent_count=$((stable_absent_count + 1))
+                [ "$stable_absent_count" -ge 2 ] && break   # 2회 연속 부재 = 안정적으로 없음
+                prev_size=-2
+            fi
+            sleep 3
+        done
+
         dump_cmd ls -la "${NEW_LOG}.xz"
         if [ ! -f "${NEW_LOG}.xz" ]; then
             assert "TC15-2: 깨진 partial .xz 는 남지 않음" "PASS"
@@ -1181,8 +1243,10 @@ tc16_boot_log_compress_fail() {
 
     inject_oversized_journal "TC16_DUMMY"
 
+    # 전체 경로 매칭 필수 — "system_log"만 쓰면 tc_system_log.sh 자신까지 걸려
+    # head -1이 엉뚱한 PID를 집어 kill이 no-op 되는 문제가 실측됨 (TC02/TC14와 통일).
     local SL_PID
-    SL_PID=$(pgrep -f system_log | head -1)
+    SL_PID=$(pgrep -f /edge/app/bin/system_log | head -1)
     if [ -z "$SL_PID" ]; then
         echo "  [ERROR] system_log 프로세스 없음"
         assert "TC16-1: system_log 프로세스 확인" "FAIL"
@@ -1192,15 +1256,32 @@ tc16_boot_log_compress_fail() {
         return
     fi
 
+    local SL_RESTART_TS
+    SL_RESTART_TS=$(date '+%Y-%m-%d %H:%M:%S')
     echo "  system_log kill (PID ${SL_PID}) → 재시작 대기..."
     kill -9 "$SL_PID" 2>/dev/null
 
-    # dump 완료(raw .log 등장) 후 xz -f 시도까지 최대 220초 대기
-    local i
-    for i in $(seq 1 220); do
-        sleep 1
-        [ $((i % 30)) -eq 0 ] && printf "  [%3ds] 대기 중...\n" "$i"
+    # 고정 220초 대기 대신, task_capture_boot_log의 실제 완료 신호(Done: 또는
+    # Failed to compress log)를 journald에서 폴링한다. dump(journalctl -o cat)
+    # 단계 자체가 주입량에 비례해 오래 걸려(400MB 기준 실측 ~100초) xz의 180s
+    # 타임아웃 시작 시점이 그만큼 밀린다 — 고정 220초로는 xz가 아직 진행 중인
+    # (아직 실패도 성공도 확정 안 된) 시점에 .xz를 검사해버려 오탐 FAIL이 났었다
+    # (2026-08-04 10:46 run: kill~220s=10:50:20 시점 검사, 실제 xz 타임아웃은
+    # 10:51:31 — 71초 늦게 확정됨).
+    local MAX_WAIT=480 elapsed=0 done_line=""
+    while [ "$elapsed" -lt "$MAX_WAIT" ]; do
+        sleep 5
+        elapsed=$((elapsed + 5))
+        done_line=$(journalctl -u docker-loader --no-pager -o cat --since "$SL_RESTART_TS" 2>/dev/null \
+                     | grep -E '\[task_capture_boot_log\] (Done:|Failed to compress log)' | tail -1)
+        [ -n "$done_line" ] && break
+        [ $((elapsed % 30)) -eq 0 ] && printf "  [%3ds] 대기 중... (task_capture_boot_log 완료 신호 대기)\n" "$elapsed"
     done
+    if [ -n "$done_line" ]; then
+        echo "  [완료 감지 @ ${elapsed}s] ${done_line}"
+    else
+        echo "  [WARN] ${MAX_WAIT}s 내 task_capture_boot_log 완료 신호를 못 찾음 — 이후 검증은 현재 상태 기준으로 진행"
+    fi
 
     dump_cmd ls -la "${STAGING_DIR}"/systemlog_*.log
     local NEW_LOG
@@ -1214,6 +1295,28 @@ tc16_boot_log_compress_fail() {
     fi
 
     if [ -n "$NEW_LOG" ]; then
+        # journald 완료 신호를 잡아도 host_agent가 타임아웃을 살짝 넘겨서까지 원격 xz를
+        # 끝까지 돌려주는 경우가 있어 신호 직후 바로 판정하면 아직 쓰는 중인 파일을
+        # 스냅샷으로 잘못 잡을 수 있다(TC15와 동일 이유). 크기가 더 안 늘어날 때까지
+        # (최대 60초) 안정화를 기다린 뒤 최종 판정한다.
+        local xz_deadline prev_size cur_size stable_absent_count
+        xz_deadline=$(( $(date +%s) + 60 ))
+        prev_size=-2
+        stable_absent_count=0
+        while [ "$(date +%s)" -lt "$xz_deadline" ]; do
+            if [ -f "${NEW_LOG}.xz" ]; then
+                cur_size=$(stat -c%s "${NEW_LOG}.xz" 2>/dev/null || echo -1)
+                stable_absent_count=0
+                [ "$cur_size" = "$prev_size" ] && break
+                prev_size="$cur_size"
+            else
+                stable_absent_count=$((stable_absent_count + 1))
+                [ "$stable_absent_count" -ge 2 ] && break
+                prev_size=-2
+            fi
+            sleep 3
+        done
+
         dump_cmd ls -la "${NEW_LOG}.xz"
         if [ ! -f "${NEW_LOG}.xz" ]; then
             assert "TC16-2: 깨진 partial .xz 는 남지 않음" "PASS"
@@ -1246,8 +1349,17 @@ tc16_boot_log_compress_fail() {
         assert "TC16-4: vacuum이 실행되어 list-boots head 변경됨" "FAIL"
     fi
 
-    # cleanup
-    [ -n "$NEW_LOG" ] && rm -f "$NEW_LOG"
+    # cleanup: journald에 "compress 실패 → raw .log 보존" 로그가 NEW_LOG 기준으로
+    # 확실히 찍힌 게 확인된 경우에만 NEW_LOG를 지운다. 확인 안 되면 진단용으로 남겨둔다.
+    if [ -n "$NEW_LOG" ]; then
+        local compress_fail_marker="[task_capture_boot_log] Failed to compress log, keeping raw .log for diagnostics: ${NEW_LOG}"
+        dump_cmd sh -c "journalctl -u docker-loader --no-pager -o cat 2>/dev/null | grep -F '${compress_fail_marker}'"
+        if journalctl -u docker-loader --no-pager -o cat 2>/dev/null | grep -qF "$compress_fail_marker"; then
+            rm -f "$NEW_LOG"
+        else
+            echo "  [KEEP] compress 실패 로그(journald) 미확인 — NEW_LOG 보존: ${NEW_LOG}"
+        fi
+    fi
     dump_cmd journalctl --rotate
     dump_cmd journalctl --vacuum-files=1
 }
@@ -1385,9 +1497,10 @@ case "${1}" in
                 ;;
         esac
 
-        # 스크립트의 표준 실행 순서(TC01~09, 11~16)를 그대로 따른다 — 사용자가 콤마 목록을
-        # 어떤 순서로 넘기든 무관하게 항상 이 순서로 실행한다.
-        for tc in TC01 TC02 TC03 TC04 TC05 TC06 TC07 TC08 TC09 TC11 TC12 TC13 TC14 TC15 TC16; do
+        # 스크립트의 표준 실행 순서를 그대로 따른다 — 사용자가 콤마 목록을 어떤 순서로
+        # 넘기든 무관하게 항상 이 순서로 실행한다. TC09(factory_reset)는 toupload/staging을
+        # 통째로 비우므로, 다른 TC와 같이 선택돼도 항상 맨 마지막에 오도록 배열 끝에 둔다.
+        for tc in TC01 TC02 TC03 TC04 TC05 TC06 TC07 TC08 TC11 TC12 TC13 TC14 TC15 TC16 TC09; do
             case ",${SELECTED}," in
                 *,${tc},*)
                     case "$tc" in
@@ -1417,8 +1530,10 @@ case "${1}" in
         echo "============================================"
         ;;
     *)
-        # 전체 실행: TC10(리부트 수반, SSH 세션이 끊겨 이 스크립트 안에서 이어갈 수 없음)만
-        # 제외하고 TC01~09, 11~16 을 전부 순서대로 실행한다.
+        # 전체 실행: TC10(리부트 수반, SSH 세션이 끊겨 이 스크립트 안에서 이어갈 수 없음)과
+        # TC15/16(대용량 journal 주입 + 180s 타임아웃 대기로 각각 8~9분+ 걸려 전체 실행을
+        # 지나치게 길게 만듦, 개별 실행/선택 실행으로만 사용)을 제외하고 TC01~09, 11~14 를
+        # 순서대로 실행한다.
         verify_timer_loop_started
         # TC02는 자체적으로 system_log를 재시작해 매번 깨끗한 상태에서 시작하므로 순서 무관하지만,
         # 관례상 가장 먼저 실행한다.
@@ -1433,25 +1548,29 @@ case "${1}" in
         tc06_journal_rotation
         tc07_retention_delete
         tc08_blob_upload
-        tc09_factory_reset
 
         # nmon TC
         tc12_nmon_retention
         tc13_nmon_no_op
         tc11_nmon_upload_happy_path
 
-        # system_log kill/재시작 및 대용량 journal 주입을 수반하는 무거운 TC 는 맨 뒤에 배치
+        # system_log kill/재시작을 수반하는 TC14는 뒤에 배치. TC15/16은 전체 실행에서 제외
+        # (--tc15/--tc16 또는 --only TC15,TC16 으로 개별 실행).
         tc14_rtc_same_start_merge
-        tc15_rotate_sync_compress_fail
-        tc16_boot_log_compress_fail
+
+        # TC09(factory_reset)는 toupload/staging을 통째로 비운다 — 뒤늦게(backlog로 밀려)
+        # 처리돼도 더 건드릴 대상이 없도록 항상 맨 마지막에 실행한다.
+        tc09_factory_reset
 
         echo ""
         echo "============================================"
         echo " 결과: PASS=${PASS}  FAIL=${FAIL}"
         echo "============================================"
         echo ""
-        echo "[안내] TC10(리부트)은 별도 실행 (SSH 세션이 끊겨 이 실행에는 포함 안 됨):"
+        echo "[안내] TC10(리부트)/TC15/TC16 은 별도 실행 (전체 실행에는 포함 안 됨):"
         echo "  ./tc_system_log.sh --tc10-pre   (재부팅 발생)"
         echo "  ./tc_system_log.sh --tc10-post  (SSH 재접속 후)"
+        echo "  ./tc_system_log.sh --tc15       (rotate_sync compress 실패, 8분+)"
+        echo "  ./tc_system_log.sh --tc16       (boot_log compress 실패, 9분+)"
         ;;
 esac

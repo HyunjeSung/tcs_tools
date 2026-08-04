@@ -1,6 +1,8 @@
-# tc_dashboard 실행 산출물
+# tc_dashboard 실행 산출물 (앱별 runs_<app>/, latest_status_<app>.json 포함)
 tools/tc_dashboard/runs/
+tools/tc_dashboard/runs_*/
 tools/tc_dashboard/latest_status.json
+tools/tc_dashboard/latest_status_*.json
 tools/tc_dashboard/__pycache__/
 tools/tc_dashboard/ssh_control.sock
 *.pyc

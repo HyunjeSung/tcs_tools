@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""system_log TC 웹 대시보드 백엔드.
+"""AC Gen2 EMS TC 웹 대시보드 백엔드.
 
-DUT(config.env의 DUT_HOST)에 SSH로 tc_system_log.sh 를 transfer+실행하고,
-결과를 파싱해 현황판/실행이력으로 제공한다.
+DUT(config.env의 DUT_HOST)에 SSH로 tc_<app>.sh 를 transfer+실행하고,
+결과를 파싱해 현황판/실행이력으로 제공한다. 앱(system_log, device_log, ...)별로
+스크립트/실행이력/현황판을 분리해서 관리한다 — APPS 딕셔너리에 새 앱을 등록하면
+프론트엔드 사이드바에 자동으로 나타난다.
 """
 import asyncio
 import json
@@ -29,16 +31,10 @@ KOREAN_FONT_CANDIDATES = [
 ]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-TC_DIR = REPO_ROOT / "tcs" / "system_log"
-TC_SCRIPT = TC_DIR / "tc_system_log.sh"
-
 BASE_DIR = Path(__file__).resolve().parent
-RUNS_DIR = BASE_DIR / "runs"
-STATUS_FILE = BASE_DIR / "latest_status.json"
 STATIC_DIR = BASE_DIR / "static"
-RUNS_DIR.mkdir(exist_ok=True)
 
-MAX_RUNS = 50  # 이 개수를 넘는 오래된 run은 _prune_old_runs()가 디스크에서 삭제한다
+MAX_RUNS = 50  # 앱별로 이 개수를 넘는 오래된 run은 _prune_old_runs()가 디스크에서 삭제한다
 
 
 def _load_config() -> dict:
@@ -80,7 +76,6 @@ SSH_OPTS = [
     "-o", f"ControlPath={SSH_CONTROL_PATH}",
     "-o", "ControlPersist=yes",
 ]
-REMOTE_SCRIPT = "/tmp/tc_system_log.sh"
 
 SERIAL_COM_PORT = _CONFIG.get("SERIAL_COM_PORT", "COM6")
 SERIAL_RUN_PS1 = BASE_DIR / "serial_run.ps1"
@@ -102,13 +97,19 @@ def _wsl_path(win_path: str) -> Path:
         ["wslpath", "-u", win_path], capture_output=True, text=True, check=True,
     ).stdout.strip())
 
+
+# ============================================================
+# 앱 레지스트리 — 여기에 항목을 추가하면 사이드바에 자동으로 나타난다.
+# ============================================================
+
 # tc_system_log.sh 가 실제로 지원하는 --flag 목록 (스크립트 case 문 기준).
 # TC01/02/03/06/07/08/09 는 단독 flag가 없어 기본(default) 실행에만 포함됨.
 # TC10은 reboot로 SSH 세션이 끊겨 default 실행 안에서 이어갈 수 없어 유일하게 제외.
-CATALOG = [
-    {"id": "default", "label": "전체 실행 (TC01~09, 11~16)", "flag": None,
-     "timeout": 3600, "reboot": False,
-     "note": "TC10(reboot) 제외 전체 회귀 세트. TC04/11/14/15/16 대기 포함 — 20분 이상 소요"},
+CATALOG_SYSTEM_LOG = [
+    {"id": "default", "label": "전체 실행 (TC01~09, 11~14)", "flag": None,
+     "timeout": 2600, "reboot": False,
+     "note": "TC10(reboot)·TC15/16(각 8~9분+, 대용량 journal) 제외 회귀 세트 — TC04/11/14 대기 "
+             "포함 10분 내외. TC15/16은 아래 개별 버튼 또는 선택 실행으로 따로 돌릴 것"},
     {"id": "tc02", "label": "TC02 24시간 타이머", "flag": "--tc02",
      "timeout": 180, "reboot": False, "note": "system_log 프로세스 kill 수반 (내부 타이머 상태 초기화)"},
     {"id": "tc04", "label": "TC04 대용량 journal timeout", "flag": "--tc04",
@@ -130,31 +131,88 @@ CATALOG = [
     {"id": "tc14", "label": "TC14 RTC 동일 시작 병합", "flag": "--tc14",
      "timeout": 180, "reboot": False, "note": "system_log 프로세스 kill 수반"},
     {"id": "tc15", "label": "TC15 rotate_sync compress 실패 보존", "flag": "--tc15",
-     "timeout": 420, "reboot": False,
-     "note": "journal 대량(raw ~210MB) 주입으로 180s 압축 타임아웃 강제 유발, 5분+ 소요"},
+     "timeout": 500, "reboot": False,
+     "note": "journal 대량(raw ~400MB) 주입으로 180s 압축 타임아웃 강제 유발, 5분+ 소요"},
     {"id": "tc16", "label": "TC16 boot_log compress 실패 보존", "flag": "--tc16",
-     "timeout": 450, "reboot": False,
-     "note": "TC15와 동일 주입 + system_log kill 수반, 5분+ 소요"},
+     "timeout": 560, "reboot": False,
+     "note": "TC15와 동일 주입 + system_log kill 수반, task_capture_boot_log 완료 신호를 "
+             "journald 폴링으로 기다림(최대 480s) — 5분+ 소요"},
 ]
-CATALOG_MAP = {c["id"]: c for c in CATALOG}
 
 # 대시보드 "선택 실행" 체크박스용 — tc_system_log.sh 의 `--only TC01,TC03,...` 가 지원하는
 # TC 목록과 대략적인 개별 소요시간(초). TC10은 reboot로 세션이 끊겨 다른 TC와 한 번에
 # 묶을 수 없으므로 선택 대상에서 제외(--tc10-pre/post 전용 버튼만 사용).
 # 순서 = tc_system_log.sh 의 표준 실행 순서와 동일.
-CUSTOM_TC_TIMEOUTS = {
+CUSTOM_TC_TIMEOUTS_SYSTEM_LOG = {
     "TC01": 90, "TC02": 180, "TC03": 90, "TC04": 300, "TC05": 120,
-    "TC06": 90, "TC07": 90, "TC08": 90, "TC09": 90,
-    "TC11": 420, "TC12": 120, "TC13": 120, "TC14": 180, "TC15": 420, "TC16": 450,
+    "TC06": 90, "TC07": 90, "TC08": 90, "TC09": 230,
+    "TC11": 420, "TC12": 120, "TC13": 120, "TC14": 180, "TC15": 500, "TC16": 560,
 }
-CUSTOM_TC_ORDER = list(CUSTOM_TC_TIMEOUTS.keys())
 
-app = FastAPI(title="system_log TC Dashboard")
+# device_log는 아직 tc-bootstrap 스켈레톤 단계(tc01_placeholder만 존재, --only 미지원) —
+# tc-dev로 실제 TC가 채워지면 CATALOG_DEVICE_LOG/CUSTOM_TC_TIMEOUTS_DEVICE_LOG를
+# system_log와 같은 패턴으로 채우면 된다. 지금은 뼈대만 등록해 사이드바에서 앱 전환이
+# 가능함을 보여준다.
+CATALOG_DEVICE_LOG = [
+    {"id": "default", "label": "전체 실행 (TC01)", "flag": None,
+     "timeout": 60, "reboot": False,
+     "note": "스켈레톤 단계 — tc-dev로 실제 TC 구현 필요 (tc01_placeholder만 존재)"},
+]
+CUSTOM_TC_TIMEOUTS_DEVICE_LOG = {}  # --only 플래그 미지원 — 선택 실행 UI는 비어있으면 자동 숨김
 
+
+def _register_app(app_id: str, label: str, script_name: str, catalog: list,
+                   custom_tc_timeouts: dict, runs_dirname: str, status_filename: str) -> dict:
+    tc_dir = REPO_ROOT / "tcs" / app_id
+    runs_dir = BASE_DIR / runs_dirname
+    runs_dir.mkdir(exist_ok=True)
+    return {
+        "id": app_id,
+        "label": label,
+        "tc_script": tc_dir / script_name,
+        "remote_script": f"/tmp/{script_name}",
+        "catalog": catalog,
+        "catalog_map": {c["id"]: c for c in catalog},
+        "custom_tc_timeouts": custom_tc_timeouts,
+        "custom_tc_order": list(custom_tc_timeouts.keys()),
+        "runs_dir": runs_dir,
+        "status_file": BASE_DIR / status_filename,
+    }
+
+
+# system_log는 기존 배포와 동일한 경로(runs/, latest_status.json)를 그대로 써서
+# 기존 실행 이력을 마이그레이션 없이 유지한다. 새 앱은 각자 이름이 붙은 디렉토리/파일을 쓴다.
+APPS = {
+    "system_log": _register_app(
+        "system_log", "system_log", "tc_system_log.sh",
+        CATALOG_SYSTEM_LOG, CUSTOM_TC_TIMEOUTS_SYSTEM_LOG,
+        runs_dirname="runs", status_filename="latest_status.json",
+    ),
+    "device_log": _register_app(
+        "device_log", "device_log", "tc_device_log.sh",
+        CATALOG_DEVICE_LOG, CUSTOM_TC_TIMEOUTS_DEVICE_LOG,
+        runs_dirname="runs_device_log", status_filename="latest_status_device_log.json",
+    ),
+}
+DEFAULT_APP_ID = "system_log"
+
+
+def _get_app(app_id: str) -> dict:
+    cfg = APPS.get(app_id)
+    if cfg is None:
+        raise HTTPException(404, f"unknown app: {app_id}")
+    return cfg
+
+
+app = FastAPI(title="AC Gen2 EMS TC Dashboard")
+
+# 물리적으로 DUT가 하나뿐이라 앱이 달라도 SSH/시리얼 채널을 동시에 쓸 수 없다 —
+# run 동시성 제한은 앱별이 아니라 전역으로 건다.
 current_run = {"run_id": None}
 
 
 class RunRequest(BaseModel):
+    app_id: str = DEFAULT_APP_ID
     tc_id: str
     channel: str = "ssh"
     tc_ids: Optional[List[str]] = None  # tc_id == "custom" 일 때만 사용 — 선택된 TC 목록(예: ["TC01","TC03"])
@@ -250,15 +308,17 @@ def _filter_journal_for_tc(tc_block_text: str, sl_journal_text: str) -> str:
     return "\n".join(matched)
 
 
-def _generate_result_md(run_id: str, meta: dict, cases: list, log_text: str, sl_journal_text: str = "") -> str:
-    """tcs/system_log/tc_system_log_result.md 형식을 본떠 run 단위 결과 보고서를 생성한다."""
+def _generate_result_md(app_cfg: dict, run_id: str, meta: dict, cases: list,
+                         log_text: str, sl_journal_text: str = "") -> str:
+    """tcs/<app>/tc_<app>_result.md 형식을 본떠 run 단위 결과 보고서를 생성한다."""
     lines = [
         f"# TC 실행 결과 보고서 — {meta.get('label') or meta.get('tc_id', run_id)}",
         "",
         f"**Run ID:** {run_id}",
+        f"**앱:** {app_cfg['label']}",
         f"**실행일시:** {meta.get('started_at', '')} ~ {meta.get('finished_at', '')}",
         f"**DUT:** {DUT_HOST} (qcells-emsplus, AC Gen2, aarch64)",
-        f"**스크립트:** tc_system_log.sh",
+        f"**스크립트:** {app_cfg['tc_script'].name}",
         "",
         f"**총 결과: PASS={meta.get('pass', 0)} / FAIL={meta.get('fail', 0)} / {len(cases)}기준**",
         "",
@@ -350,30 +410,57 @@ def _merge_case_status(status_map: dict, run_id: str, meta: dict, cases: list):
         }
 
 
-def _update_latest_status(run_id: str, meta: dict, cases: list):
+def _update_latest_status(status_file: Path, run_id: str, meta: dict, cases: list):
     status_map = {}
-    if STATUS_FILE.exists():
-        status_map = json.loads(STATUS_FILE.read_text())
+    if status_file.exists():
+        status_map = json.loads(status_file.read_text())
     _merge_case_status(status_map, run_id, meta, cases)
-    STATUS_FILE.write_text(json.dumps(status_map, ensure_ascii=False, indent=2))
+    status_file.write_text(json.dumps(status_map, ensure_ascii=False, indent=2))
 
 
-def _prune_old_runs(keep: int = MAX_RUNS):
-    """runs/ 아래 run_id(=YYYYMMDD_HHMMSS_... 접두라 이름순=시간순) 기준 최신 keep개만 남기고 나머지는 삭제."""
-    run_dirs = sorted((d for d in RUNS_DIR.iterdir() if d.is_dir()), key=lambda d: d.name, reverse=True)
+CASE_ID_IN_ASSERT_RE = re.compile(r'assert\s+"(TC\d+)')
+
+
+def _valid_tc_numbers(app_cfg: dict) -> set:
+    """앱의 현재 tc_<app>.sh에 실제 `assert "TCxx...` 로 남아있는 TC 번호(예: "TC04") 집합.
+
+    TC 스펙이 바뀌어(예: TC04-2 티어 제거) 더 이상 스크립트가 만들어내지 않는 case가
+    과거 run의 output.log에는 여전히 남아있어, 그대로 replay하면 현황판(latest_status)에
+    유령처럼 계속 다시 나타난다 — replay 결과를 이 집합으로 걸러 현재 스크립트에 없는
+    TC는 자동으로 빠지게 한다.
+
+    case id 전체(예: "TC04-1")가 아니라 TC 번호만 뽑는다 — TC04처럼 sub-id를
+    `assert "TC04-${idx}: ..."`같은 셸 변수로 넣는 TC는 소스 텍스트에 리터럴
+    "TC04-1"이 없어서, case id 전체를 정규식으로 매칭하면 그 TC가 통째로 걸러져
+    현황판에서 사라지는 실제 버그가 있었다(2026-08-04). TC 번호는 항상 리터럴이므로
+    이 레벨에서 매칭하면 sub-id가 동적이어도 안전하다.
+
+    스크립트를 못 읽으면(경로 이상 등) 빈 집합을 돌려주고, 호출부에서 빈 집합이면
+    필터링 자체를 건너뛰어 오동작으로 전체가 비는 걸 방지한다.
+    """
+    try:
+        text = app_cfg["tc_script"].read_text()
+    except Exception:
+        return set()
+    return set(CASE_ID_IN_ASSERT_RE.findall(text))
+
+
+def _prune_old_runs(runs_dir: Path, keep: int = MAX_RUNS):
+    """runs_dir 아래 run_id(=YYYYMMDD_HHMMSS_... 접두라 이름순=시간순) 기준 최신 keep개만 남기고 나머지는 삭제."""
+    run_dirs = sorted((d for d in runs_dir.iterdir() if d.is_dir()), key=lambda d: d.name, reverse=True)
     for stale_dir in run_dirs[keep:]:
         shutil.rmtree(stale_dir, ignore_errors=True)
 
 
-def _rebuild_latest_status():
-    """latest_status.json을 실제 runs/ 에 남아있는 run들만 기준으로 처음부터 다시 만든다.
+def _rebuild_latest_status(app_cfg: dict):
+    """status_file을 실제 runs_dir에 남아있는 run들만 기준으로 처음부터 다시 만든다.
 
     _update_latest_status()는 누적(merge)만 하므로 _prune_old_runs()로 오래된 run 디렉토리를
     지워도 그 run이 마지막으로 채운 케이스 항목은 그대로 남는다 — 존재하지 않는 run_id를
     가리키는 stale 항목이 생기지 않도록, 남은 run들을 시간순으로 재생해 상태를 재구성한다.
     """
     status_map: dict = {}
-    run_dirs = sorted((d for d in RUNS_DIR.iterdir() if d.is_dir()), key=lambda d: d.name)
+    run_dirs = sorted((d for d in app_cfg["runs_dir"].iterdir() if d.is_dir()), key=lambda d: d.name)
     for run_dir in run_dirs:
         meta_path = run_dir / "meta.json"
         if not meta_path.exists():
@@ -387,7 +474,12 @@ def _rebuild_latest_status():
         _, _, cases = _parse_results(log_path.read_text(errors="replace"))
         if cases:
             _merge_case_status(status_map, run_dir.name, meta, cases)
-    STATUS_FILE.write_text(json.dumps(status_map, ensure_ascii=False, indent=2))
+
+    valid_tcs = _valid_tc_numbers(app_cfg)
+    if valid_tcs:
+        status_map = {cid: v for cid, v in status_map.items() if v.get("tc") in valid_tcs}
+
+    app_cfg["status_file"].write_text(json.dumps(status_map, ensure_ascii=False, indent=2))
 
 
 SL_TAG_RE = re.compile(r"\[SL\]|\[SM\]")
@@ -400,6 +492,8 @@ async def _start_journal_capture():
 
     tc-run 스킬이 시리얼에서 하는 '백그라운드 journalctl -f capture' 패턴을
     SSH 세션으로 재현한 것 — 실패해도 본 TC 실행에는 영향 주지 않는다(best-effort).
+    [SL]/[SM] 태그는 system_log 전용이라 다른 앱에서는 근거가 안 잡힐 수 있음 —
+    새 앱이 자기 태그를 쓰게 되면 이 필터를 앱별로 넓히면 된다.
     """
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -446,32 +540,65 @@ async def _ensure_fresh_ssh_master():
     """DUT가 재부팅되면 기존 ControlMaster 연결은 죽지만, 그 마스터 프로세스 자체는
     ServerAliveCountMax(80회)를 다 채워야 스스로 종료돼 최대 20분간 좀비로 남는다 —
     그동안 새 scp/ssh는 죽은 채널을 계속 재사용하려다 (타임아웃 없이) 멈춰버린다.
-    매 SSH run 시작 전에 `ssh -O check`로 마스터가 실제로 살아있는지 빠르게 확인하고,
-    죽어있으면 `-O exit`로 정리해서 다음 연결이 새로 맺어지게 한다.
+
+    `ssh -O check`만으로는 이 좀비를 못 잡는다 — 마스터 "프로세스"는 살아있다고
+    응답하지만(그래서 rc=0), 그 밑의 실제 멀티플렉스 터널은 죽어있는 경우가 실측으로
+    확인됨(2026-08-04, DUT 재부팅 후 두 차례 재현: `-O check` "Master running"인데
+    실제 `ssh ... true`는 15초+ 무한 대기). 그래서 check가 통과해도 SSH_OPTS(같은
+    ControlPath)로 실제 왕복(`true`) 하나를 짧은 타임아웃으로 찔러보고, 그것마저
+    막히면 좀비로 간주해 `-O exit`로 정리한다 — 다음 scp/ssh(ControlMaster=auto)가
+    새 연결을 맺는다.
     """
+    master_alive = False
     try:
         check = await asyncio.create_subprocess_exec(
             "ssh", "-o", f"ControlPath={SSH_CONTROL_PATH}", "-O", "check", f"root@{DUT_HOST}",
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
         )
         rc = await asyncio.wait_for(check.wait(), timeout=5)
-        if rc != 0:
+        master_alive = (rc == 0)
+    except Exception:
+        master_alive = False
+
+    zombie = not master_alive
+    if master_alive:
+        probe = None
+        try:
+            probe = await asyncio.create_subprocess_exec(
+                "ssh", *SSH_OPTS, f"root@{DUT_HOST}", "true",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            probe_rc = await asyncio.wait_for(probe.wait(), timeout=8)
+            zombie = (probe_rc != 0)
+        except asyncio.TimeoutError:
+            zombie = True
+            if probe:
+                probe.kill()
+                await probe.wait()
+        except Exception:
+            zombie = True
+
+    if zombie:
+        try:
             exit_proc = await asyncio.create_subprocess_exec(
                 "ssh", "-o", f"ControlPath={SSH_CONTROL_PATH}", "-O", "exit", f"root@{DUT_HOST}",
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
             )
             await asyncio.wait_for(exit_proc.wait(), timeout=5)
-    except Exception:
-        pass  # 소켓이 아예 없거나 이미 정상이면 여기로 옴 — best-effort
+            await asyncio.sleep(0.3)  # 소켓 파일 정리 여유 — 없어도 대개 direct fallback으로 동작함
+        except Exception:
+            pass  # 소켓이 아예 없으면 여기로 옴 — best-effort
 
 
-async def _run_ssh(entry: dict, log_path: Path, run_dir: Path) -> "int | None":
+async def _run_ssh(app_cfg: dict, entry: dict, log_path: Path, run_dir: Path) -> "int | None":
     await _ensure_fresh_ssh_master()
+    tc_script = app_cfg["tc_script"]
+    remote_script = app_cfg["remote_script"]
     with open(log_path, "wb") as logf:
-        logf.write(f"$ scp tc_system_log.sh -> root@{DUT_HOST}:{REMOTE_SCRIPT}\n".encode())
+        logf.write(f"$ scp {tc_script.name} -> root@{DUT_HOST}:{remote_script}\n".encode())
         logf.flush()
         scp_proc = await asyncio.create_subprocess_exec(
-            "scp", *SSH_OPTS, str(TC_SCRIPT), f"root@{DUT_HOST}:{REMOTE_SCRIPT}",
+            "scp", *SSH_OPTS, str(tc_script), f"root@{DUT_HOST}:{remote_script}",
             stdout=logf, stderr=logf,
         )
         scp_rc = await asyncio.wait_for(scp_proc.wait(), timeout=30)
@@ -479,14 +606,14 @@ async def _run_ssh(entry: dict, log_path: Path, run_dir: Path) -> "int | None":
             raise RuntimeError(f"scp 전송 실패 (exit={scp_rc})")
 
         chmod_proc = await asyncio.create_subprocess_exec(
-            *ssh_argv(f"chmod +x {REMOTE_SCRIPT}"), stdout=logf, stderr=logf,
+            *ssh_argv(f"chmod +x {remote_script}"), stdout=logf, stderr=logf,
         )
         await asyncio.wait_for(chmod_proc.wait(), timeout=15)
 
         journal_proc, journal_lines, collector_task = await _start_journal_capture()
 
         flag = entry["flag"] or ""
-        remote_cmd = f"sh {REMOTE_SCRIPT} {flag} 2>&1".strip()
+        remote_cmd = f"sh {remote_script} {flag} 2>&1".strip()
         logf.write(f"\n$ ssh root@{DUT_HOST} '{remote_cmd}'\n\n".encode())
         logf.flush()
         run_proc = await asyncio.create_subprocess_exec(
@@ -610,14 +737,14 @@ async def _tail_serial_log(wsl_log_path: Path, start_offset: int, log_path: Path
             break
 
 
-async def _run_serial(entry: dict, log_path: Path) -> "int | None":
+async def _run_serial(app_cfg: dict, entry: dict, log_path: Path) -> "int | None":
     """COM 포트로 transfer+실행. SSH 를 전혀 쓰지 않으므로 SSH lockout 상태에서도 동작한다
     (journal capture 등 SSH 기반 부가 기능은 지원하지 않음)."""
     flag = entry["flag"] or ""
     argv = [
         "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", _win_path(SERIAL_RUN_PS1),
         "-ComPort", SERIAL_COM_PORT,
-        "-ScriptPath", _win_path(TC_SCRIPT),
+        "-ScriptPath", _win_path(app_cfg["tc_script"]),
         "-Flag", flag,
         "-TimeoutMs", str(entry["timeout"] * 1000),
         "-LogFile", SERIAL_LIVE_LOG_WIN,
@@ -661,12 +788,13 @@ async def _run_serial(entry: dict, log_path: Path) -> "int | None":
     return None
 
 
-async def run_tc(run_id: str, entry: dict, channel: str = "ssh"):
-    run_dir = RUNS_DIR / run_id
+async def run_tc(run_id: str, app_cfg: dict, entry: dict, channel: str = "ssh"):
+    run_dir = app_cfg["runs_dir"] / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     log_path = run_dir / "output.log"
     meta = {
         "run_id": run_id,
+        "app_id": app_cfg["id"],
         "tc_id": entry["id"],
         "label": entry["label"],
         "flag": entry["flag"],
@@ -682,9 +810,9 @@ async def run_tc(run_id: str, entry: dict, channel: str = "ssh"):
 
     try:
         if channel == "serial":
-            exit_code = await _run_serial(entry, log_path)
+            exit_code = await _run_serial(app_cfg, entry, log_path)
         else:
-            exit_code = await _run_ssh(entry, log_path, run_dir)
+            exit_code = await _run_ssh(app_cfg, entry, log_path, run_dir)
 
         meta["exit_code"] = exit_code
         text = log_path.read_text(errors="replace")
@@ -706,7 +834,7 @@ async def run_tc(run_id: str, entry: dict, channel: str = "ssh"):
         meta["finished_at"] = datetime.now().isoformat(timespec="seconds")
         _write_meta(run_dir, meta)
         if cases:
-            _update_latest_status(run_id, meta, cases)
+            _update_latest_status(app_cfg["status_file"], run_id, meta, cases)
     except Exception as e:
         meta["status"] = "error"
         meta["finished_at"] = datetime.now().isoformat(timespec="seconds")
@@ -715,73 +843,87 @@ async def run_tc(run_id: str, entry: dict, channel: str = "ssh"):
             logf.write(f"\n[DASHBOARD ERROR] {e}\n".encode())
     finally:
         current_run["run_id"] = None
-        _prune_old_runs()
-        _rebuild_latest_status()
+        _prune_old_runs(app_cfg["runs_dir"])
+        _rebuild_latest_status(app_cfg)
 
 
 SUMMARY_RE = re.compile(r"PASS=(\d+)\s+FAIL=(\d+)")
 
 
 def _reconcile_stale_runs():
-    """서버 재시작/크래시로 완료 처리를 못 받은 run을 로그 기준으로 정정.
+    """서버 재시작/크래시로 완료 처리를 못 받은 run을 로그 기준으로 정정 (모든 앱 대상).
 
     run_tc()는 프로세스가 끝나야 meta.json에 finished_at/status를 쓰는데,
     서버 프로세스 자체가 죽으면(재시작 등) 그 전에 meta가 running으로 남는다.
     output.log 에 최종 요약 라인이 있으면 실제로는 끝난 것이므로 그 결과로
     채우고, 없으면 진짜 중단된 것이므로 interrupted 로 표시한다.
     """
-    if not RUNS_DIR.exists():
-        return
-    for run_dir in RUNS_DIR.iterdir():
-        meta_path = run_dir / "meta.json"
-        if not meta_path.exists():
+    for app_cfg in APPS.values():
+        runs_dir = app_cfg["runs_dir"]
+        if not runs_dir.exists():
             continue
-        meta = json.loads(meta_path.read_text())
-        if meta.get("status") != "running":
-            continue
-        log_path = run_dir / "output.log"
-        text = log_path.read_text(errors="replace") if log_path.exists() else ""
-        pass_n, fail_n, cases = _parse_results(text)
-        finished_at = (
-            datetime.fromtimestamp(log_path.stat().st_mtime).isoformat(timespec="seconds")
-            if log_path.exists() else datetime.now().isoformat(timespec="seconds")
-        )
-        entry = CATALOG_MAP.get(meta["tc_id"], {})
-        meta["pass"], meta["fail"] = pass_n, fail_n
-        meta["finished_at"] = finished_at
-        if SUMMARY_RE.search(text):
-            meta["exit_code"] = 0 if fail_n == 0 else 1
-            meta["status"] = "rebooted" if entry.get("reboot") else ("fail" if fail_n > 0 else "pass")
-            if cases:
-                _update_latest_status(meta["run_id"], meta, cases)
-        else:
-            meta["status"] = "interrupted"
-        _write_meta(run_dir, meta)
+        for run_dir in runs_dir.iterdir():
+            meta_path = run_dir / "meta.json"
+            if not meta_path.exists():
+                continue
+            meta = json.loads(meta_path.read_text())
+            if meta.get("status") != "running":
+                continue
+            log_path = run_dir / "output.log"
+            text = log_path.read_text(errors="replace") if log_path.exists() else ""
+            pass_n, fail_n, cases = _parse_results(text)
+            finished_at = (
+                datetime.fromtimestamp(log_path.stat().st_mtime).isoformat(timespec="seconds")
+                if log_path.exists() else datetime.now().isoformat(timespec="seconds")
+            )
+            entry = app_cfg["catalog_map"].get(meta["tc_id"], {})
+            meta["pass"], meta["fail"] = pass_n, fail_n
+            meta["finished_at"] = finished_at
+            if SUMMARY_RE.search(text):
+                meta["exit_code"] = 0 if fail_n == 0 else 1
+                meta["status"] = "rebooted" if entry.get("reboot") else ("fail" if fail_n > 0 else "pass")
+                if cases:
+                    _update_latest_status(app_cfg["status_file"], meta["run_id"], meta, cases)
+            else:
+                meta["status"] = "interrupted"
+            _write_meta(run_dir, meta)
 
 
 @app.on_event("startup")
 def _on_startup():
     current_run["run_id"] = None
     _reconcile_stale_runs()
-    _prune_old_runs()
-    _rebuild_latest_status()
+    for app_cfg in APPS.values():
+        _prune_old_runs(app_cfg["runs_dir"])
+        _rebuild_latest_status(app_cfg)
+
+
+@app.get("/api/apps")
+def api_apps():
+    """사이드바용 앱 목록 — id/표시명/선택 실행(custom) 지원 여부를 내려준다."""
+    return [
+        {"id": cfg["id"], "label": cfg["label"], "has_custom": len(cfg["custom_tc_order"]) > 0}
+        for cfg in APPS.values()
+    ]
 
 
 @app.get("/api/tcs")
-def api_tcs():
-    return CATALOG
+def api_tcs(app_id: str = DEFAULT_APP_ID):
+    return _get_app(app_id)["catalog"]
 
 
 @app.get("/api/custom_tcs")
-def api_custom_tcs():
-    """'선택 실행' 체크박스 목록 — id/타임아웃을 서버(CUSTOM_TC_TIMEOUTS)에서 그대로 내려준다."""
-    return [{"id": tc, "timeout": CUSTOM_TC_TIMEOUTS[tc]} for tc in CUSTOM_TC_ORDER]
+def api_custom_tcs(app_id: str = DEFAULT_APP_ID):
+    """'선택 실행' 체크박스 목록 — id/타임아웃을 서버(앱별 CUSTOM_TC_TIMEOUTS)에서 그대로 내려준다."""
+    cfg = _get_app(app_id)
+    return [{"id": tc, "timeout": cfg["custom_tc_timeouts"][tc]} for tc in cfg["custom_tc_order"]]
 
 
 @app.get("/api/status")
-def api_status():
-    if STATUS_FILE.exists():
-        return json.loads(STATUS_FILE.read_text())
+def api_status(app_id: str = DEFAULT_APP_ID):
+    status_file = _get_app(app_id)["status_file"]
+    if status_file.exists():
+        return json.loads(status_file.read_text())
     return {}
 
 
@@ -798,9 +940,10 @@ def api_ping():
 
 
 @app.get("/api/runs")
-def api_runs(page: int = 1, page_size: int = 10):
+def api_runs(app_id: str = DEFAULT_APP_ID, page: int = 1, page_size: int = 10):
+    runs_dir = _get_app(app_id)["runs_dir"]
     runs = []
-    for d in sorted(RUNS_DIR.iterdir(), reverse=True):
+    for d in sorted(runs_dir.iterdir(), reverse=True):
         meta_path = d / "meta.json"
         if meta_path.exists():
             runs.append(json.loads(meta_path.read_text()))
@@ -831,8 +974,8 @@ def _read_clean_log(log_path: Path) -> str:
 
 
 @app.get("/api/runs/{run_id}")
-def api_run_detail(run_id: str):
-    run_dir = RUNS_DIR / run_id
+def api_run_detail(run_id: str, app_id: str = DEFAULT_APP_ID):
+    run_dir = _get_app(app_id)["runs_dir"] / run_id
     meta_path = run_dir / "meta.json"
     if not meta_path.exists():
         raise HTTPException(404, "run not found")
@@ -843,8 +986,8 @@ def api_run_detail(run_id: str):
     return {"meta": meta, "log": log_text, "cases": cases}
 
 
-def _load_finished_run(run_id: str):
-    run_dir = RUNS_DIR / run_id
+def _load_finished_run(app_cfg: dict, run_id: str):
+    run_dir = app_cfg["runs_dir"] / run_id
     meta_path = run_dir / "meta.json"
     if not meta_path.exists():
         raise HTTPException(404, "run not found")
@@ -860,11 +1003,12 @@ def _load_finished_run(run_id: str):
 
 
 @app.get("/api/runs/{run_id}/result.pdf")
-def api_run_result_pdf(run_id: str):
-    meta, cases, log_text, sl_journal_text = _load_finished_run(run_id)
-    md_content = _generate_result_md(run_id, meta, cases, log_text, sl_journal_text)
+def api_run_result_pdf(run_id: str, app_id: str = DEFAULT_APP_ID):
+    app_cfg = _get_app(app_id)
+    meta, cases, log_text, sl_journal_text = _load_finished_run(app_cfg, run_id)
+    md_content = _generate_result_md(app_cfg, run_id, meta, cases, log_text, sl_journal_text)
     pdf_bytes = _markdown_to_pdf(md_content)
-    filename = f"tc_system_log_result_{run_id}.pdf"
+    filename = f"tc_{app_id}_result_{run_id}.pdf"
     return Response(
         pdf_bytes, media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
@@ -873,22 +1017,24 @@ def api_run_result_pdf(run_id: str):
 
 @app.post("/api/run")
 async def api_run(req: RunRequest):
+    app_cfg = _get_app(req.app_id)
     if req.channel not in ("ssh", "serial"):
         raise HTTPException(400, "unknown channel")
     if current_run["run_id"] is not None:
         raise HTTPException(409, f"이미 실행 중인 run: {current_run['run_id']}")
 
     if req.tc_id == "custom":
+        custom_timeouts = app_cfg["custom_tc_timeouts"]
         selected = req.tc_ids or []
-        unknown = [t for t in selected if t not in CUSTOM_TC_TIMEOUTS]
+        unknown = [t for t in selected if t not in custom_timeouts]
         if unknown:
             raise HTTPException(400, f"지원하지 않는 TC: {', '.join(unknown)}")
-        # 사용자가 체크박스를 어떤 순서로 눌렀든, 스크립트가 실행할 표준 순서(TC01~16)로 정렬.
-        ordered = [t for t in CUSTOM_TC_ORDER if t in selected]
+        # 사용자가 체크박스를 어떤 순서로 눌렀든, 스크립트가 실행할 표준 순서로 정렬.
+        ordered = [t for t in app_cfg["custom_tc_order"] if t in selected]
         if not ordered:
             raise HTTPException(400, "선택된 TC가 없음")
         # verify_timer_loop_started + (필요시) setup_rotate 오버헤드 여유분.
-        timeout = 90 + sum(CUSTOM_TC_TIMEOUTS[t] for t in ordered)
+        timeout = 90 + sum(custom_timeouts[t] for t in ordered)
         entry = {
             "id": "custom",
             "label": f"선택 실행 ({', '.join(ordered)})",
@@ -898,14 +1044,14 @@ async def api_run(req: RunRequest):
             "note": None,
         }
     else:
-        if req.tc_id not in CATALOG_MAP:
+        if req.tc_id not in app_cfg["catalog_map"]:
             raise HTTPException(400, "unknown tc_id")
-        entry = CATALOG_MAP[req.tc_id]
+        entry = app_cfg["catalog_map"][req.tc_id]
 
-    run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{req.tc_id}"
+    run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{req.app_id}_{req.tc_id}"
     current_run["run_id"] = run_id
-    asyncio.create_task(run_tc(run_id, entry, req.channel))
-    return {"run_id": run_id}
+    asyncio.create_task(run_tc(run_id, app_cfg, entry, req.channel))
+    return {"run_id": run_id, "app_id": req.app_id}
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
