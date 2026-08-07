@@ -45,15 +45,18 @@
 
 | 버튼 | 내용 | 비고 |
 |---|---|---|
-| 전체 실행 | TC01,02,03,04,05,06,07,08,09,12,13 순차 실행 | TC04 대기 포함, 수 분 소요 |
+| 빠른 실행 | TC01~09, 11~14 순차 실행 (TC10/15/16 제외) | TC04/11/14 대기 포함 10분 내외, 회귀 확인용 기본값 |
+| 전체 실행 | TC01~16 전부 순차 실행 (TC10 포함) | --full로 TC01~09,11~16 실행 후 대시보드가 직접 TC10-pre→reboot 대기(ping/ssh 폴링)→TC10-post를 이어 진행. 수동 개입 불필요, 35~45분+ 소요, 릴리즈 전 전수 검증용 |
 | TC04 대용량 journal timeout | TC04만 단독 | |
-| TC05 압축 | TC05-4만 단독 | TC05-1~3은 setup이 필요해 전체 실행에서만 확인됨 |
-| TC10-pre / TC10-post | reboot 시나리오 | pre 실행 후 **DUT가 재부팅**됨 — 부팅 완료를 기다렸다가 post 실행 |
+| TC05 압축 | TC05-4만 단독 | TC05-1~3은 setup이 필요해 빠른 실행/전체 실행에서만 확인됨 |
+| TC10-pre / TC10-post | reboot 시나리오 수동 실행 | 전체 실행이 이미 TC10을 자동 포함하므로, 이 버튼은 TC10만 따로 재현하고 싶을 때 사용. pre 실행 후 **DUT가 재부팅**됨 — 부팅 완료를 기다렸다가 post 실행 |
 | TC11 nmon 업로드 | happy path | BlobUploadDirector 5분+30초 대기 포함 |
 | TC12 nmon retention | 단독 | |
 | TC13 nmon no-op | 단독 | |
 | TC11+12+13 일괄 | nmon 세트 | |
 | TC14 RTC 동일 시작 병합 | 단독 | system_log 프로세스 kill 수반 |
+| TC15 rotate_sync compress 실패 | 단독 | 대용량 journal 주입, 8분+ |
+| TC16 boot_log compress 실패 | 단독 | 대용량 journal 주입 + system_log kill, 9분+ |
 
 버튼 아래 노란 글씨(있는 경우)는 실행 전 알아둬야 할 주의사항이다.
 

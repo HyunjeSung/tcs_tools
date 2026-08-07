@@ -106,10 +106,17 @@ def _wsl_path(win_path: str) -> Path:
 # TC01/02/03/06/07/08/09 는 단독 flag가 없어 기본(default) 실행에만 포함됨.
 # TC10은 reboot로 SSH 세션이 끊겨 default 실행 안에서 이어갈 수 없어 유일하게 제외.
 CATALOG_SYSTEM_LOG = [
-    {"id": "default", "label": "전체 실행 (TC01~09, 11~14)", "flag": None,
+    {"id": "default", "label": "빠른 실행 (TC01~09, 11~14)", "flag": None,
      "timeout": 2600, "reboot": False,
      "note": "TC10(reboot)·TC15/16(각 8~9분+, 대용량 journal) 제외 회귀 세트 — TC04/11/14 대기 "
-             "포함 10분 내외. TC15/16은 아래 개별 버튼 또는 선택 실행으로 따로 돌릴 것"},
+             "포함 10분 내외. TC15/16은 아래 개별 버튼 또는 --full 로 따로 돌릴 것"},
+    {"id": "full", "label": "전체 실행 (TC01~16)", "flag": "--full",
+     "timeout": 3900, "reboot": False, "chain_tc10": True,
+     "note": "TC01~09, 11~16을 --full로 돌린 뒤 TC10(pre→reboot 대기→post)까지 이 대시보드가 "
+             "직접 이어서 진행 — SSH 세션이 reboot로 끊기는 구간은 ping/ssh 폴링으로 재접속을 "
+             "기다렸다가 자동 재개한다(수동 TC10-pre/post 클릭 불필요). TC15/16 대용량 journal "
+             "주입 + reboot 대기 포함 35~45분+ 소요 — 릴리즈 전 전수 검증용. 회귀 확인엔 위 "
+             "빠른 실행 권장. 이 버튼 실행 중에는 다른 TC를 동시에 돌릴 수 없다"},
     {"id": "tc02", "label": "TC02 24시간 타이머", "flag": "--tc02",
      "timeout": 180, "reboot": False, "note": "system_log 프로세스 kill 수반 (내부 타이머 상태 초기화)"},
     {"id": "tc04", "label": "TC04 대용량 journal timeout", "flag": "--tc04",
@@ -631,6 +638,157 @@ async def _run_ssh(app_cfg: dict, entry: dict, log_path: Path, run_dir: Path) ->
     return exit_code
 
 
+async def _wait_for_dut_reboot(logf, max_wait_s: int = 180) -> bool:
+    """TC10-pre 직후 ping → SSH 순으로 폴링해 재부팅 완료를 기다린다.
+    tc-run 스킬의 SSH fallback 절차(ping 폴링 → ssh ALIVE 폴링 → boot+merge sleep)를
+    대시보드 오케스트레이션으로 재현한 것. reboot로 기존 ControlMaster 소켓이 좀비가
+    되는 문제는 _ensure_fresh_ssh_master()가 처리(module docstring 참고)."""
+    loop = asyncio.get_event_loop()
+
+    logf.write("\n[DASHBOARD] DUT 재부팅 대기 중 (ping polling)...\n".encode())
+    logf.flush()
+    deadline = loop.time() + max_wait_s
+    pinged = False
+    while loop.time() < deadline:
+        proc = await asyncio.create_subprocess_exec(
+            "ping", "-c", "1", "-W", "1", DUT_HOST,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        if await proc.wait() == 0:
+            pinged = True
+            break
+        await asyncio.sleep(2)
+    if not pinged:
+        logf.write(f"[DASHBOARD] ping 응답 없음 ({max_wait_s}s 초과) - reboot 실패 가능성\n".encode())
+        return False
+
+    logf.write("[DASHBOARD] ping 응답 확인. SSH 재접속 대기...\n".encode())
+    logf.flush()
+    await _ensure_fresh_ssh_master()
+
+    deadline = loop.time() + max_wait_s
+    alive = False
+    while loop.time() < deadline:
+        proc = await asyncio.create_subprocess_exec(
+            *ssh_argv("echo ALIVE"), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            out = b""
+        if b"ALIVE" in out:
+            alive = True
+            break
+        await asyncio.sleep(3)
+    if not alive:
+        logf.write(f"[DASHBOARD] SSH 재접속 실패 ({max_wait_s}s 초과)\n".encode())
+        return False
+
+    logf.write("[DASHBOARD] SSH 재접속 확인. boot+merge 완료 대기 (45s)...\n".encode())
+    logf.flush()
+    await asyncio.sleep(45)
+    return True
+
+
+async def _run_ssh_full_with_tc10(app_cfg: dict, entry: dict, log_path: Path, run_dir: Path) -> "int | None":
+    """--full(TC01~09,11~16) 뒤에 TC10(pre-reboot-post)까지 같은 run으로 이어 붙인다.
+
+    TC10은 reboot로 SSH 세션이 끊겨 단일 ssh 호출 안에 넣을 수 없다 — 이 함수가
+    --full 실행 → --tc10-pre 발사(세션 끊김) → ping/ssh 폴링으로 재부팅 완료 대기 →
+    스크립트 재전송(재부팅 후 /tmp ramdisk 휘발) → --tc10-post 순으로 직접
+    오케스트레이션한다. 세 단계 모두 같은 output.log에 이어 쓴다 — run_tc()의
+    _parse_results가 output.log 전체를 한 번에 스캔해 [PASS]/[FAIL]을 case_id로
+    모으므로, 여기선 병합 로직 없이 그냥 이어 쓰기만 하면 최종 PASS/FAIL이 자동 합산된다.
+    sl_journal.log만 예외적으로 _stop_journal_capture가 매 단계 덮어쓰므로, 여기서는
+    단계별로 직접 수거해 마지막에 한 번에 합쳐 쓴다.
+    """
+    accumulated_sl_lines: list = []
+
+    async def _run_step(step_entry: dict, append: bool) -> "int | None":
+        await _ensure_fresh_ssh_master()
+        tc_script = app_cfg["tc_script"]
+        remote_script = app_cfg["remote_script"]
+        with open(log_path, "ab" if append else "wb") as logf:
+            logf.write(f"$ scp {tc_script.name} -> root@{DUT_HOST}:{remote_script}\n".encode())
+            logf.flush()
+            scp_proc = await asyncio.create_subprocess_exec(
+                "scp", *SSH_OPTS, str(tc_script), f"root@{DUT_HOST}:{remote_script}",
+                stdout=logf, stderr=logf,
+            )
+            scp_rc = await asyncio.wait_for(scp_proc.wait(), timeout=30)
+            if scp_rc != 0:
+                raise RuntimeError(f"scp 전송 실패 (exit={scp_rc})")
+
+            chmod_proc = await asyncio.create_subprocess_exec(
+                *ssh_argv(f"chmod +x {remote_script}"), stdout=logf, stderr=logf,
+            )
+            await asyncio.wait_for(chmod_proc.wait(), timeout=15)
+
+            journal_proc, journal_lines, collector_task = await _start_journal_capture()
+
+            flag = step_entry["flag"] or ""
+            remote_cmd = f"sh {remote_script} {flag} 2>&1".strip()
+            logf.write(f"\n$ ssh root@{DUT_HOST} '{remote_cmd}'\n\n".encode())
+            logf.flush()
+            run_proc = await asyncio.create_subprocess_exec(
+                *ssh_argv(remote_cmd), stdout=logf, stderr=logf,
+            )
+            try:
+                exit_code = await asyncio.wait_for(run_proc.wait(), timeout=step_entry["timeout"])
+            except asyncio.TimeoutError:
+                run_proc.kill()
+                await run_proc.wait()
+                logf.write(b"\n[DASHBOARD] TIMEOUT - \xed\x94\x84\xeb\xa1\x9c\xec\x84\xb8\xec\x8a\xa4 \xea\xb0\x95\xec\xa0\x9c \xec\xa2\x85\xeb\xa3\x8c\n")
+                exit_code = None
+
+            # tc10-pre는 reboot로 세션이 끊기며 journalctl -f 프로세스도 같이 죽는다 —
+            # best-effort로 그때까지 모인 lines만 수거한다 (_stop_journal_capture와 달리
+            # 파일에 바로 쓰지 않고 accumulated_sl_lines에 모아뒀다 마지막에 합쳐 쓴다).
+            try:
+                await asyncio.sleep(1.5)
+            except Exception:
+                pass
+            if journal_proc is not None:
+                try:
+                    journal_proc.kill()
+                    await asyncio.wait_for(journal_proc.wait(), timeout=5)
+                except Exception:
+                    pass
+                if collector_task:
+                    collector_task.cancel()
+                accumulated_sl_lines.extend(l for l in journal_lines if SL_TAG_RE.search(l))
+            logf.flush()
+        return exit_code
+
+    # 1단계: TC01~09, 11~16
+    exit_code = await _run_step({**entry, "flag": "--full"}, append=False)
+
+    # 2단계: TC10-pre (reboot 발생 — 세션이 끊기며 exit_code가 비정상/None일 수 있음, 정상 동작)
+    with open(log_path, "ab") as logf:
+        logf.write("\n\n=== TC10 (reboot) 자동 진행 ===\n".encode())
+    await _run_step(app_cfg["catalog_map"]["tc10-pre"], append=True)
+
+    # 3단계: 재부팅 완료 대기
+    with open(log_path, "ab") as logf:
+        rebooted_ok = await _wait_for_dut_reboot(logf)
+
+    if not rebooted_ok:
+        with open(log_path, "ab") as logf:
+            logf.write("\n[DASHBOARD ERROR] DUT 재부팅 확인 실패 - TC10-post 스킵\n".encode())
+        if accumulated_sl_lines:
+            (run_dir / "sl_journal.log").write_text("".join(accumulated_sl_lines))
+        return None
+
+    # 4단계: TC10-post
+    exit_code = await _run_step(app_cfg["catalog_map"]["tc10-post"], append=True)
+
+    if accumulated_sl_lines:
+        (run_dir / "sl_journal.log").write_text("".join(accumulated_sl_lines))
+    return exit_code
+
+
 _SERIAL_NOISE_LINE_RE = re.compile(r"docker-loader\[")
 _SERIAL_PROMPT_PREFIX_RE = re.compile(r"^(?:P>\s*)+")
 _SERIAL_DASH_MARKERS = {"M_RM_DONE", "M_DECODE_DONE", "M_DASH_RUN_END"}
@@ -811,6 +969,8 @@ async def run_tc(run_id: str, app_cfg: dict, entry: dict, channel: str = "ssh"):
     try:
         if channel == "serial":
             exit_code = await _run_serial(app_cfg, entry, log_path)
+        elif entry.get("chain_tc10"):
+            exit_code = await _run_ssh_full_with_tc10(app_cfg, entry, log_path, run_dir)
         else:
             exit_code = await _run_ssh(app_cfg, entry, log_path, run_dir)
 
