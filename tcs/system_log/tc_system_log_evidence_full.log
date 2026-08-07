@@ -423,3 +423,53 @@ move_dir_failure=/edge/log/system/archive
 
 ############ journalctl --disk-usage ############
 Archived and active journals take up 8.0M in the file system.
+
+############################################################
+# SECTION 7 — TC07 트리거 방식 수정 후 재검증 (SSH, --only TC07 단독 실행) — FILE: tc07_recheck_20260806.log (37 lines)
+# 생성: 2026-08-06 12:39:50 ~ 12:42:56
+# DUT: 192.168.10.25 (qcells-emsplus)
+# 스크립트 md5: e073159ce3feb0d416048e06366a658f
+# 배경: 2026-08-06 11:04 전체 실행(TC01~09,11~14)에서 TC07-1 FAIL 확인.
+#       원인 조사 결과 delete_log()는 get_log_data가 아니라 24h 주기 타이머
+#       (system_log_timer_loop, system_log.cpp:807-816)에서만 발화함을 확인 —
+#       기존 TC07은 get_log_data 재요청 후 10초만 대기해 항상 발화 전 상태를 봄.
+#       TC02와 동일한 패턴(재시작으로 last_run_time 초기화 → +25h shift → 70초 대기
+#       → hwclock 복원)으로 트리거 방식을 교체 후 단독 재실행.
+# 결과: PASS=2 / FAIL=0
+############################################################
+Warning: Permanently added '192.168.10.25' (ECDSA) to the list of known hosts.
+============================================
+ system_log TC
+ Thu Aug  6 12:39:50 KST 2026
+============================================
+=== [PRE-CHECK] system_log_timer_loop 시작 확인 ===
+  [OK] [12:38:16:611][I][SL] [system_log_timer_loop] loop started.
+=== TC07: 30일 경과 파일 삭제 ===
+  [TC07-절차0] system_log 재시작 (타이머 상태 초기화)...
+    system_log 재시작 완료 (PID 1165 -> 2757, 40초 소요)
+  [TC07-절차0-1] startup 시퀀스(부팅로그 캡처/병합) 완료 대기...
+    [OK] startup 시퀀스 완료 확인 (21x3초 대기)
+  [TC07-절차1] NTP로 시스템 시간 동기화...
+    동기화 후 시간: 2026-08-06 12:41:45
+  [TC07-절차2] 시스템 시간 +25h 이동: 2026-08-07 13:41:45 (원래: 2026-08-06 12:41:45)
+  [TC07-절차3] 더미 파일 생성 완료 (shift 후 시각 기준):
+  $ ls -la /edge/log/toupload/system/systemlog_20250101000000_20250101010000.log.xz /edge/log/toupload/system/systemlog_20250501000000_20250501010000.log.xz
+    -rw-r--r-- 1 root root 0 Jul  7 13:41 /edge/log/toupload/system/systemlog_20250101000000_20250101010000.log.xz
+    -rw-r--r-- 1 root root 0 Jul  9 13:41 /edge/log/toupload/system/systemlog_20250501000000_20250501010000.log.xz
+    exit_code:0
+  [TC07-절차4] 24h 타이머 발화 대기 (70초)...
+  $ ls -la /edge/log/toupload/system/systemlog_20250101000000_20250101010000.log.xz
+    ls: cannot access '/edge/log/toupload/system/systemlog_20250101000000_20250101010000.log.xz': No such file or directory
+    exit_code:2
+[PASS] TC07-1: 31일 경과 파일 자동 삭제됨
+  $ ls -la /edge/log/toupload/system/systemlog_20250501000000_20250501010000.log.xz
+    -rw-r--r-- 1 root root 0 Jul  9 13:41 /edge/log/toupload/system/systemlog_20250501000000_20250501010000.log.xz
+    exit_code:0
+[PASS] TC07-2: 29일 경과 파일 유지됨
+  [TC07-절차6] 시스템 시간 복원...
+    hwclock -s (RTC 기준) 로 복원 완료
+    복원 후 시간: 2026-08-06 12:42:57
+
+============================================
+ 결과: PASS=2  FAIL=0
+============================================

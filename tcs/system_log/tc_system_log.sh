@@ -542,17 +542,89 @@ tc06_journal_rotation() {
 tc07_retention_delete() {
     echo "=== TC07: 30일 경과 파일 삭제 ==="
 
+    # cleanup_log_dir(day:30 삭제)는 get_log_data가 아니라 24h 타이머
+    # (system_log_timer_loop, system_log.cpp:807-816)에서만 발화한다. get_log_data로는
+    # 트리거를 흉내낼 수 없다는 게 확인된 사실이라, TC02와 동일한 패턴(재시작으로
+    # last_run_time 초기화 → +25h shift로 elapsed>=24h 강제 → 대기 → 시간 복원)으로
+    # 실제 24h 타이머를 발화시켜 검증한다.
+
+    # 0. system_log 재시작 (내부 last_run_time 타이머 상태 초기화) — TC02-절차0과 동일 이유.
+    echo "  [TC07-절차0] system_log 재시작 (타이머 상태 초기화)..."
+    local sl_pid_before sl_pid_after wait_i
+    sl_pid_before=$(pgrep -f /edge/app/bin/system_log | head -1)
+    if [ -n "$sl_pid_before" ]; then
+        kill -9 "$sl_pid_before" 2>/dev/null
+        wait_i=0
+        sl_pid_after=""
+        while [ "$wait_i" -lt 60 ]; do
+            sleep 1
+            sl_pid_after=$(pgrep -f /edge/app/bin/system_log | grep -v "^${sl_pid_before}$" | head -1)
+            [ -n "$sl_pid_after" ] && break
+            wait_i=$((wait_i + 1))
+        done
+        if [ -n "$sl_pid_after" ]; then
+            echo "    system_log 재시작 완료 (PID ${sl_pid_before} -> ${sl_pid_after}, ${wait_i}초 소요)"
+            sleep 3
+        else
+            echo "    [WARN] system_log 재시작 확인 실패(60초 대기) — 계속 진행하나 발화 보장 안 됨"
+        fi
+    else
+        echo "    [WARN] system_log PID 확인 실패 — 재시작 스킵, 계속 진행"
+    fi
+
+    # 0-1. startup 시퀀스 완료 대기. last_run_time은 task_capture_boot_log/
+    # task_merge_staged_logs/task_upload_nmon/delete_old_journals가 끝난 뒤에야
+    # system_clock::now()로 세팅된다(system_log.cpp:796-802) — TC02-절차0-1과 동일.
+    echo "  [TC07-절차0-1] startup 시퀀스(부팅로그 캡처/병합) 완료 대기..."
+    local restart_epoch=$(date +%s)
+    local startup_done=""
+    local wait_j=0
+    while [ "$wait_j" -lt 100 ]; do
+        if journalctl -u docker-loader --no-pager -o cat --since "@${restart_epoch}" 2>/dev/null \
+            | grep -qF '[task_upload_nmon] Start nmon upload'; then
+            startup_done=1
+            break
+        fi
+        sleep 3
+        wait_j=$((wait_j + 1))
+    done
+    if [ -n "$startup_done" ]; then
+        echo "    [OK] startup 시퀀스 완료 확인 (${wait_j}x3초 대기)"
+    else
+        echo "    [WARN] startup 시퀀스 완료 로그 미확인(300초 대기) — 계속 진행"
+    fi
+
+    # 1. NTP로 시스템 시간 동기화 (TC02-절차3과 동일)
+    echo "  [TC07-절차1] NTP로 시스템 시간 동기화..."
+    timedatectl set-ntp yes 2>/dev/null
+    sleep 2
+    timedatectl set-ntp false 2>/dev/null
+    echo "    동기화 후 시간: $(date '+%F %T')"
+
+    # 2. 시간 +25h shift — elapsed>=24h 조건을 확실히 채운다 (TC02-절차4와 동일)
+    local t0 t_shift
+    t0=$(date +%s)
+    t_shift=$((t0 + 25 * 3600))
+    echo "  [TC07-절차2] 시스템 시간 +25h 이동: $(date -d "@${t_shift}" '+%F %T') (원래: $(date -d "@${t0}" '+%F %T'))"
+    date -s "@${t_shift}" > /dev/null
+
+    # 3. 더미 파일 생성 — 반드시 shift *이후* "지금"을 기준으로 31일 전/29일 전을 touch한다.
+    # shift 전에 touch하면 파일 나이에 25h가 더 얹혀(29일 더미가 30일 문턱을 넘어) TC07-2가
+    # 오탐 FAIL 날 수 있다.
     local dummy_31="${TOUPLOAD_DIR}/systemlog_20250101000000_20250101010000.log.xz"
     local dummy_29="${TOUPLOAD_DIR}/systemlog_20250501000000_20250501010000.log.xz"
-
     touch -d "31 days ago" "$dummy_31" 2>/dev/null
     touch -d "29 days ago" "$dummy_29" 2>/dev/null
-    echo "  더미 파일 생성 완료:"
+    echo "  [TC07-절차3] 더미 파일 생성 완료 (shift 후 시각 기준):"
     dump_cmd ls -la "$dummy_31" "$dummy_29"
-    echo "  get_log_data 트리거 (삭제 확인용)..."
-    send_and_wait "get_log_data" "{}" 30 > /dev/null
-    sleep 10
 
+    # 4. 24h 타이머 발화 대기 — task_rotate_sync 완료 직후 같은 루프 반복 안에서
+    # cleanup_log_dir가 바로 이어 실행되므로(system_log.cpp:810-816), TC02와 동일한
+    # 70초 관찰창을 재사용한다.
+    echo "  [TC07-절차4] 24h 타이머 발화 대기 (70초)..."
+    sleep 70
+
+    # 5. 삭제 결과 확인
     dump_cmd ls -la "$dummy_31"
     if [ ! -f "$dummy_31" ]; then
         assert "TC07-1: 31일 경과 파일 자동 삭제됨" "PASS"
@@ -568,6 +640,25 @@ tc07_retention_delete() {
     else
         assert "TC07-2: 29일 경과 파일 유지됨" "FAIL"
     fi
+
+    # 6. 시간 복원 — hwclock(RTC 기준) 우선, 실패 시 NTP 폴백 (TC02-절차7과 동일)
+    echo "  [TC07-절차6] 시스템 시간 복원..."
+    if hwclock -s 2>/dev/null; then
+        echo "    hwclock -s (RTC 기준) 로 복원 완료"
+    else
+        echo "    hwclock -s 실패 — NTP로 폴백"
+        timedatectl set-ntp yes 2>/dev/null
+        local ntp_synced=""
+        local wait_i=0
+        while [ "$wait_i" -lt 15 ]; do
+            sleep 1
+            ntp_synced=$(timedatectl show -p NTPSynchronized --value 2>/dev/null)
+            [ "$ntp_synced" = "yes" ] && break
+            wait_i=$((wait_i + 1))
+        done
+        echo "    NTPSynchronized=${ntp_synced:-N/A}"
+    fi
+    echo "    복원 후 시간: $(date '+%F %T')"
 }
 
 # ============================================================
@@ -608,11 +699,12 @@ tc09_factory_reset() {
 
     # factory_reset의 clear_all_logs()는 log_dir_mutex_ unique_lock을 잡는데, 그 사이
     # 이전 get_log_data가 트리거한 task_rotate_sync(shared_lock)가 아직 안 끝났으면
-    # 그게 풀릴 때까지(최대 SYSTEM_LOG_REQUEST_CMD_TIMEOUT=180s급) 줄을 서서 기다린다 —
-    # 30s는 이 정상적인 대기조차 못 버텨 오탐 FAIL이 났다(실측: 24s 대기 후 성공).
-    # TC15와 동일하게 180s + 여유로 200s.
+    # 그게 풀릴 때까지(최대 SYSTEM_LOG_REQUEST_CMD_TIMEOUT=180s급) 줄을 서서 기다린다.
+    # 의도적으로 30s(타이트한 간격)를 유지한다 — get_log_data 직후 곧바로 factory_reset이
+    # 들어오는 실사용 패턴에서 이 대기가 계속 길어지는 회귀가 생기면 여기서 바로 FAIL로
+    # 드러나야 한다(실측: 24s 대기 후 성공한 이력 있음 — 30s는 그 마진을 일부러 좁게 둔 값).
     local resp
-    resp=$(send_and_wait "request_factory_reset" "{}" 200)
+    resp=$(send_and_wait "request_factory_reset" "{}" 30)
 
     if [ -n "$resp" ]; then
         assert "TC09-1: factory_reset 응답 수신" "PASS"
@@ -835,8 +927,16 @@ tc11_nmon_upload_happy_path() {
 
 # ============================================================
 # TC12: nmon retention 30일
-#   - nmon.sh 의 find -mtime +30 -exec rm -f 동작 검증
+#   - cleanup_nmon_dir() (system_log.cpp) 의 30일 보존 삭제 동작 검증
 #   - 3 디렉토리: old / archive / toupload/system/nmon
+#   - cleanup_nmon_dir()는 system_log 자신의 task_cleanup_logs()에서만 호출되고
+#     (프로세스 시작 시 1회 + 24시간 주기), "nmon.service" 재시작과는 무관하다 —
+#     예전엔 `systemctl restart nmon.service`로 트리거를 흉내 냈지만 실제로는
+#     아무 정리도 유발하지 못해 근처의 다른 TC(kill -9 재시작)가 우연히 타이밍을
+#     맞춰줄 때만 통과하는 flaky 테스트였다(실측: 20260807_152712_system_log_full
+#     run에서 우연이 안 맞아 FAIL). TC14/TC16과 동일하게 system_log를 직접
+#     kill -9 해 재시작을 강제하고, 그 재시작이 부르는 task_cleanup_logs()의
+#     결과(더미 파일 소멸)를 폴링해서 기다리는 방식으로 결정적으로 재현한다.
 # ============================================================
 tc12_nmon_retention() {
     echo "=== TC12: nmon retention 30일 ==="
@@ -860,9 +960,36 @@ tc12_nmon_retention() {
         touch -d "40 days ago" "$old40_meta" 2>/dev/null
     done
 
-    echo "  [TC12-절차2] systemctl restart nmon.service ..."
-    systemctl restart nmon.service 2>/dev/null
-    sleep 3
+    # 전체 경로로 매칭 필수 — "system_log"만 쓰면 이 스크립트 자신(tc_system_log.sh)까지
+    # 걸려 head -1이 엉뚱한 PID를 집는 사고가 TC14/TC16에서 실측됨 (동일 관례 재사용).
+    local SL_PID
+    SL_PID=$(pgrep -f /edge/app/bin/system_log | head -1)
+    if [ -z "$SL_PID" ]; then
+        echo "  [ERROR] system_log 프로세스 없음"
+        assert "TC12-1: 3 디렉토리에서 mtime 40일 .nmon 더미 모두 삭제됨" "FAIL"
+        assert "TC12-2: 3 디렉토리에서 현재 시각 .nmon 더미 보존됨" "FAIL"
+        assert "TC12-3: 3 디렉토리에서 mtime 40일 .nmon.meta 더미 모두 삭제됨" "FAIL"
+        assert "TC12-4: 3 디렉토리에서 현재 시각 .nmon.meta 더미 보존됨" "FAIL"
+        return
+    fi
+    echo "  [TC12-절차2] system_log kill (PID ${SL_PID}) → 재시작 시 task_cleanup_logs() 발화 대기..."
+    kill -9 "$SL_PID" 2>/dev/null
+
+    # 재시작 후 cleanup_nmon_dir()가 old40 더미를 지울 때까지 최대 90초 폴링
+    # (TC14의 재시작 대기 예산과 동일 — docker-loader 전체 재시작이 걸릴 수 있음).
+    local i old40_gone=0
+    for i in $(seq 1 90); do
+        sleep 1
+        if [ ! -f "${NMON_OLD_DIR}/tc12_old40.nmon" ] \
+           && [ ! -f "${NMON_ARCHIVE_DIR}/tc12_old40.nmon" ] \
+           && [ ! -f "${NMON_TOUPLOAD_DIR}/tc12_old40.nmon" ]; then
+            old40_gone=1
+            echo "  [${i}s] old40 더미 삭제 감지"
+            break
+        fi
+        [ $((i % 20)) -eq 0 ] && printf "  [%2ds] 대기 중...\n" "$i"
+    done
+    [ "$old40_gone" -eq 0 ] && echo "  [WARN] 90초 내 old40 더미 삭제 미감지 — 이후 검증은 현재 상태 기준으로 진행"
 
     local fail_old_nmon=0 fail_old_meta=0 fail_now_nmon=0 fail_now_meta=0
     for d in "${NMON_OLD_DIR}" "${NMON_ARCHIVE_DIR}" "${NMON_TOUPLOAD_DIR}"; do
@@ -1385,6 +1512,33 @@ verify_timer_loop_started() {
     fi
 }
 
+# 빠른 실행/전체 실행(--full)이 공유하는 공통 시퀀스. TC09(factory_reset)와 후속
+# 안내 문구는 각 case 분기에서 따로 처리한다 (전체 실행은 여기 이어 TC15/16을 더 실행).
+run_quick_set() {
+    verify_timer_loop_started
+    # TC02는 자체적으로 system_log를 재시작해 매번 깨끗한 상태에서 시작하므로 순서 무관하지만,
+    # 관례상 가장 먼저 실행한다.
+    tc02_timer_running
+
+    # TC02 이후 나머지 TC들의 사전 조건(toupload .xz 1개)을 위한 SETUP
+    setup_rotate
+    tc01_filename_format
+    tc03_on_demand_export
+    tc04_timeout_large_log
+    tc05_compression
+    tc06_journal_rotation
+    tc07_retention_delete
+    tc08_blob_upload
+
+    # nmon TC
+    tc12_nmon_retention
+    tc13_nmon_no_op
+    tc11_nmon_upload_happy_path
+
+    # system_log kill/재시작을 수반하는 TC14는 뒤에 배치.
+    tc14_rtc_same_start_merge
+}
+
 case "${1}" in
     --tc10-pre)
         tc10_pre
@@ -1529,34 +1683,17 @@ case "${1}" in
         echo " 결과: PASS=${PASS}  FAIL=${FAIL}"
         echo "============================================"
         ;;
-    *)
-        # 전체 실행: TC10(리부트 수반, SSH 세션이 끊겨 이 스크립트 안에서 이어갈 수 없음)과
-        # TC15/16(대용량 journal 주입 + 180s 타임아웃 대기로 각각 8~9분+ 걸려 전체 실행을
-        # 지나치게 길게 만듦, 개별 실행/선택 실행으로만 사용)을 제외하고 TC01~09, 11~14 를
-        # 순서대로 실행한다.
-        verify_timer_loop_started
-        # TC02는 자체적으로 system_log를 재시작해 매번 깨끗한 상태에서 시작하므로 순서 무관하지만,
-        # 관례상 가장 먼저 실행한다.
-        tc02_timer_running
+    --full)
+        # 전체 실행: TC10(리부트 수반, SSH 세션이 끊겨 이 스크립트 안에서 이어갈 수 없어
+        # 유일하게 제외)만 빼고 TC01~09, 11~16 을 순서대로 실행한다. TC15/16이 각 8~9분+
+        # 걸려 빠른 실행(기본, 인자 없음) 대비 훨씬 길다 — 회귀 확인엔 기본 실행을,
+        # 릴리즈 전 전수 검증엔 --full 을 쓴다.
+        run_quick_set
 
-        # TC02 이후 나머지 TC들의 사전 조건(toupload .xz 1개)을 위한 SETUP
-        setup_rotate
-        tc01_filename_format
-        tc03_on_demand_export
-        tc04_timeout_large_log
-        tc05_compression
-        tc06_journal_rotation
-        tc07_retention_delete
-        tc08_blob_upload
-
-        # nmon TC
-        tc12_nmon_retention
-        tc13_nmon_no_op
-        tc11_nmon_upload_happy_path
-
-        # system_log kill/재시작을 수반하는 TC14는 뒤에 배치. TC15/16은 전체 실행에서 제외
-        # (--tc15/--tc16 또는 --only TC15,TC16 으로 개별 실행).
-        tc14_rtc_same_start_merge
+        # system_log kill/재시작을 수반하는 TC16보다 먼저 대용량 journal 주입 TC15를 둔다
+        # (빠른 실행 순서에 TC15/16을 이어붙이는 형태 — TC14 뒤, TC09 앞).
+        tc15_rotate_sync_compress_fail
+        tc16_boot_log_compress_fail
 
         # TC09(factory_reset)는 toupload/staging을 통째로 비운다 — 뒤늦게(backlog로 밀려)
         # 처리돼도 더 건드릴 대상이 없도록 항상 맨 마지막에 실행한다.
@@ -1567,10 +1704,31 @@ case "${1}" in
         echo " 결과: PASS=${PASS}  FAIL=${FAIL}"
         echo "============================================"
         echo ""
-        echo "[안내] TC10(리부트)/TC15/TC16 은 별도 실행 (전체 실행에는 포함 안 됨):"
+        echo "[안내] TC10(리부트)만 별도 실행 (전체 실행에는 포함 안 됨):"
+        echo "  ./tc_system_log.sh --tc10-pre   (재부팅 발생)"
+        echo "  ./tc_system_log.sh --tc10-post  (SSH 재접속 후)"
+        ;;
+    *)
+        # 빠른 실행(회귀 세트): TC10(리부트 수반, SSH 세션이 끊겨 이 스크립트 안에서 이어갈
+        # 수 없음)과 TC15/16(대용량 journal 주입 + 180s 타임아웃 대기로 각각 8~9분+ 걸려
+        # 빠른 실행을 지나치게 길게 만듦)을 제외하고 TC01~09, 11~14 를 순서대로 실행한다.
+        # 전체(TC01~09, 11~16)는 --full 참조.
+        run_quick_set
+
+        # TC09(factory_reset)는 toupload/staging을 통째로 비운다 — 뒤늦게(backlog로 밀려)
+        # 처리돼도 더 건드릴 대상이 없도록 항상 맨 마지막에 실행한다.
+        tc09_factory_reset
+
+        echo ""
+        echo "============================================"
+        echo " 결과: PASS=${PASS}  FAIL=${FAIL}"
+        echo "============================================"
+        echo ""
+        echo "[안내] TC10(리부트)/TC15/TC16 은 별도 실행 (빠른 실행에는 포함 안 됨):"
         echo "  ./tc_system_log.sh --tc10-pre   (재부팅 발생)"
         echo "  ./tc_system_log.sh --tc10-post  (SSH 재접속 후)"
         echo "  ./tc_system_log.sh --tc15       (rotate_sync compress 실패, 8분+)"
         echo "  ./tc_system_log.sh --tc16       (boot_log compress 실패, 9분+)"
+        echo "  ./tc_system_log.sh --full       (TC01~09, 11~16 전체, TC15/16 포함)"
         ;;
 esac

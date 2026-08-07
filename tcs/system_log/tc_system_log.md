@@ -324,26 +324,44 @@ rotation 완료 후 생성된 파일이 유효한 `.xz`이며, 원본 `.log` 파
 
 `delete_log()` 가 `mtime > 30일` 파일을 삭제하고, 30일 미만 파일은 보존하는지 확인한다.
 
+> **트리거 정정(2026-08-06):** `delete_log()`는 `get_log_data`(on-demand 업로드
+> 요청)로는 발화하지 않는다 — `cleanup_log_dir()`/`delete_log()`는 24시간 주기
+> 타이머(`system_log_timer_loop`, `system_log.cpp:807-816`)에서만 호출되며, 이
+> 타이머는 앱 부팅(또는 직전 실행) 이후 실경과 24시간을 `system_clock::now()`
+> 기준으로 측정한다(`system_log.cpp:793-826`). 이전 버전 TC07은 `get_log_data`
+> 재요청 후 10초만 기다려 항상 FAIL 했다 — 실제 삭제 로직이 발화조차 안 된 상태를
+> 검증한 것. TC02(24h 타이머 검증)와 동일하게 앱을 재시작해 타이머를 초기화하고
+> 시스템 시간을 +25h 이동시켜 24h 조건을 강제로 채우는 방식으로 교체한다.
+
 ### 사전 조건
 
 - 공통 전제 조건 충족
 - `touch -d "31 days ago"` / `"29 days ago"` 명령 사용 가능 (mtime 조작)
 - 환경변수: `LOG_RETAIN_DAY=30` (system_log 빌드 상수)
+- `date -s`, `hwclock -s`, `timedatectl set-ntp` 사용 가능 (root, TC02와 동일 권한)
 
 ### 절차
 
-1. SETUP(`get_log_data`) 완료 후 TC07 진입 시 더미 파일 생성:
+1. `system_log` 프로세스 재시작(`kill -9` → 재기동 확인) — 내부 `last_run_time`을
+   fresh 상태로 초기화한다 (TC02-절차0과 동일).
+2. startup 시퀀스(`task_capture_boot_log`→`task_merge_staged_logs`→`task_upload_nmon`)
+   완료 로그 대기 — 이 시점 이후에야 `last_run_time`이 세팅된다.
+3. `timedatectl set-ntp yes/false` 로 NTP와 동기화한 뒤, 시스템 시간을 **+25시간**
+   이동(`date -s`) — `elapsed >= 24h` 조건을 확정적으로 채운다.
+4. **시간 이동 이후** 더미 파일 생성(shift 후 "지금" 기준 31일 전 / 29일 전):
    ```bash
    touch -d "31 days ago" /edge/log/toupload/system/systemlog_20250101000000_20250101010000.log.xz
    touch -d "29 days ago" /edge/log/toupload/system/systemlog_20250501000000_20250501010000.log.xz
    ```
-2. `get_log_data` 재요청 → `task_rotate_sync()` → `delete_log()` 호출됨 (10초 대기)
-3. 31일 더미 파일 존재 여부 확인 (`[ ! -f ... ]`)
-4. 29일 더미 파일 존재 여부 확인 (`[ -f ... ]`)
+5. 24h 타이머 발화 대기 (70초, TC02와 동일 관찰창 — `task_rotate_sync()` 직후 같은
+   반복(iteration) 안에서 `cleanup_log_dir()`가 바로 이어 실행됨)
+6. 31일 더미 파일 존재 여부 확인 (`[ ! -f ... ]`)
+7. 29일 더미 파일 존재 여부 확인 (`[ -f ... ]`)
+8. 시스템 시간 복원 (`hwclock -s` 우선, 실패 시 NTP 재동기화 폴백 — TC02-절차7과 동일)
 
-> **주의:** 더미 파일을 SETUP 이전에 생성하면 `task_rotate_sync()`가 더미 삭제(-1)와
-> 신규 파일 생성(+1)을 동시에 수행해 TC03의 파일 수 순증가가 0이 되므로,
-> TC07 전용으로 별도 `get_log_data` 호출을 통해 삭제를 트리거한다.
+> **주의:** 더미 파일은 반드시 3번(시간 이동) *이후*에 touch할 것. 이동 전에
+> touch하면 파일 나이에 25시간이 그대로 얹혀 29일 더미가 30일 문턱을 넘어설 수
+> 있고, 이 경우 TC07-2가 오탐 FAIL 한다.
 
 ### 기대 결과
 
@@ -415,11 +433,13 @@ rotation 완료 후 생성된 파일이 유효한 `.xz`이며, 원본 `.log` 파
 ### 절차
 
 1. 더미 파일 생성: `touch /edge/log/toupload/system/systemlog_dummy.log.xz`
-2. `mosquitto_pub` → `request_factory_reset` 요청, 200초 대기
-   (factory_reset의 `clear_all_logs()`는 `log_dir_mutex_` unique_lock을 잡는데, 그 사이
+2. `mosquitto_pub` → `request_factory_reset` 요청, 30초 대기 (의도적으로 타이트한 간격 유지 —
+   factory_reset의 `clear_all_logs()`는 `log_dir_mutex_` unique_lock을 잡는데, 그 사이
    이전 get_log_data가 트리거한 `task_rotate_sync()`가 아직 안 끝났으면 그 shared_lock이
-   풀릴 때까지 최대 `SYSTEM_LOG_REQUEST_CMD_TIMEOUT`(180s)급으로 줄을 서서 기다린다 —
-   30초는 이 정상적인 대기조차 못 버텨 오탐 FAIL이 났던 이력이 있어 TC15와 동일하게 상향)
+   풀릴 때까지 최대 `SYSTEM_LOG_REQUEST_CMD_TIMEOUT`(180s)급으로 줄을 서서 기다릴 수 있다.
+   실측(24s 대기 후 성공)상 30초는 그 마진을 좁게 둔 값 — get_log_data 직후 곧바로
+   factory_reset이 들어오는 실사용 패턴에서 이 대기가 더 길어지는 회귀가 생기면 여기서
+   FAIL로 드러나야 하므로, 넉넉한 타임아웃으로 눌러 덮지 않는다)
 3. 응답 수신 확인
 4. 더미 파일 + 디렉토리 내 모든 파일 소멸 확인
 
@@ -540,15 +560,25 @@ rotation 완료 후 생성된 파일이 유효한 `.xz`이며, 원본 `.log` 파
 
 ### 목적
 
-`nmon.sh` 의 `find -mtime +30 -exec rm -f` 가 `nmon/old`, `nmon/archive`,
+`cleanup_nmon_dir()`(`system_log.cpp`) 의 30일 보존 삭제가 `nmon/old`, `nmon/archive`,
 `toupload/system/nmon` 3개 디렉토리 모두에서 정상 동작하는지 확인.
+
+> **트리거 변경 이력:** 예전엔 `systemctl restart nmon.service` 로 정리가 발화된다고
+> 가정했으나, `cleanup_nmon_dir()`는 `system_log` 자신의 `task_cleanup_logs()`에서만
+> 호출된다(프로세스 시작 시 1회 + 24시간 주기) — `nmon.service`는 무관한 별도 유닛이라
+> 재시작해도 이 함수가 안 불린다. 그래서 예전 방식은 근처 다른 TC(kill -9 재시작)나
+> TC02의 시계 점프가 우연히 3초 창에 겹칠 때만 통과하는 flaky 테스트였다(실측:
+> `20260807_152712_system_log_full` run에서 우연이 안 맞아 TC12-1/3 FAIL). TC14/TC16과
+> 동일하게 `system_log`를 직접 `kill -9`해 재시작을 강제하고, 그 재시작이 부르는
+> `task_cleanup_logs()`의 결과(더미 삭제)를 최대 90초 폴링해서 기다리는 방식으로
+> 결정적으로 재현하도록 변경했다(트리거만 변경, 삭제 판정 기준은 기존과 동일).
 
 ### 사전 조건
 
 - 공통 전제 조건 충족
 - 위 3개 디렉토리 쓰기 가능 (없으면 mkdir)
 - `touch -d "40 days ago"` 명령 사용 가능 (mtime 조작)
-- `systemctl restart nmon.service` 권한 (root)
+- `pgrep`, `kill -9` 사용 가능, edge_runtime이 system_log 재시작시키는 상태
 
 ### 절차
 
@@ -556,8 +586,9 @@ rotation 완료 후 생성된 파일이 유효한 `.xz`이며, 원본 `.log` 파
    - 40일 더미: `tc12_old40.nmon`, `tc12_old40.nmon.meta` 등 디렉토리당 1쌍
    - 현재 시각 더미: `tc12_now.nmon`, `tc12_now.nmon.meta` 등 디렉토리당 1쌍
    - 40일 더미는 `touch -d "40 days ago"` 로 mtime 조작
-2. `systemctl restart nmon.service` 실행 (nmon.sh 재실행 → retention 블록 발화)
-3. 3초 대기 (nmon.sh 의 find 실행 완료 보장)
+2. `kill -9 $(pgrep -f /edge/app/bin/system_log)` → edge_runtime 재시작 →
+   `task_cleanup_logs()` → `cleanup_nmon_dir()` 무조건 실행
+3. 3개 디렉토리 모두에서 `tc12_old40.nmon`이 사라질 때까지 최대 90초 1초 간격 폴링
 4. 3개 디렉토리에서 더미 존재/부재 확인
 
 ### 기대 결과
@@ -831,7 +862,7 @@ system_log를 `kill -9` 하면 edge_runtime이 재시작하고 startup 시
 | TC06 | B (반자동) | 저널 사용량 수동 확인 |
 | TC10 | B (반자동) | 실제 리부트 포함 — pre/post 분리 실행, 재접속 후 post 수동 실행 |
 | TC11 | B (반자동) | nmon 업로드 happy path — TC11-5 는 5분+ 대기 (BlobUploadDirector 스캔) |
-| TC12 | A (자동) | nmon retention 30일 — `systemctl restart nmon.service` 후 3초 확인 |
+| TC12 | A (자동) | nmon retention 30일 — `kill -9 system_log` 후 재시작 시 발화하는 cleanup 대기(최대 90초) |
 | TC13 | A (자동) | nmon old 비어있는 환경 호환 — `get_log_data` 응답 수신만 확인 |
 | TC14 | A (자동) | RTC 이상 동일 시작시간 다중 파일 병합 — `kill -9 system_log` 후 edge_runtime 재시작 흐름 재현 |
 | TC15 | A (자동) | task_rotate_sync compress 실패 시 raw .log 보존 — journal 대량 주입으로 180s 타임아웃 강제 유발 |
