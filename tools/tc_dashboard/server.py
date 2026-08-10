@@ -144,6 +144,12 @@ CATALOG_SYSTEM_LOG = [
      "timeout": 560, "reboot": False,
      "note": "TC15와 동일 주입 + system_log kill 수반, task_capture_boot_log 완료 신호를 "
              "journald 폴링으로 기다림(최대 480s) — 5분+ 소요"},
+    {"id": "tc17", "label": "TC17 MessageContext tid 미검증 재현", "flag": "--tc17",
+     "timeout": 90, "reboot": False,
+     "note": "아직 고쳐지지 않은 결함을 이용한 재현 시험 — cmd_host 응답 토픽에 위조 메시지를 "
+             "직접 발행(mosquitto_pub)해 tid 검증 없이 소비/크래시되는지 확인. 정상 판정 관례와 "
+             "동일하게 FAIL=결함 재현(현재 코드에서 항상 재현됨), PASS=tid 검증 도입 후. "
+             "회귀 세트(빠른 실행/전체 실행)에는 미포함, 이 버튼으로만 단독 실행"},
 ]
 
 # 대시보드 "선택 실행" 체크박스용 — tc_system_log.sh 의 `--only TC01,TC03,...` 가 지원하는
@@ -154,6 +160,7 @@ CUSTOM_TC_TIMEOUTS_SYSTEM_LOG = {
     "TC01": 90, "TC02": 180, "TC03": 90, "TC04": 300, "TC05": 120,
     "TC06": 90, "TC07": 90, "TC08": 90, "TC09": 230,
     "TC11": 420, "TC12": 120, "TC13": 120, "TC14": 180, "TC15": 500, "TC16": 560,
+    "TC17": 90,
 }
 
 # device_log는 아직 tc-bootstrap 스켈레톤 단계(tc01_placeholder만 존재, --only 미지원) —
@@ -166,6 +173,259 @@ CATALOG_DEVICE_LOG = [
      "note": "스켈레톤 단계 — tc-dev로 실제 TC 구현 필요 (tc01_placeholder만 존재)"},
 ]
 CUSTOM_TC_TIMEOUTS_DEVICE_LOG = {}  # --only 플래그 미지원 — 선택 실행 UI는 비어있으면 자동 숨김
+
+# 아래 8개 앱(update_monitor ~ energy_monitor)은 AC Gen2 TestCase.xlsx "Unified Edge
+# Platform" 카테고리 기반으로 tc-plan/dev 에이전트가 신규 작성(2026-08-10). 모두
+# --only 미지원, 대신 --tcNN 개별 flag는 지원. reboot:True는 dev agent가 실제로
+# SSH 세션이 끊기는 재부팅이라 판단해 -pre/-post로 분리한 TC에만 붙어있다 — 파괴적
+# 컨테이너 재시작(kill -9, bin 변조 등)이라도 스크립트 안에서 자체 polling으로 끝나면
+# reboot:False로 둔 것(단일 SSH 세션 내에서 완결).
+
+CATALOG_UPDATE_MONITOR = [
+    {"id": "default", "label": "전체 실행 (TC01~TC12, 재부팅/스텁 TC 제외)", "flag": None,
+     "timeout": 600, "reboot": False,
+     "note": "각 TC 개별 버튼은 아래 참고 — 재부팅을 수반하는 TC는 default에 포함되지 않고 개별 -pre/-post 버튼으로 실행"},
+    {"id": "tc01", "label": "TC01 Batch Update 요청 프로토콜", "flag": "--tc01",
+     "timeout": 180, "reboot": False, "note": "수락/거부/우선순위 정렬"},
+    {"id": "tc02", "label": "TC02 ADU Step Manifest 단계별 상태 전이", "flag": "--tc02",
+     "timeout": 180, "reboot": False, "note": "is-installed/download/install/apply"},
+    {"id": "tc03", "label": "TC03 ADU Agent 로그 기반 연동 상태 확인", "flag": "--tc03",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc04", "label": "TC04 Firmware Download 세션 영속화 및 프로세스 재시작 후 Resume", "flag": "--tc04",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc05", "label": "TC05 리소스 사전 점검 설정", "flag": "--tc05",
+     "timeout": 180, "reboot": False, "note": "검토 필요 — 소스 내 미확인"},
+    {"id": "tc06", "label": "TC06 다운로드 중 네트워크 단절 시 재시도", "flag": "--tc06",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc07", "label": "TC07 Manifest SHA256 해시 불일치 시 다운로드 차단", "flag": "--tc07",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc08", "label": "TC08 .swu 서명/AES 키 훼손 파일 업데이트 차단", "flag": "--tc08",
+     "timeout": 180, "reboot": False, "note": "수동 준비물 필요"},
+    {"id": "tc09", "label": "TC09 sw-description HW 호환성(hwrevision) 검사", "flag": "--tc09",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc10", "label": "TC10 업데이트 진행률 MQTT 알림", "flag": "--tc10",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc11", "label": "TC11 Docker 이미지 기반 배포 PRECHECK 및 컨테이너/볼륨 상태 확인", "flag": "--tc11",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc12", "label": "TC12 자동화 불가 항목 목록", "flag": "--tc12",
+     "timeout": 180, "reboot": False, "note": "클라우드 OTA 전체 흐름 / Web HMI 수동 조작"},
+]
+CUSTOM_TC_TIMEOUTS_UPDATE_MONITOR = {}  # --only 플래그 미지원
+
+CATALOG_SYS_MANAGER = [
+    {"id": "default", "label": "전체 실행 (TC01~TC16, 재부팅/스텁 TC 제외)", "flag": None,
+     "timeout": 600, "reboot": False,
+     "note": "각 TC 개별 버튼은 아래 참고 — 재부팅을 수반하는 TC는 default에 포함되지 않고 개별 -pre/-post 버튼으로 실행"},
+    {"id": "tc01", "label": "TC01 악성코드 점검(chkrootkit) 매일 02:00 자동 실행", "flag": "--tc01",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc02", "label": "TC02 방화벽(iptables) 규칙 조회", "flag": "--tc02",
+     "timeout": 180, "reboot": False, "note": "Open Ports 문서 대조는 범위 밖"},
+    {"id": "tc03", "label": "TC03 System Time 관리", "flag": "--tc03",
+     "timeout": 180, "reboot": False, "note": "NTP on/off 및 상태 조회"},
+    {"id": "tc04", "label": "TC04 System Info 모니터링", "flag": "--tc04",
+     "timeout": 180, "reboot": False, "note": "get_system_info"},
+    {"id": "tc05", "label": "TC05 EEPROM Nameplate 관리", "flag": "--tc05",
+     "timeout": 180, "reboot": False, "note": "get/set_eeprom_info"},
+    {"id": "tc06", "label": "TC06 Internet 연결 관리", "flag": "--tc06",
+     "timeout": 180, "reboot": False, "note": "get_internet_status"},
+    {"id": "tc07", "label": "TC07 Host Network Interface 관리", "flag": "--tc07",
+     "timeout": 180, "reboot": False, "note": "조회 + DHCP 설정 + 서비스 재시작"},
+    {"id": "tc08", "label": "TC08 Host Agent와의 연동", "flag": "--tc08",
+     "timeout": 180, "reboot": False, "note": "UDS 재연결 + LED 상태 조회"},
+    {"id": "tc09", "label": "TC09 Host Agent Event Logging", "flag": "--tc09",
+     "timeout": 180, "reboot": False, "note": "whitelist 차단 로그"},
+    {"id": "tc10", "label": "TC10 Host Command 지원", "flag": "--tc10",
+     "timeout": 180, "reboot": False, "note": "cmd_host 화이트리스트 명령군"},
+    {"id": "tc11", "label": "TC11 HW별 Configuration 지원", "flag": "--tc11",
+     "timeout": 180, "reboot": False, "note": "get_platform_info"},
+    {"id": "tc12-pre", "label": "TC12-pre Safe Reboot", "flag": "--tc12-pre",
+     "timeout": 180, "reboot": True, "note": "request_system_reboot → sys_manager → host_agent"},
+    {"id": "tc12-post", "label": "TC12-post Safe Reboot", "flag": "--tc12-post",
+     "timeout": 180, "reboot": False, "note": "request_system_reboot → sys_manager → host_agent"},
+    {"id": "tc13", "label": "TC13 LED 밝기 경계값 제어", "flag": "--tc13",
+     "timeout": 180, "reboot": False, "note": "sysfs 직접"},
+    {"id": "tc14", "label": "TC14 LED 상태 시나리오 (부팅/업데이트/네트워크/클라우드/운영 모드) —", "flag": "--tc14",
+     "timeout": 180, "reboot": False, "note": "검토 필요 — 소스 내 일부만 확인"},
+    {"id": "tc15", "label": "TC15 LED 제어", "flag": "--tc15",
+     "timeout": 180, "reboot": False, "note": "밝기 0~255 + RGB 색상, IPC 경유"},
+]
+CUSTOM_TC_TIMEOUTS_SYS_MANAGER = {}  # --only 플래그 미지원
+
+CATALOG_DB_MANAGER = [
+    {"id": "default", "label": "전체 실행 (TC01~TC11, 재부팅/스텁 TC 제외)", "flag": None,
+     "timeout": 600, "reboot": False,
+     "note": "각 TC 개별 버튼은 아래 참고 — 재부팅을 수반하는 TC는 default에 포함되지 않고 개별 -pre/-post 버튼으로 실행"},
+    {"id": "tc01", "label": "TC01 Configuration 테이블 생성 및 select_all_records 조회", "flag": "--tc01",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc02", "label": "TC02 Configuration 이력 정보 클라우드 전달", "flag": "--tc02",
+     "timeout": 180, "reboot": False, "note": "SyncConfigurationRequest"},
+    {"id": "tc03", "label": "TC03 Persistent State 변경 정보 전달", "flag": "--tc03",
+     "timeout": 180, "reboot": False, "note": "update_records 즉시 반영"},
+    {"id": "tc04", "label": "TC04 System Setting 변경 정보 즉시 반영", "flag": "--tc04",
+     "timeout": 180, "reboot": False, "note": "Log Level"},
+    {"id": "tc05", "label": "TC05 Persistent State 부팅 시점 정보 전달", "flag": "--tc05",
+     "timeout": 180, "reboot": False, "note": "검토 필요 — 로그 태그 불일치"},
+    {"id": "tc06-pre", "label": "TC06-pre System Setting 부팅 시점 정보 전달", "flag": "--tc06-pre",
+     "timeout": 180, "reboot": True, "note": "Log Level 재부팅 후 유지"},
+    {"id": "tc06-post", "label": "TC06-post System Setting 부팅 시점 정보 전달", "flag": "--tc06-post",
+     "timeout": 180, "reboot": False, "note": "Log Level 재부팅 후 유지"},
+    {"id": "tc07", "label": "TC07 Persistent State 테이블 생성/조회", "flag": "--tc07",
+     "timeout": 180, "reboot": False, "note": "select_all_records"},
+    {"id": "tc08", "label": "TC08 System Setting 테이블 생성/조회", "flag": "--tc08",
+     "timeout": 180, "reboot": False, "note": "select_all_records"},
+    {"id": "tc09", "label": "TC09 DB 파일 생성/저장 위치 확인", "flag": "--tc09",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc10", "label": "TC10 Register Map 최신 정보 Cloud Sync", "flag": "--tc10",
+     "timeout": 180, "reboot": False, "note": "SyncRegisterMapRequest"},
+]
+CUSTOM_TC_TIMEOUTS_DB_MANAGER = {}  # --only 플래그 미지원
+
+CATALOG_DEVICE_MANAGER = [
+    {"id": "default", "label": "전체 실행 (TC01~TC05, 재부팅/스텁 TC 제외)", "flag": None,
+     "timeout": 600, "reboot": False,
+     "note": "각 TC 개별 버튼은 아래 참고 — 재부팅을 수반하는 TC는 default에 포함되지 않고 개별 -pre/-post 버튼으로 실행"},
+    {"id": "tc01-pre", "label": "TC01-pre configuration.json 신규 Protocol 추가 → 코드 수정 없이 연결 시도 확인", "flag": "--tc01-pre",
+     "timeout": 180, "reboot": True, "note": None},
+    {"id": "tc01-post", "label": "TC01-post configuration.json 신규 Protocol 추가 → 코드 수정 없이 연결 시도 확인", "flag": "--tc01-post",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc02-pre", "label": "TC02-pre configuration.json / register_map.json 부재 시 부팅 동작", "flag": "--tc02-pre",
+     "timeout": 180, "reboot": True, "note": "검토 필요 — 원본 로그 태그 불일치"},
+    {"id": "tc02-post", "label": "TC02-post configuration.json / register_map.json 부재 시 부팅 동작", "flag": "--tc02-post",
+     "timeout": 180, "reboot": False, "note": "검토 필요 — 원본 로그 태그 불일치"},
+    {"id": "tc03-pre", "label": "TC03-pre configuration.json / register_map.json 정상 로드 확인", "flag": "--tc03-pre",
+     "timeout": 180, "reboot": True, "note": None},
+    {"id": "tc03-post", "label": "TC03-post configuration.json / register_map.json 정상 로드 확인", "flag": "--tc03-post",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc04", "label": "TC04 주기적 Read Data 처리", "flag": "--tc04",
+     "timeout": 180, "reboot": False, "note": "검토 필요 — 실제 폴링 루프는 energy_link 소관"},
+    {"id": "tc05", "label": "TC05 자동화 불가 / 검토 필요 항목 목록", "flag": "--tc05",
+     "timeout": 180, "reboot": False, "note": None},
+]
+CUSTOM_TC_TIMEOUTS_DEVICE_MANAGER = {}  # --only 플래그 미지원
+
+CATALOG_AZURE_CONNECTOR = [
+    {"id": "default", "label": "전체 실행 (TC01~TC12, 재부팅/스텁 TC 제외)", "flag": None,
+     "timeout": 600, "reboot": False,
+     "note": "각 TC 개별 버튼은 아래 참고 — 재부팅을 수반하는 TC는 default에 포함되지 않고 개별 -pre/-post 버튼으로 실행"},
+    {"id": "tc01", "label": "TC01 TLS 1.2 이상 지원", "flag": "--tc01",
+     "timeout": 180, "reboot": False, "note": "검토 필요 — 런타임 negotiated 버전 로그 없음"},
+    {"id": "tc02", "label": "TC02 Device Provisioning: edge_device_id 설정 및 DPS 등록 트리거", "flag": "--tc02",
+     "timeout": 180, "reboot": False, "note": "로컬 프로토콜 레벨"},
+    {"id": "tc03", "label": "TC03 인증서 파일 손상 시 재발급(Re-enrollment) 동작 확인", "flag": "--tc03",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc04", "label": "TC04 인증서 파일 삭제 시 재발급 동작 확인", "flag": "--tc04",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc05", "label": "TC05 인증서 만료 임박 시 Re-Enroll", "flag": "--tc05",
+     "timeout": 180, "reboot": False, "note": "검토 필요 — 24시간+ 실시간 대기 필요"},
+    {"id": "tc06", "label": "TC06 Blob Storage 업로드", "flag": "--tc06",
+     "timeout": 180, "reboot": False, "note": "로컬 프로토콜/로그 레벨"},
+    {"id": "tc07", "label": "TC07 Message Queueing Logic: Offline 상태에서 Telemetry 축적", "flag": "--tc07",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc08", "label": "TC08 Message Queueing Logic: Cloud 재연결 후 Telemetry 재발송", "flag": "--tc08",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc09", "label": "TC09 서버(C2D) 메시지 수신 로그 확인", "flag": "--tc09",
+     "timeout": 180, "reboot": False, "note": "반자동 — 발신은 Azure IoT Explorer 수동 조작 필요"},
+    {"id": "tc10", "label": "TC10 Azure IoT Hub 연결 상태 모니터링", "flag": "--tc10",
+     "timeout": 180, "reboot": False, "note": "연결 확인 / 연결 해제 재현"},
+    {"id": "tc11", "label": "TC11 X.509 인증서 파일 존재 및 유효성 검사", "flag": "--tc11",
+     "timeout": 180, "reboot": False, "note": None},
+]
+CUSTOM_TC_TIMEOUTS_AZURE_CONNECTOR = {}  # --only 플래그 미지원
+
+CATALOG_EDGE_RUNTIME = [
+    {"id": "default", "label": "전체 실행 (TC01~TC14, 재부팅/스텁 TC 제외)", "flag": None,
+     "timeout": 600, "reboot": False,
+     "note": "각 TC 개별 버튼은 아래 참고 — 재부팅을 수반하는 TC는 default에 포함되지 않고 개별 -pre/-post 버튼으로 실행"},
+    {"id": "tc01", "label": "TC01 Application Reboot 요청 시 전체 Application 정상 종료", "flag": "--tc01",
+     "timeout": 180, "reboot": False, "note": "파괴적: 컨테이너 재시작"},
+    {"id": "tc02", "label": "TC02 Application Reboot 요청 시 reboot_info.txt 기록", "flag": "--tc02",
+     "timeout": 180, "reboot": False, "note": "TC01과 동일 트리거"},
+    {"id": "tc03", "label": "TC03 부팅 시 uniep Application 실행 순서", "flag": "--tc03",
+     "timeout": 180, "reboot": False, "note": "order 기반 fork/Ready 시퀀스, 파괴적"},
+    {"id": "tc04", "label": "TC04 전체 Application Ready 시 All App Ready 알림 + LED 녹색 전환", "flag": "--tc04",
+     "timeout": 180, "reboot": False, "note": "파괴적"},
+    {"id": "tc05", "label": "TC05 일부 Application Ready 실패 시 60초 Boot Watchdog 타임아웃 → LED 적색 + 컨테이너 재시작", "flag": "--tc05",
+     "timeout": 180, "reboot": False, "note": "파괴적, bin 변조"},
+    {"id": "tc06", "label": "TC06 DB Manager Ready 실패 시 10초 초기 서비스 타이머 타임아웃 → 컨테이너 재시작", "flag": "--tc06",
+     "timeout": 180, "reboot": False, "note": "파괴적, bin 변조"},
+    {"id": "tc07", "label": "TC07 Heartbeat 수신 시 Watchdog 리스트 갱신 로그", "flag": "--tc07",
+     "timeout": 180, "reboot": False, "note": "Debug 로그 레벨 필요"},
+    {"id": "tc08", "label": "TC08 Heartbeat 9초 미수신(Application Crash 포함) 시 Watchdog 재부팅", "flag": "--tc08",
+     "timeout": 180, "reboot": False, "note": "파괴적, kill -9"},
+    {"id": "tc09", "label": "TC09 최초 Watchdog 점검(부팅 후 60초 시점) 관리 앱 총계 로그", "flag": "--tc09",
+     "timeout": 180, "reboot": False, "note": "파괴적, TC04와 캡처 세션 공유 가능"},
+    {"id": "tc10", "label": "TC10 uniep_applist.conf 파일 형식 검증", "flag": "--tc10",
+     "timeout": 180, "reboot": False, "note": "비파괴적"},
+    {"id": "tc11", "label": "TC11 devapp 오버라이드로 Application 실행 순서 변경", "flag": "--tc11",
+     "timeout": 180, "reboot": False, "note": "파괴적, conf 변경 + 컨테이너 재시작"},
+    {"id": "tc12", "label": "TC12 실행 중인 필수 Application 프로세스 목록 확인", "flag": "--tc12",
+     "timeout": 180, "reboot": False, "note": "비파괴적"},
+    {"id": "tc13", "label": "TC13 Configuration 기반 Project(non-uniep) Application 실행", "flag": "--tc13",
+     "timeout": 180, "reboot": False, "note": "검토 필요 — 대상 conf 사전 확인"},
+    {"id": "tc14", "label": "TC14 자동화 불가 항목 목록", "flag": "--tc14",
+     "timeout": 180, "reboot": False, "note": None},
+]
+CUSTOM_TC_TIMEOUTS_EDGE_RUNTIME = {}  # --only 플래그 미지원
+
+CATALOG_WEB_INTERFACE = [
+    {"id": "default", "label": "전체 실행 (TC01~TC15, 재부팅/스텁 TC 제외)", "flag": None,
+     "timeout": 600, "reboot": False,
+     "note": "각 TC 개별 버튼은 아래 참고 — 재부팅을 수반하는 TC는 default에 포함되지 않고 개별 -pre/-post 버튼으로 실행"},
+    {"id": "tc01", "label": "TC01 API 문서 제공", "flag": "--tc01",
+     "timeout": 180, "reboot": False, "note": "Swagger/OpenAPI 문서 서버"},
+    {"id": "tc02", "label": "TC02 MQTT Disconnect 시 Error Response 처리", "flag": "--tc02",
+     "timeout": 180, "reboot": False, "note": "검토 필요 — 원본 Action 미기재"},
+    {"id": "tc03", "label": "TC03 MQTT-HTTP Bridge 지원", "flag": "--tc03",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc04", "label": "TC04 로깅 보안 (민감 정보 마스킹)", "flag": "--tc04",
+     "timeout": 180, "reboot": False, "note": "검토 필요 — 마스킹 로직 위치 미확인"},
+    {"id": "tc05", "label": "TC05 JWT 토큰 검증", "flag": "--tc05",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc06", "label": "TC06 경로 순회 공격 방지", "flag": "--tc06",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc07", "label": "TC07 Injection 공격 방지", "flag": "--tc07",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc08", "label": "TC08 CORS", "flag": "--tc08",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc09", "label": "TC09 SSL 암호화 스위트", "flag": "--tc09",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc10", "label": "TC10 TLS 1.3 강제", "flag": "--tc10",
+     "timeout": 180, "reboot": False, "note": "구버전 TLS 거부"},
+    {"id": "tc11", "label": "TC11 Content-Type 검증", "flag": "--tc11",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc12", "label": "TC12 Rate Limit", "flag": "--tc12",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc13", "label": "TC13 XSS", "flag": "--tc13",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc14", "label": "TC14 HSTS", "flag": "--tc14",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc15", "label": "TC15 Log Level Control", "flag": "--tc15",
+     "timeout": 180, "reboot": False, "note": None},
+]
+CUSTOM_TC_TIMEOUTS_WEB_INTERFACE = {}  # --only 플래그 미지원
+
+CATALOG_ENERGY_MONITOR = [
+    {"id": "default", "label": "전체 실행 (TC01~TC08, 재부팅/스텁 TC 제외)", "flag": None,
+     "timeout": 600, "reboot": False,
+     "note": "각 TC 개별 버튼은 아래 참고 — 재부팅을 수반하는 TC는 default에 포함되지 않고 개별 -pre/-post 버튼으로 실행"},
+    {"id": "tc01", "label": "TC01 Report 항목 필터링", "flag": "--tc01",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc02", "label": "TC02 Azure IoT Hub 전송", "flag": "--tc02",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc03", "label": "TC03 평균 값 계산", "flag": "--tc03",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc04", "label": "TC04 전송 주기 조절", "flag": "--tc04",
+     "timeout": 180, "reboot": False, "note": "Flag — 요구사항의 `samplingRate` 필드가 코드에 없음"},
+    {"id": "tc05", "label": "TC05 소수점 자릿수 조정 검증", "flag": "--tc05",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc06", "label": "TC06 누적값 계산", "flag": "--tc06",
+     "timeout": 180, "reboot": False, "note": None},
+    {"id": "tc07", "label": "TC07 Telemetry 수신", "flag": "--tc07",
+     "timeout": 180, "reboot": False, "note": "IPC 프로토콜 레벨"},
+    {"id": "tc08", "label": "TC08 자동화 불가 항목 목록", "flag": "--tc08",
+     "timeout": 180, "reboot": False, "note": "Azure IoT Hub Explorer 클라우드 포털 확인"},
+]
+CUSTOM_TC_TIMEOUTS_ENERGY_MONITOR = {}  # --only 플래그 미지원
 
 
 def _register_app(app_id: str, label: str, script_name: str, catalog: list,
@@ -199,6 +459,46 @@ APPS = {
         "device_log", "device_log", "tc_device_log.sh",
         CATALOG_DEVICE_LOG, CUSTOM_TC_TIMEOUTS_DEVICE_LOG,
         runs_dirname="runs_device_log", status_filename="latest_status_device_log.json",
+    ),
+    "update_monitor": _register_app(
+        "update_monitor", "update_monitor", "tc_update_monitor.sh",
+        CATALOG_UPDATE_MONITOR, CUSTOM_TC_TIMEOUTS_UPDATE_MONITOR,
+        runs_dirname="runs_update_monitor", status_filename="latest_status_update_monitor.json",
+    ),
+    "sys_manager": _register_app(
+        "sys_manager", "sys_manager", "tc_sys_manager.sh",
+        CATALOG_SYS_MANAGER, CUSTOM_TC_TIMEOUTS_SYS_MANAGER,
+        runs_dirname="runs_sys_manager", status_filename="latest_status_sys_manager.json",
+    ),
+    "db_manager": _register_app(
+        "db_manager", "db_manager", "tc_db_manager.sh",
+        CATALOG_DB_MANAGER, CUSTOM_TC_TIMEOUTS_DB_MANAGER,
+        runs_dirname="runs_db_manager", status_filename="latest_status_db_manager.json",
+    ),
+    "device_manager": _register_app(
+        "device_manager", "device_manager", "tc_device_manager.sh",
+        CATALOG_DEVICE_MANAGER, CUSTOM_TC_TIMEOUTS_DEVICE_MANAGER,
+        runs_dirname="runs_device_manager", status_filename="latest_status_device_manager.json",
+    ),
+    "azure_connector": _register_app(
+        "azure_connector", "azure_connector", "tc_azure_connector.sh",
+        CATALOG_AZURE_CONNECTOR, CUSTOM_TC_TIMEOUTS_AZURE_CONNECTOR,
+        runs_dirname="runs_azure_connector", status_filename="latest_status_azure_connector.json",
+    ),
+    "edge_runtime": _register_app(
+        "edge_runtime", "edge_runtime", "tc_edge_runtime.sh",
+        CATALOG_EDGE_RUNTIME, CUSTOM_TC_TIMEOUTS_EDGE_RUNTIME,
+        runs_dirname="runs_edge_runtime", status_filename="latest_status_edge_runtime.json",
+    ),
+    "web_interface": _register_app(
+        "web_interface", "web_interface", "tc_web_interface.sh",
+        CATALOG_WEB_INTERFACE, CUSTOM_TC_TIMEOUTS_WEB_INTERFACE,
+        runs_dirname="runs_web_interface", status_filename="latest_status_web_interface.json",
+    ),
+    "energy_monitor": _register_app(
+        "energy_monitor", "energy_monitor", "tc_energy_monitor.sh",
+        CATALOG_ENERGY_MONITOR, CUSTOM_TC_TIMEOUTS_ENERGY_MONITOR,
+        runs_dirname="runs_energy_monitor", status_filename="latest_status_energy_monitor.json",
     ),
 }
 DEFAULT_APP_ID = "system_log"
