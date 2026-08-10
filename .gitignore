@@ -10,3 +10,6 @@ tools/tc_dashboard/ssh_control.sock
 # python venv
 venv/
 .venv/
+
+# 비공개 문서 (public repo 업로드 금지)
+docs/AC Gen2 TestCase.xlsx
