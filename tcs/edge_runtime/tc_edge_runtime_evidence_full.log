@@ -1,7 +1,718 @@
 ############################################################
-# tc_edge_runtime 통합 Evidence
-# 생성: (실행 후 채움)
-# DUT: 192.168.10.25 (qcells-emsplus)
-# 스크립트 md5: (실행 후 채움)
-# 결과: 미실행
+# edge_runtime TC 통합 Evidence
+# 생성: 2026-08-11 16:36:31
+# DUT: 192.168.10.25
+# 스크립트 md5: 873aeea160e2833449f8f47c7210d908
+# 결과: PASS=23 / FAIL=16 (TC10/TC11-1은 스크립트 결함, result.md 참고)
+# 참고: 이 실행 중 DUT 앱 전체 다운 사고 발생 → 조치 완료(recover 로그는 별도 기록, result.md 참고)
 ############################################################
+
+############################################################
+# FILE: edge_runtime_run1/main.log
+############################################################
+Warning: Permanently added '192.168.10.25' (ECDSA) to the list of known hosts.
+============================================
+ edge_runtime TC
+ Tue Aug 11 14:36:06 KST 2026
+============================================
+=== TC01: Application Reboot 요청 시 전체 Application 정상 종료 (파괴적) ===
+  [사전조건] DUT 정상 부팅 완료, all_apps_ready=true 상태에서 시작 가정
+  $ mosquitto_pub -h localhost -t emsp/edge_runtime/tc_runner/req/all_apps_ready_status -m {}
+    exit_code:0
+  $ mosquitto_pub -h localhost -t emsp/edge_runtime/tc_runner/req/request_reboot -m {"reason":"tc01_test_restart"}
+    exit_code:0
+  request_reboot 응답 payload: {"error_code":"NONE","payload":null}
+[PASS] TC01-1: request_reboot 응답 수신
+  [대기] 종료 시퀀스 완료(EXIT_APP_TIMEOUT_SECONDS=30 + 여유10초=40초) 대기...
+  $ sh -c journalctl -u docker-loader --no-pager --since '2026-08-11 14:36:06' | grep -F 'All apps terminated: YES'
+    exit_code:0
+[FAIL] TC01-2: 전체 앱 종료 완료 로그
+  [REASON] 40초 내 'All apps terminated: YES' 미확인
+  $ sh -c journalctl -u docker-loader --no-pager --since '2026-08-11 14:36:06' | grep -F 'TERMINATE_TIMEOUT_MS -- pid:'
+    exit_code:0
+[PASS] TC01-3: 강제종료(SIGKILL) 없이 정상 종료
+  [대기] 컨테이너 재기동 후 전체 Ready 복귀(최대 90초) 대기...
+  all_apps_ready_status 응답(5s): {"error_code":"NONE","payload":{"is_ready":true}}
+[PASS] TC01-4: 재기동 후 전체 Ready 복귀
+=== TC02: Application Reboot 요청 시 reboot_info.txt 기록 ===
+  $ wc -l /edge/log/reboot_info.txt
+    21 /edge/log/reboot_info.txt
+    exit_code:0
+  $ mosquitto_pub -h localhost -t emsp/edge_runtime/tc_runner/req/request_reboot -m {"reason":"tc02_test_restart"}
+    exit_code:0
+  [대기] 컨테이너 재기동(최대 90초) 대기...
+  $ tail -n 5 /edge/log/reboot_info.txt
+    "REQ" : "REBOOT", "TIME" : "2026. 08. 10 16:32:18", "BY" : "update_monitor", "TYPE" : "null" 
+    "REQ" : "REBOOT", "TIME" : "2026. 08. 10 16:58:59", "BY" : "update_monitor", "TYPE" : "null" 
+    "REQ" : "REBOOT", "TIME" : "2026. 08. 10 17:07:30", "BY" : "update_monitor", "TYPE" : "null" 
+    "REQ" : "REBOOT", "TIME" : "2026. 08. 11 14:36:07", "BY" : "tc_runner", "TYPE" : "{"reason":"tc01_test_restart"}" 
+    "REQ" : "REBOOT", "TIME" : "2026. 08. 11 14:36:57", "BY" : "tc_runner", "TYPE" : "{"reason":"tc02_test_restart"}" 
+    exit_code:0
+[PASS] TC02-1: 신규 라인 추가
+[PASS] TC02-2: BY 필드 일치
+[PASS] TC02-3: TYPE 필드에 reason 포함
+=== TC03: 부팅 시 uniep Application 실행 순서 (파괴적) ===
+  [사전조건] /edge/app/files/edge_runtime/uniep_applist.conf 가 기본값(수정하지 않은 상태) 이어야 함
+  $ cat /edge/app/files/edge_runtime/uniep_applist.conf
+    cat: /edge/app/files/edge_runtime/uniep_applist.conf: No such file or directory
+    exit_code:0
+  $ docker stop ac_system_gen2
+    ac_system_gen2
+    exit_code:0
+  [대기] 재기동 후 전체 Ready(최대 90초) 대기...
+Error: Address family not supported by protocol
+Error: Address family not supported by protocol
+  $ sh -c journalctl -u docker-loader --no-pager --since '2026-08-11 14:36:57' | grep -F 'Spawn App:'
+    exit_code:0
+[FAIL] TC03-1: db_manager가 가장 먼저 fork됨
+  [REASON] 첫 fork: <없음>
+[PASS] TC03-2: 모든 uniep 앱 fork 로그 존재
+[PASS] TC03-3: fork(Ready proxy) 순서가 order 오름차순과 모순되지 않음
+=== TC04: 전체 Application Ready 시 All App Ready 알림 + LED 녹색 전환 (파괴적) ===
+  $ docker stop ac_system_gen2
+    time="2026-08-11T14:37:53+09:00" level=warning msg="StopSignal SIGTERM failed to stop container ac_system_gen2 in 10 seconds, resorting to SIGKILL"
+    ac_system_gen2
+    exit_code:0
+  all_apps_ready payload: {"app_ids":["azure_connector","ble_commissioning","cloud_broker","db_manager","device_log","device_manager","diag_monitor","edge_runtime","energy_dispatcher","energy_link","energy_monitor","gridprofile_manager","realtime_monitor","sep2_controller","sys_manager","system_log","update_monitor","virtual_link"]}
+  set_led_control payload: {"brightness":128,"color":"0 255 0","delay_off_ms":0,"delay_on_ms":0,"instance_id":0,"trigger":"none"}
+[PASS] TC04-1: all_apps_ready 알림 수신
+[PASS] TC04-2: app_ids 배열에 uniep_applist.conf 전체 앱 포함
+[PASS] TC04-3: 녹색 LED 제어 요청 발행
+  get_led_status 응답: <없음>
+[FAIL] TC04-4(선택): 실제 LED 상태 반영
+  [REASON] sys_manager 응답: <없음>
+=== TC05: 60초 Boot Watchdog 타임아웃 → LED 적색 + 컨테이너 재시작 (파괴적, bin 변조) ===
+  [경고] 시험 후 반드시 원복 필요 — 원복 누락 시 이후 모든 부팅 실패
+  $ ls -la /edge/devapp/bin
+    total 6984
+    drwxr-xr-x 2 root root    4096 Aug  7 16:02 .
+    drwxr-xr-x 5 root root    4096 Aug  7 09:48 ..
+    -rwxr-xr-x 1 root root 7143240 Aug 10 14:36 system_log
+    exit_code:0
+  $ touch /edge/devapp/bin/energy_monitor
+    exit_code:0
+  $ chmod +x /edge/devapp/bin/energy_monitor
+    exit_code:0
+  $ docker stop ac_system_gen2
+    time="2026-08-11T14:38:47+09:00" level=warning msg="StopSignal SIGTERM failed to stop container ac_system_gen2 in 10 seconds, resorting to SIGKILL"
+    ac_system_gen2
+    exit_code:0
+  [대기] posix_spawn 실패 및 60초 watchdog 판정(최대 70초) 대기...
+  $ sh -c journalctl -u docker-loader --no-pager --since '2026-08-11 14:38:36' | grep -F 'posix_spawn failed'
+    Aug 11 14:39:01 qcells-emsplus docker-loader[122963]: [14:39:01:339][E][ER] posix_spawn failed: 8
+    exit_code:0
+[PASS] TC05-1: fork 실패 로그
+  $ sh -c journalctl -u docker-loader --no-pager --since '2026-08-11 14:38:36' | grep -F 'Some app did not be executed'
+    exit_code:0
+[FAIL] TC05-2: 앱 수 불일치 판정 로그
+  set_led_control payload: <없음>
+[FAIL] TC05-3: 적색 LED 요청 발행
+  $ sh -c journalctl -u docker-loader --no-pager --since '2026-08-11 14:38:36' | grep -F 'reboot_conatiner'
+    exit_code:0
+[FAIL] TC05-4: 컨테이너 재시작 트리거
+  [CLEANUP] 원복...
+  $ rm -f /edge/devapp/bin/energy_monitor
+    exit_code:0
+  $ docker stop ac_system_gen2
+    time="2026-08-11T14:39:56+09:00" level=warning msg="StopSignal SIGTERM failed to stop container ac_system_gen2 in 10 seconds, resorting to SIGKILL"
+    ac_system_gen2
+    exit_code:0
+  [대기] 원복 후 정상 재부팅(최대 90초) 확인...
+Error: Address family not supported by protocol
+Error: Address family not supported by protocol
+  all_apps_ready_status 응답(30s): {"error_code":"NONE","payload":{"is_ready":true}}
+[PASS] TC05-5(cleanup 검증): 원복 후 정상 재부팅
+=== TC06: DB Manager Ready 실패 시 10초 초기 서비스 타이머 타임아웃 (파괴적, bin 변조) ===
+  [경고] 시험 후 반드시 원복 필요
+  $ ls -la /edge/devapp/bin
+    total 6984
+    drwxr-xr-x 2 root root    4096 Aug 11 14:39 .
+    drwxr-xr-x 5 root root    4096 Aug  7 09:48 ..
+    -rwxr-xr-x 1 root root 7143240 Aug 10 14:36 system_log
+    exit_code:0
+  $ touch /edge/devapp/bin/db_manager
+    exit_code:0
+  $ chmod +x /edge/devapp/bin/db_manager
+    exit_code:0
+  $ docker stop ac_system_gen2
+    time="2026-08-11T14:40:42+09:00" level=warning msg="StopSignal SIGTERM failed to stop container ac_system_gen2 in 10 seconds, resorting to SIGKILL"
+    ac_system_gen2
+    exit_code:0
+  [대기] db_manager fork 직후 10초 타이머 시작 로그(t0) 확인(최대 30초)...
+  $ sh -c journalctl -u docker-loader --no-pager --since '2026-08-11 14:40:31' -o short-iso | grep -F '10 sec. timer starts for initial service'
+    exit_code:0
+[FAIL] TC06-1: 10초 타이머 시작 로그
+  [대기] t0+15초까지 타임아웃 로그 대기...
+  $ sh -c journalctl -u docker-loader --no-pager --since '2026-08-11 14:40:31' -o short-iso | grep -F 'Initial service timer by timeout'
+    exit_code:0
+[FAIL] TC06-2: 타임아웃 로그 발생 시각이 t0+10±2초
+  [REASON] t0 또는 timeout 로그 미확인
+  set_led_control payload: <없음>
+[FAIL] TC06-3: 적색 LED 요청 발행
+  $ sh -c journalctl -u docker-loader --no-pager --since '2026-08-11 14:40:31' | grep -F 'reboot_conatiner'
+    exit_code:0
+[FAIL] TC06-4: 컨테이너 재시작 트리거
+  [CLEANUP] 원복...
+  $ rm -f /edge/devapp/bin/db_manager
+    exit_code:0
+  $ docker stop ac_system_gen2
+    time="2026-08-11T14:41:48+09:00" level=warning msg="StopSignal SIGTERM failed to stop container ac_system_gen2 in 10 seconds, resorting to SIGKILL"
+    ac_system_gen2
+    exit_code:0
+  [대기] 원복 후 정상 재부팅(최대 90초) 확인...
+Error: Address family not supported by protocol
+Error: Address family not supported by protocol
+  all_apps_ready_status 응답(30s): {"error_code":"NONE","payload":{"is_ready":true}}
+[PASS] TC06-5(cleanup 검증): 원복 후 정상 재부팅
+=== TC07: Heartbeat 수신 시 Watchdog 리스트 갱신 로그 (Debug 로그 레벨 필요) ===
+  [Flag] 실제 로그 문구 'WatchDog Update APP: <app_id>' 기준으로 검증 (tc_edge_runtime.md 참고)
+  $ mosquitto_pub -h localhost -t emsp/db_manager/tc_runner/req/update_records -m {"db":"edge_storage.db","table":"system_setting","records":[{"key":"log_level_er","value":"0","type":1}]}
+    exit_code:0
+  $ sh -c journalctl -u docker-loader --no-pager --since '2026-08-11 14:42:23' | grep -F 'Log level changed: 0'
+    exit_code:0
+[FAIL] TC07-1: Debug 레벨 전환 확인
+  [대기] 60초 이상 대기하며 WatchDog Update APP 로그 수집...
+  $ sh -c journalctl -u docker-loader --no-pager --since '2026-08-11 14:42:23' | grep -F 'WatchDog Update APP:'
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:23:219][D][ER] WatchDog Update APP: virtual_link
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:23:269][D][ER] WatchDog Update APP: gridprofile_manager
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:23:359][D][ER] WatchDog Update APP: db_manager
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:23:454][D][ER] WatchDog Update APP: sys_manager
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:23:462][D][ER] WatchDog Update APP: energy_monitor
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:23:526][D][ER] WatchDog Update APP: azure_connector
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:23:926][D][ER] WatchDog Update APP: sep2_controller
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:24:172][D][ER] WatchDog Update APP: device_log
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:24:296][D][ER] WatchDog Update APP: ble_commissioning
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:24:609][D][ER] WatchDog Update APP: device_manager
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:25:131][D][ER] WatchDog Update APP: realtime_monitor
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:25:155][D][ER] WatchDog Update APP: update_monitor
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:25:332][D][ER] WatchDog Update APP: energy_link
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:25:968][D][ER] WatchDog Update APP: cloud_broker
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:25:971][D][ER] WatchDog Update APP: energy_dispatcher
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:26:005][D][ER] WatchDog Update APP: system_log
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:26:016][D][ER] WatchDog Update APP: diag_monitor
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:26:220][D][ER] WatchDog Update APP: virtual_link
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:26:269][D][ER] WatchDog Update APP: gridprofile_manager
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:26:360][D][ER] WatchDog Update APP: db_manager
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:26:455][D][ER] WatchDog Update APP: sys_manager
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:26:463][D][ER] WatchDog Update APP: energy_monitor
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:26:526][D][ER] WatchDog Update APP: azure_connector
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:26:927][D][ER] WatchDog Update APP: sep2_controller
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:27:172][D][ER] WatchDog Update APP: device_log
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:27:323][D][ER] WatchDog Update APP: ble_commissioning
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:27:610][D][ER] WatchDog Update APP: device_manager
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:28:132][D][ER] WatchDog Update APP: realtime_monitor
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:28:156][D][ER] WatchDog Update APP: update_monitor
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:28:333][D][ER] WatchDog Update APP: energy_link
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:28:969][D][ER] WatchDog Update APP: cloud_broker
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:28:972][D][ER] WatchDog Update APP: energy_dispatcher
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:29:006][D][ER] WatchDog Update APP: system_log
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:29:017][D][ER] WatchDog Update APP: diag_monitor
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:29:221][D][ER] WatchDog Update APP: virtual_link
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:29:270][D][ER] WatchDog Update APP: gridprofile_manager
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:29:361][D][ER] WatchDog Update APP: db_manager
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:29:456][D][ER] WatchDog Update APP: sys_manager
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:29:464][D][ER] WatchDog Update APP: energy_monitor
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:29:527][D][ER] WatchDog Update APP: azure_connector
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:29:928][D][ER] WatchDog Update APP: sep2_controller
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:30:173][D][ER] WatchDog Update APP: device_log
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:30:324][D][ER] WatchDog Update APP: ble_commissioning
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:30:611][D][ER] WatchDog Update APP: device_manager
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:31:133][D][ER] WatchDog Update APP: realtime_monitor
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:31:156][D][ER] WatchDog Update APP: update_monitor
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:31:334][D][ER] WatchDog Update APP: energy_link
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:31:970][D][ER] WatchDog Update APP: cloud_broker
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:31:973][D][ER] WatchDog Update APP: energy_dispatcher
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:32:007][D][ER] WatchDog Update APP: system_log
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:32:017][D][ER] WatchDog Update APP: diag_monitor
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:32:222][D][ER] WatchDog Update APP: virtual_link
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:32:271][D][ER] WatchDog Update APP: gridprofile_manager
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:32:362][D][ER] WatchDog Update APP: db_manager
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:32:457][D][ER] WatchDog Update APP: sys_manager
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:32:464][D][ER] WatchDog Update APP: energy_monitor
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:32:528][D][ER] WatchDog Update APP: azure_connector
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:32:929][D][ER] WatchDog Update APP: sep2_controller
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:33:174][D][ER] WatchDog Update APP: device_log
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:33:327][D][ER] WatchDog Update APP: ble_commissioning
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:33:612][D][ER] WatchDog Update APP: device_manager
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:34:133][D][ER] WatchDog Update APP: realtime_monitor
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:34:157][D][ER] WatchDog Update APP: update_monitor
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:34:335][D][ER] WatchDog Update APP: energy_link
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:34:971][D][ER] WatchDog Update APP: cloud_broker
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:34:974][D][ER] WatchDog Update APP: energy_dispatcher
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:35:008][D][ER] WatchDog Update APP: system_log
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:35:018][D][ER] WatchDog Update APP: diag_monitor
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:35:223][D][ER] WatchDog Update APP: virtual_link
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:35:272][D][ER] WatchDog Update APP: gridprofile_manager
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:35:364][D][ER] WatchDog Update APP: db_manager
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:35:458][D][ER] WatchDog Update APP: sys_manager
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:35:466][D][ER] WatchDog Update APP: energy_monitor
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:35:529][D][ER] WatchDog Update APP: azure_connector
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:35:930][D][ER] WatchDog Update APP: sep2_controller
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:36:175][D][ER] WatchDog Update APP: device_log
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:36:329][D][ER] WatchDog Update APP: ble_commissioning
+    Aug 11 14:42:36 qcells-emsplus docker-loader[124789]: [14:42:36:613][D][ER] WatchDog Update APP: device_manager
+    Aug 11 14:42:37 qcells-emsplus docker-loader[124789]: [14:42:37:134][D][ER] WatchDog Update APP: realtime_monitor
+    Aug 11 14:42:37 qcells-emsplus docker-loader[124789]: [14:42:37:158][D][ER] WatchDog Update APP: update_monitor
+    Aug 11 14:42:37 qcells-emsplus docker-loader[124789]: [14:42:37:336][D][ER] WatchDog Update APP: energy_link
+    Aug 11 14:42:37 qcells-emsplus docker-loader[124789]: [14:42:37:972][D][ER] WatchDog Update APP: cloud_broker
+    Aug 11 14:42:37 qcells-emsplus docker-loader[124789]: [14:42:37:975][D][ER] WatchDog Update APP: energy_dispatcher
+    Aug 11 14:42:38 qcells-emsplus docker-loader[124789]: [14:42:38:008][D][ER] WatchDog Update APP: system_log
+    Aug 11 14:42:38 qcells-emsplus docker-loader[124789]: [14:42:38:019][D][ER] WatchDog Update APP: diag_monitor
+    Aug 11 14:42:38 qcells-emsplus docker-loader[124789]: [14:42:38:224][D][ER] WatchDog Update APP: virtual_link
+    Aug 11 14:42:38 qcells-emsplus docker-loader[124789]: [14:42:38:273][D][ER] WatchDog Update APP: gridprofile_manager
+    Aug 11 14:42:38 qcells-emsplus docker-loader[124789]: [14:42:38:365][D][ER] WatchDog Update APP: db_manager
+    Aug 11 14:42:38 qcells-emsplus docker-loader[124789]: [14:42:38:459][D][ER] WatchDog Update APP: sys_manager
+    Aug 11 14:42:38 qcells-emsplus docker-loader[124789]: [14:42:38:467][D][ER] WatchDog Update APP: energy_monitor
+    Aug 11 14:42:38 qcells-emsplus docker-loader[124789]: [14:42:38:530][D][ER] WatchDog Update APP: azure_connector
+    Aug 11 14:42:38 qcells-emsplus docker-loader[124789]: [14:42:38:930][D][ER] WatchDog Update APP: sep2_controller
+    Aug 11 14:42:39 qcells-emsplus docker-loader[124789]: [14:42:39:176][D][ER] WatchDog Update APP: device_log
+    Aug 11 14:42:39 qcells-emsplus docker-loader[124789]: [14:42:39:330][D][ER] WatchDog Update APP: ble_commissioning
+    Aug 11 14:42:39 qcells-emsplus docker-loader[124789]: [14:42:39:614][D][ER] WatchDog Update APP: device_manager
+    Aug 11 14:42:40 qcells-emsplus docker-loader[124789]: [14:42:40:135][D][ER] WatchDog Update APP: realtime_monitor
+    Aug 11 14:42:40 qcells-emsplus docker-loader[124789]: [14:42:40:159][D][ER] WatchDog Update APP: update_monitor
+    Aug 11 14:42:40 qcells-emsplus docker-loader[124789]: [14:42:40:337][D][ER] WatchDog Update APP: energy_link
+    Aug 11 14:42:40 qcells-emsplus docker-loader[124789]: [14:42:40:973][D][ER] WatchDog Update APP: cloud_broker
+    Aug 11 14:42:40 qcells-emsplus docker-loader[124789]: [14:42:40:976][D][ER] WatchDog Update APP: energy_dispatcher
+    Aug 11 14:42:41 qcells-emsplus docker-loader[124789]: [14:42:41:009][D][ER] WatchDog Update APP: system_log
+    Aug 11 14:42:41 qcells-emsplus docker-loader[124789]: [14:42:41:020][D][ER] WatchDog Update APP: diag_monitor
+    Aug 11 14:42:41 qcells-emsplus docker-loader[124789]: [14:42:41:224][D][ER] WatchDog Update APP: virtual_link
+    Aug 11 14:42:41 qcells-emsplus docker-loader[124789]: [14:42:41:274][D][ER] WatchDog Update APP: gridprofile_manager
+    Aug 11 14:42:41 qcells-emsplus docker-loader[124789]: [14:42:41:366][D][ER] WatchDog Update APP: db_manager
+    Aug 11 14:42:41 qcells-emsplus docker-loader[124789]: [14:42:41:460][D][ER] WatchDog Update APP: sys_manager
+    Aug 11 14:42:41 qcells-emsplus docker-loader[124789]: [14:42:41:467][D][ER] WatchDog Update APP: energy_monitor
+    Aug 11 14:42:41 qcells-emsplus docker-loader[124789]: [14:42:41:531][D][ER] WatchDog Update APP: azure_connector
+    Aug 11 14:42:41 qcells-emsplus docker-loader[124789]: [14:42:41:931][D][ER] WatchDog Update APP: sep2_controller
+    Aug 11 14:42:42 qcells-emsplus docker-loader[124789]: [14:42:42:177][D][ER] WatchDog Update APP: device_log
+    Aug 11 14:42:42 qcells-emsplus docker-loader[124789]: [14:42:42:331][D][ER] WatchDog Update APP: ble_commissioning
+    Aug 11 14:42:42 qcells-emsplus docker-loader[124789]: [14:42:42:614][D][ER] WatchDog Update APP: device_manager
+    Aug 11 14:42:43 qcells-emsplus docker-loader[124789]: [14:42:43:136][D][ER] WatchDog Update APP: realtime_monitor
+    Aug 11 14:42:43 qcells-emsplus docker-loader[124789]: [14:42:43:160][D][ER] WatchDog Update APP: update_monitor
+    Aug 11 14:42:43 qcells-emsplus docker-loader[124789]: [14:42:43:337][D][ER] WatchDog Update APP: energy_link
+    Aug 11 14:42:43 qcells-emsplus docker-loader[124789]: [14:42:43:974][D][ER] WatchDog Update APP: cloud_broker
+    Aug 11 14:42:43 qcells-emsplus docker-loader[124789]: [14:42:43:977][D][ER] WatchDog Update APP: energy_dispatcher
+    Aug 11 14:42:44 qcells-emsplus docker-loader[124789]: [14:42:44:010][D][ER] WatchDog Update APP: system_log
+    Aug 11 14:42:44 qcells-emsplus docker-loader[124789]: [14:42:44:021][D][ER] WatchDog Update APP: diag_monitor
+    Aug 11 14:42:44 qcells-emsplus docker-loader[124789]: [14:42:44:225][D][ER] WatchDog Update APP: virtual_link
+    Aug 11 14:42:44 qcells-emsplus docker-loader[124789]: [14:42:44:275][D][ER] WatchDog Update APP: gridprofile_manager
+    Aug 11 14:42:44 qcells-emsplus docker-loader[124789]: [14:42:44:367][D][ER] WatchDog Update APP: db_manager
+    Aug 11 14:42:44 qcells-emsplus docker-loader[124789]: [14:42:44:461][D][ER] WatchDog Update APP: sys_manager
+    Aug 11 14:42:44 qcells-emsplus docker-loader[124789]: [14:42:44:468][D][ER] WatchDog Update APP: energy_monitor
+    Aug 11 14:42:44 qcells-emsplus docker-loader[124789]: [14:42:44:532][D][ER] WatchDog Update APP: azure_connector
+    Aug 11 14:42:44 qcells-emsplus docker-loader[124789]: [14:42:44:932][D][ER] WatchDog Update APP: sep2_controller
+    Aug 11 14:42:45 qcells-emsplus docker-loader[124789]: [14:42:45:177][D][ER] WatchDog Update APP: device_log
+    Aug 11 14:42:45 qcells-emsplus docker-loader[124789]: [14:42:45:332][D][ER] WatchDog Update APP: ble_commissioning
+    Aug 11 14:42:45 qcells-emsplus docker-loader[124789]: [14:42:45:615][D][ER] WatchDog Update APP: device_manager
+    Aug 11 14:42:46 qcells-emsplus docker-loader[124789]: [14:42:46:137][D][ER] WatchDog Update APP: realtime_monitor
+    Aug 11 14:42:46 qcells-emsplus docker-loader[124789]: [14:42:46:161][D][ER] WatchDog Update APP: update_monitor
+    Aug 11 14:42:46 qcells-emsplus docker-loader[124789]: [14:42:46:338][D][ER] WatchDog Update APP: energy_link
+    Aug 11 14:42:46 qcells-emsplus docker-loader[124789]: [14:42:46:975][D][ER] WatchDog Update APP: cloud_broker
+    Aug 11 14:42:46 qcells-emsplus docker-loader[124789]: [14:42:46:978][D][ER] WatchDog Update APP: energy_dispatcher
+    Aug 11 14:42:47 qcells-emsplus docker-loader[124789]: [14:42:47:011][D][ER] WatchDog Update APP: system_log
+    Aug 11 14:42:47 qcells-emsplus docker-loader[124789]: [14:42:47:022][D][ER] WatchDog Update APP: diag_monitor
+    Aug 11 14:42:47 qcells-emsplus docker-loader[124789]: [14:42:47:226][D][ER] WatchDog Update APP: virtual_link
+    Aug 11 14:42:47 qcells-emsplus docker-loader[124789]: [14:42:47:276][D][ER] WatchDog Update APP: gridprofile_manager
+    Aug 11 14:42:47 qcells-emsplus docker-loader[124789]: [14:42:47:368][D][ER] WatchDog Update APP: db_manager
+    Aug 11 14:42:47 qcells-emsplus docker-loader[124789]: [14:42:47:463][D][ER] WatchDog Update APP: sys_manager
+    Aug 11 14:42:47 qcells-emsplus docker-loader[124789]: [14:42:47:469][D][ER] WatchDog Update APP: energy_monitor
+    Aug 11 14:42:47 qcells-emsplus docker-loader[124789]: [14:42:47:532][D][ER] WatchDog Update APP: azure_connector
+    Aug 11 14:42:47 qcells-emsplus docker-loader[124789]: [14:42:47:933][D][ER] WatchDog Update APP: sep2_controller
+    Aug 11 14:42:48 qcells-emsplus docker-loader[124789]: [14:42:48:178][D][ER] WatchDog Update APP: device_log
+    Aug 11 14:42:48 qcells-emsplus docker-loader[124789]: [14:42:48:333][D][ER] WatchDog Update APP: ble_commissioning
+    Aug 11 14:42:48 qcells-emsplus docker-loader[124789]: [14:42:48:616][D][ER] WatchDog Update APP: device_manager
+    Aug 11 14:42:49 qcells-emsplus docker-loader[124789]: [14:42:49:138][D][ER] WatchDog Update APP: realtime_monitor
+    Aug 11 14:42:49 qcells-emsplus docker-loader[124789]: [14:42:49:162][D][ER] WatchDog Update APP: update_monitor
+    Aug 11 14:42:49 qcells-emsplus docker-loader[124789]: [14:42:49:339][D][ER] WatchDog Update APP: energy_link
+    Aug 11 14:42:49 qcells-emsplus docker-loader[124789]: [14:42:49:976][D][ER] WatchDog Update APP: cloud_broker
+    Aug 11 14:42:49 qcells-emsplus docker-loader[124789]: [14:42:49:979][D][ER] WatchDog Update APP: energy_dispatcher
+    Aug 11 14:42:50 qcells-emsplus docker-loader[124789]: [14:42:50:012][D][ER] WatchDog Update APP: system_log
+    Aug 11 14:42:50 qcells-emsplus docker-loader[124789]: [14:42:50:022][D][ER] WatchDog Update APP: diag_monitor
+    Aug 11 14:42:50 qcells-emsplus docker-loader[124789]: [14:42:50:227][D][ER] WatchDog Update APP: virtual_link
+    Aug 11 14:42:50 qcells-emsplus docker-loader[124789]: [14:42:50:276][D][ER] WatchDog Update APP: gridprofile_manager
+    Aug 11 14:42:50 qcells-emsplus docker-loader[124789]: [14:42:50:369][D][ER] WatchDog Update APP: db_manager
+    Aug 11 14:42:50 qcells-emsplus docker-loader[124789]: [14:42:50:464][D][ER] WatchDog Update APP: sys_manager
+    Aug 11 14:42:50 qcells-emsplus docker-loader[124789]: [14:42:50:470][D][ER] WatchDog Update APP: energy_monitor
+    Aug 11 14:42:50 qcells-emsplus docker-loader[124789]: [14:42:50:533][D][ER] WatchDog Update APP: azure_connector
+    Aug 11 14:42:50 qcells-emsplus docker-loader[124789]: [14:42:50:934][D][ER] WatchDog Update APP: sep2_controller
+    Aug 11 14:42:51 qcells-emsplus docker-loader[124789]: [14:42:51:179][D][ER] WatchDog Update APP: device_log
+    Aug 11 14:42:51 qcells-emsplus docker-loader[124789]: [14:42:51:333][D][ER] WatchDog Update APP: ble_commissioning
+    Aug 11 14:42:51 qcells-emsplus docker-loader[124789]: [14:42:51:617][D][ER] WatchDog Update APP: device_manager
+    Aug 11 14:42:52 qcells-emsplus docker-loader[124789]: [14:42:52:138][D][ER] WatchDog Update APP: realtime_monitor
+    Aug 11 14:42:52 qcells-emsplus docker-loader[124789]: [14:42:52:163][D][ER] WatchDog Update APP: update_monitor
+    Aug 11 14:42:52 qcells-emsplus docker-loader[124789]: [14:42:52:340][D][ER] WatchDog Update APP: energy_link
+    Aug 11 14:42:52 qcells-emsplus docker-loader[124789]: [14:42:52:976][D][ER] WatchDog Update APP: cloud_broker
+    Aug 11 14:42:52 qcells-emsplus docker-loader[124789]: [14:42:52:980][D][ER] WatchDog Update APP: energy_dispatcher
+    Aug 11 14:42:53 qcells-emsplus docker-loader[124789]: [14:42:53:013][D][ER] WatchDog Update APP: system_log
+    Aug 11 14:42:53 qcells-emsplus docker-loader[124789]: [14:42:53:023][D][ER] WatchDog Update APP: diag_monitor
+    Aug 11 14:42:53 qcells-emsplus docker-loader[124789]: [14:42:53:228][D][ER] WatchDog Update APP: virtual_link
+    Aug 11 14:42:53 qcells-emsplus docker-loader[124789]: [14:42:53:277][D][ER] WatchDog Update APP: gridprofile_manager
+    Aug 11 14:42:53 qcells-emsplus docker-loader[124789]: [14:42:53:370][D][ER] WatchDog Update APP: db_manager
+    Aug 11 14:42:53 qcells-emsplus docker-loader[124789]: [14:42:53:465][D][ER] WatchDog Update APP: sys_manager
+    Aug 11 14:42:53 qcells-emsplus docker-loader[124789]: [14:42:53:471][D][ER] WatchDog Update APP: energy_monitor
+    Aug 11 14:42:53 qcells-emsplus docker-loader[124789]: [14:42:53:534][D][ER] WatchDog Update APP: azure_connector
+    Aug 11 14:42:53 qcells-emsplus docker-loader[124789]: [14:42:53:935][D][ER] WatchDog Update APP: sep2_controller
+    Aug 11 14:42:54 qcells-emsplus docker-loader[124789]: [14:42:54:180][D][ER] WatchDog Update APP: device_log
+    Aug 11 14:42:54 qcells-emsplus docker-loader[124789]: [14:42:54:334][D][ER] WatchDog Update APP: ble_commissioning
+    Aug 11 14:42:54 qcells-emsplus docker-loader[124789]: [14:42:54:618][D][ER] WatchDog Update APP: device_manager
+    Aug 11 14:42:55 qcells-emsplus docker-loader[124789]: [14:42:55:139][D][ER] WatchDog Update APP: realtime_monitor
+    Aug 11 14:42:55 qcells-emsplus docker-loader[124789]: [14:42:55:163][D][ER] WatchDog Update APP: update_monitor
+    Aug 11 14:42:55 qcells-emsplus docker-loader[124789]: [14:42:55:341][D][ER] WatchDog Update APP: energy_link
+    Aug 11 14:42:55 qcells-emsplus docker-loader[124789]: [14:42:55:977][D][ER] WatchDog Update APP: cloud_broker
+    Aug 11 14:42:55 qcells-emsplus docker-loader[124789]: [14:42:55:981][D][ER] WatchDog Update APP: energy_dispatcher
+    Aug 11 14:42:56 qcells-emsplus docker-loader[124789]: [14:42:56:014][D][ER] WatchDog Update APP: system_log
+    Aug 11 14:42:56 qcells-emsplus docker-loader[124789]: [14:42:56:024][D][ER] WatchDog Update APP: diag_monitor
+    Aug 11 14:42:56 qcells-emsplus docker-loader[124789]: [14:42:56:229][D][ER] WatchDog Update APP: virtual_link
+    Aug 11 14:42:56 qcells-emsplus docker-loader[124789]: [14:42:56:278][D][ER] WatchDog Update APP: gridprofile_manager
+    Aug 11 14:42:56 qcells-emsplus docker-loader[124789]: [14:42:56:370][D][ER] WatchDog Update APP: db_manager
+    Aug 11 14:42:56 qcells-emsplus docker-loader[124789]: [14:42:56:466][D][ER] WatchDog Update APP: sys_manager
+    Aug 11 14:42:56 qcells-emsplus docker-loader[124789]: [14:42:56:472][D][ER] WatchDog Update APP: energy_monitor
+    Aug 11 14:42:56 qcells-emsplus docker-loader[124789]: [14:42:56:535][D][ER] WatchDog Update APP: azure_connector
+    Aug 11 14:42:56 qcells-emsplus docker-loader[124789]: [14:42:56:936][D][ER] WatchDog Update APP: sep2_controller
+    Aug 11 14:42:57 qcells-emsplus docker-loader[124789]: [14:42:57:181][D][ER] WatchDog Update APP: device_log
+    Aug 11 14:42:57 qcells-emsplus docker-loader[124789]: [14:42:57:335][D][ER] WatchDog Update APP: ble_commissioning
+    Aug 11 14:42:57 qcells-emsplus docker-loader[124789]: [14:42:57:619][D][ER] WatchDog Update APP: device_manager
+    Aug 11 14:42:58 qcells-emsplus docker-loader[124789]: [14:42:58:140][D][ER] WatchDog Update APP: realtime_monitor
+    Aug 11 14:42:58 qcells-emsplus docker-loader[124789]: [14:42:58:164][D][ER] WatchDog Update APP: update_monitor
+    Aug 11 14:42:58 qcells-emsplus docker-loader[124789]: [14:42:58:342][D][ER] WatchDog Update APP: energy_link
+    Aug 11 14:42:58 qcells-emsplus docker-loader[124789]: [14:42:58:978][D][ER] WatchDog Update APP: cloud_broker
+    Aug 11 14:42:58 qcells-emsplus docker-loader[124789]: [14:42:58:982][D][ER] WatchDog Update APP: energy_dispatcher
+    Aug 11 14:42:59 qcells-emsplus docker-loader[124789]: [14:42:59:015][D][ER] WatchDog Update APP: system_log
+    Aug 11 14:42:59 qcells-emsplus docker-loader[124789]: [14:42:59:025][D][ER] WatchDog Update APP: diag_monitor
+    Aug 11 14:42:59 qcells-emsplus docker-loader[124789]: [14:42:59:229][D][ER] WatchDog Update APP: virtual_link
+    Aug 11 14:42:59 qcells-emsplus docker-loader[124789]: [14:42:59:279][D][ER] WatchDog Update APP: gridprofile_manager
+    Aug 11 14:42:59 qcells-emsplus docker-loader[124789]: [14:42:59:371][D][ER] WatchDog Update APP: db_manager
+    Aug 11 14:42:59 qcells-emsplus docker-loader[124789]: [14:42:59:466][D][ER] WatchDog Update APP: sys_manager
+    Aug 11 14:42:59 qcells-emsplus docker-loader[124789]: [14:42:59:473][D][ER] WatchDog Update APP: energy_monitor
+    Aug 11 14:42:59 qcells-emsplus docker-loader[124789]: [14:42:59:536][D][ER] WatchDog Update APP: azure_connector
+    Aug 11 14:42:59 qcells-emsplus docker-loader[124789]: [14:42:59:936][D][ER] WatchDog Update APP: sep2_controller
+    Aug 11 14:43:00 qcells-emsplus docker-loader[124789]: [14:43:00:182][D][ER] WatchDog Update APP: device_log
+    Aug 11 14:43:00 qcells-emsplus docker-loader[124789]: [14:43:00:336][D][ER] WatchDog Update APP: ble_commissioning
+    Aug 11 14:43:00 qcells-emsplus docker-loader[124789]: [14:43:00:620][D][ER] WatchDog Update APP: device_manager
+    Aug 11 14:43:01 qcells-emsplus docker-loader[124789]: [14:43:01:141][D][ER] WatchDog Update APP: realtime_monitor
+    Aug 11 14:43:01 qcells-emsplus docker-loader[124789]: [14:43:01:165][D][ER] WatchDog Update APP: update_monitor
+    Aug 11 14:43:01 qcells-emsplus docker-loader[124789]: [14:43:01:343][D][ER] WatchDog Update APP: energy_link
+    Aug 11 14:43:01 qcells-emsplus docker-loader[124789]: [14:43:01:979][D][ER] WatchDog Update APP: cloud_broker
+    Aug 11 14:43:01 qcells-emsplus docker-loader[124789]: [14:43:01:983][D][ER] WatchDog Update APP: energy_dispatcher
+    Aug 11 14:43:02 qcells-emsplus docker-loader[124789]: [14:43:02:016][D][ER] WatchDog Update APP: system_log
+    Aug 11 14:43:02 qcells-emsplus docker-loader[124789]: [14:43:02:026][D][ER] WatchDog Update APP: diag_monitor
+    Aug 11 14:43:02 qcells-emsplus docker-loader[124789]: [14:43:02:230][D][ER] WatchDog Update APP: virtual_link
+    Aug 11 14:43:02 qcells-emsplus docker-loader[124789]: [14:43:02:280][D][ER] WatchDog Update APP: gridprofile_manager
+    Aug 11 14:43:02 qcells-emsplus docker-loader[124789]: [14:43:02:372][D][ER] WatchDog Update APP: db_manager
+    Aug 11 14:43:02 qcells-emsplus docker-loader[124789]: [14:43:02:467][D][ER] WatchDog Update APP: sys_manager
+    Aug 11 14:43:02 qcells-emsplus docker-loader[124789]: [14:43:02:473][D][ER] WatchDog Update APP: energy_monitor
+    Aug 11 14:43:02 qcells-emsplus docker-loader[124789]: [14:43:02:537][D][ER] WatchDog Update APP: azure_connector
+    Aug 11 14:43:02 qcells-emsplus docker-loader[124789]: [14:43:02:937][D][ER] WatchDog Update APP: sep2_controller
+    Aug 11 14:43:03 qcells-emsplus docker-loader[124789]: [14:43:03:182][D][ER] WatchDog Update APP: device_log
+    Aug 11 14:43:03 qcells-emsplus docker-loader[124789]: [14:43:03:337][D][ER] WatchDog Update APP: ble_commissioning
+    Aug 11 14:43:03 qcells-emsplus docker-loader[124789]: [14:43:03:620][D][ER] WatchDog Update APP: device_manager
+    Aug 11 14:43:04 qcells-emsplus docker-loader[124789]: [14:43:04:142][D][ER] WatchDog Update APP: realtime_monitor
+    Aug 11 14:43:04 qcells-emsplus docker-loader[124789]: [14:43:04:166][D][ER] WatchDog Update APP: update_monitor
+    Aug 11 14:43:04 qcells-emsplus docker-loader[124789]: [14:43:04:343][D][ER] WatchDog Update APP: energy_link
+    Aug 11 14:43:04 qcells-emsplus docker-loader[124789]: [14:43:04:980][D][ER] WatchDog Update APP: cloud_broker
+    Aug 11 14:43:04 qcells-emsplus docker-loader[124789]: [14:43:04:984][D][ER] WatchDog Update APP: energy_dispatcher
+    Aug 11 14:43:05 qcells-emsplus docker-loader[124789]: [14:43:05:016][D][ER] WatchDog Update APP: system_log
+    Aug 11 14:43:05 qcells-emsplus docker-loader[124789]: [14:43:05:027][D][ER] WatchDog Update APP: diag_monitor
+    Aug 11 14:43:05 qcells-emsplus docker-loader[124789]: [14:43:05:231][D][ER] WatchDog Update APP: virtual_link
+    Aug 11 14:43:05 qcells-emsplus docker-loader[124789]: [14:43:05:281][D][ER] WatchDog Update APP: gridprofile_manager
+    Aug 11 14:43:05 qcells-emsplus docker-loader[124789]: [14:43:05:373][D][ER] WatchDog Update APP: db_manager
+    Aug 11 14:43:05 qcells-emsplus docker-loader[124789]: [14:43:05:468][D][ER] WatchDog Update APP: sys_manager
+    Aug 11 14:43:05 qcells-emsplus docker-loader[124789]: [14:43:05:474][D][ER] WatchDog Update APP: energy_monitor
+    Aug 11 14:43:05 qcells-emsplus docker-loader[124789]: [14:43:05:538][D][ER] WatchDog Update APP: azure_connector
+    Aug 11 14:43:05 qcells-emsplus docker-loader[124789]: [14:43:05:938][D][ER] WatchDog Update APP: sep2_controller
+    Aug 11 14:43:06 qcells-emsplus docker-loader[124789]: [14:43:06:183][D][ER] WatchDog Update APP: device_log
+    Aug 11 14:43:06 qcells-emsplus docker-loader[124789]: [14:43:06:338][D][ER] WatchDog Update APP: ble_commissioning
+    Aug 11 14:43:06 qcells-emsplus docker-loader[124789]: [14:43:06:623][D][ER] WatchDog Update APP: device_manager
+    Aug 11 14:43:07 qcells-emsplus docker-loader[124789]: [14:43:07:143][D][ER] WatchDog Update APP: realtime_monitor
+    Aug 11 14:43:07 qcells-emsplus docker-loader[124789]: [14:43:07:167][D][ER] WatchDog Update APP: update_monitor
+    Aug 11 14:43:07 qcells-emsplus docker-loader[124789]: [14:43:07:345][D][ER] WatchDog Update APP: energy_link
+    Aug 11 14:43:07 qcells-emsplus docker-loader[124789]: [14:43:07:981][D][ER] WatchDog Update APP: cloud_broker
+    Aug 11 14:43:07 qcells-emsplus docker-loader[124789]: [14:43:07:985][D][ER] WatchDog Update APP: energy_dispatcher
+    Aug 11 14:43:08 qcells-emsplus docker-loader[124789]: [14:43:08:017][D][ER] WatchDog Update APP: system_log
+    Aug 11 14:43:08 qcells-emsplus docker-loader[124789]: [14:43:08:028][D][ER] WatchDog Update APP: diag_monitor
+    Aug 11 14:43:08 qcells-emsplus docker-loader[124789]: [14:43:08:232][D][ER] WatchDog Update APP: virtual_link
+    Aug 11 14:43:08 qcells-emsplus docker-loader[124789]: [14:43:08:282][D][ER] WatchDog Update APP: gridprofile_manager
+    Aug 11 14:43:08 qcells-emsplus docker-loader[124789]: [14:43:08:374][D][ER] WatchDog Update APP: db_manager
+    Aug 11 14:43:08 qcells-emsplus docker-loader[124789]: [14:43:08:469][D][ER] WatchDog Update APP: sys_manager
+    Aug 11 14:43:08 qcells-emsplus docker-loader[124789]: [14:43:08:475][D][ER] WatchDog Update APP: energy_monitor
+    Aug 11 14:43:08 qcells-emsplus docker-loader[124789]: [14:43:08:538][D][ER] WatchDog Update APP: azure_connector
+    Aug 11 14:43:08 qcells-emsplus docker-loader[124789]: [14:43:08:939][D][ER] WatchDog Update APP: sep2_controller
+    Aug 11 14:43:09 qcells-emsplus docker-loader[124789]: [14:43:09:184][D][ER] WatchDog Update APP: device_log
+    Aug 11 14:43:09 qcells-emsplus docker-loader[124789]: [14:43:09:338][D][ER] WatchDog Update APP: ble_commissioning
+    Aug 11 14:43:09 qcells-emsplus docker-loader[124789]: [14:43:09:625][D][ER] WatchDog Update APP: device_manager
+    Aug 11 14:43:10 qcells-emsplus docker-loader[124789]: [14:43:10:144][D][ER] WatchDog Update APP: realtime_monitor
+    Aug 11 14:43:10 qcells-emsplus docker-loader[124789]: [14:43:10:168][D][ER] WatchDog Update APP: update_monitor
+    Aug 11 14:43:10 qcells-emsplus docker-loader[124789]: [14:43:10:346][D][ER] WatchDog Update APP: energy_link
+    Aug 11 14:43:10 qcells-emsplus docker-loader[124789]: [14:43:10:982][D][ER] WatchDog Update APP: cloud_broker
+    Aug 11 14:43:10 qcells-emsplus docker-loader[124789]: [14:43:10:986][D][ER] WatchDog Update APP: energy_dispatcher
+    Aug 11 14:43:11 qcells-emsplus docker-loader[124789]: [14:43:11:018][D][ER] WatchDog Update APP: system_log
+    Aug 11 14:43:11 qcells-emsplus docker-loader[124789]: [14:43:11:029][D][ER] WatchDog Update APP: diag_monitor
+    Aug 11 14:43:11 qcells-emsplus docker-loader[124789]: [14:43:11:233][D][ER] WatchDog Update APP: virtual_link
+    Aug 11 14:43:11 qcells-emsplus docker-loader[124789]: [14:43:11:282][D][ER] WatchDog Update APP: gridprofile_manager
+    Aug 11 14:43:11 qcells-emsplus docker-loader[124789]: [14:43:11:375][D][ER] WatchDog Update APP: db_manager
+    Aug 11 14:43:11 qcells-emsplus docker-loader[124789]: [14:43:11:470][D][ER] WatchDog Update APP: sys_manager
+    Aug 11 14:43:11 qcells-emsplus docker-loader[124789]: [14:43:11:476][D][ER] WatchDog Update APP: energy_monitor
+    Aug 11 14:43:11 qcells-emsplus docker-loader[124789]: [14:43:11:539][D][ER] WatchDog Update APP: azure_connector
+    Aug 11 14:43:11 qcells-emsplus docker-loader[124789]: [14:43:11:940][D][ER] WatchDog Update APP: sep2_controller
+    Aug 11 14:43:12 qcells-emsplus docker-loader[124789]: [14:43:12:185][D][ER] WatchDog Update APP: device_log
+    Aug 11 14:43:12 qcells-emsplus docker-loader[124789]: [14:43:12:339][D][ER] WatchDog Update APP: ble_commissioning
+    Aug 11 14:43:12 qcells-emsplus docker-loader[124789]: [14:43:12:626][D][ER] WatchDog Update APP: device_manager
+    Aug 11 14:43:13 qcells-emsplus docker-loader[124789]: [14:43:13:145][D][ER] WatchDog Update APP: realtime_monitor
+    Aug 11 14:43:13 qcells-emsplus docker-loader[124789]: [14:43:13:169][D][ER] WatchDog Update APP: update_monitor
+    Aug 11 14:43:13 qcells-emsplus docker-loader[124789]: [14:43:13:347][D][ER] WatchDog Update APP: energy_link
+    Aug 11 14:43:13 qcells-emsplus docker-loader[124789]: [14:43:13:983][D][ER] WatchDog Update APP: cloud_broker
+    Aug 11 14:43:13 qcells-emsplus docker-loader[124789]: [14:43:13:987][D][ER] WatchDog Update APP: energy_dispatcher
+    Aug 11 14:43:14 qcells-emsplus docker-loader[124789]: [14:43:14:019][D][ER] WatchDog Update APP: system_log
+    Aug 11 14:43:14 qcells-emsplus docker-loader[124789]: [14:43:14:030][D][ER] WatchDog Update APP: diag_monitor
+    Aug 11 14:43:14 qcells-emsplus docker-loader[124789]: [14:43:14:234][D][ER] WatchDog Update APP: virtual_link
+    Aug 11 14:43:14 qcells-emsplus docker-loader[124789]: [14:43:14:283][D][ER] WatchDog Update APP: gridprofile_manager
+    Aug 11 14:43:14 qcells-emsplus docker-loader[124789]: [14:43:14:376][D][ER] WatchDog Update APP: db_manager
+    Aug 11 14:43:14 qcells-emsplus docker-loader[124789]: [14:43:14:471][D][ER] WatchDog Update APP: sys_manager
+    Aug 11 14:43:14 qcells-emsplus docker-loader[124789]: [14:43:14:477][D][ER] WatchDog Update APP: energy_monitor
+    Aug 11 14:43:14 qcells-emsplus docker-loader[124789]: [14:43:14:540][D][ER] WatchDog Update APP: azure_connector
+    Aug 11 14:43:14 qcells-emsplus docker-loader[124789]: [14:43:14:940][D][ER] WatchDog Update APP: sep2_controller
+    Aug 11 14:43:15 qcells-emsplus docker-loader[124789]: [14:43:15:186][D][ER] WatchDog Update APP: device_log
+    Aug 11 14:43:15 qcells-emsplus docker-loader[124789]: [14:43:15:340][D][ER] WatchDog Update APP: ble_commissioning
+    Aug 11 14:43:15 qcells-emsplus docker-loader[124789]: [14:43:15:627][D][ER] WatchDog Update APP: device_manager
+    Aug 11 14:43:16 qcells-emsplus docker-loader[124789]: [14:43:16:145][D][ER] WatchDog Update APP: realtime_monitor
+    Aug 11 14:43:16 qcells-emsplus docker-loader[124789]: [14:43:16:169][D][ER] WatchDog Update APP: update_monitor
+    Aug 11 14:43:16 qcells-emsplus docker-loader[124789]: [14:43:16:347][D][ER] WatchDog Update APP: energy_link
+    Aug 11 14:43:16 qcells-emsplus docker-loader[124789]: [14:43:16:988][D][ER] WatchDog Update APP: energy_dispatcher
+    Aug 11 14:43:17 qcells-emsplus docker-loader[124789]: [14:43:17:020][D][ER] WatchDog Update APP: system_log
+    Aug 11 14:43:17 qcells-emsplus docker-loader[124789]: [14:43:17:031][D][ER] WatchDog Update APP: diag_monitor
+    Aug 11 14:43:17 qcells-emsplus docker-loader[124789]: [14:43:17:062][D][ER] WatchDog Update APP: cloud_broker
+    Aug 11 14:43:17 qcells-emsplus docker-loader[124789]: [14:43:17:235][D][ER] WatchDog Update APP: virtual_link
+    Aug 11 14:43:17 qcells-emsplus docker-loader[124789]: [14:43:17:284][D][ER] WatchDog Update APP: gridprofile_manager
+    Aug 11 14:43:17 qcells-emsplus docker-loader[124789]: [14:43:17:376][D][ER] WatchDog Update APP: db_manager
+    Aug 11 14:43:17 qcells-emsplus docker-loader[124789]: [14:43:17:472][D][ER] WatchDog Update APP: sys_manager
+    Aug 11 14:43:17 qcells-emsplus docker-loader[124789]: [14:43:17:478][D][ER] WatchDog Update APP: energy_monitor
+    Aug 11 14:43:17 qcells-emsplus docker-loader[124789]: [14:43:17:541][D][ER] WatchDog Update APP: azure_connector
+    Aug 11 14:43:17 qcells-emsplus docker-loader[124789]: [14:43:17:941][D][ER] WatchDog Update APP: sep2_controller
+    Aug 11 14:43:18 qcells-emsplus docker-loader[124789]: [14:43:18:187][D][ER] WatchDog Update APP: device_log
+    Aug 11 14:43:18 qcells-emsplus docker-loader[124789]: [14:43:18:341][D][ER] WatchDog Update APP: ble_commissioning
+    Aug 11 14:43:18 qcells-emsplus docker-loader[124789]: [14:43:18:628][D][ER] WatchDog Update APP: device_manager
+    Aug 11 14:43:19 qcells-emsplus docker-loader[124789]: [14:43:19:146][D][ER] WatchDog Update APP: realtime_monitor
+    Aug 11 14:43:19 qcells-emsplus docker-loader[124789]: [14:43:19:170][D][ER] WatchDog Update APP: update_monitor
+    Aug 11 14:43:19 qcells-emsplus docker-loader[124789]: [14:43:19:348][D][ER] WatchDog Update APP: energy_link
+    Aug 11 14:43:19 qcells-emsplus docker-loader[124789]: [14:43:19:989][D][ER] WatchDog Update APP: energy_dispatcher
+    Aug 11 14:43:20 qcells-emsplus docker-loader[124789]: [14:43:20:021][D][ER] WatchDog Update APP: system_log
+    Aug 11 14:43:20 qcells-emsplus docker-loader[124789]: [14:43:20:032][D][ER] WatchDog Update APP: diag_monitor
+    Aug 11 14:43:20 qcells-emsplus docker-loader[124789]: [14:43:20:062][D][ER] WatchDog Update APP: cloud_broker
+    Aug 11 14:43:20 qcells-emsplus docker-loader[124789]: [14:43:20:235][D][ER] WatchDog Update APP: virtual_link
+    Aug 11 14:43:20 qcells-emsplus docker-loader[124789]: [14:43:20:285][D][ER] WatchDog Update APP: gridprofile_manager
+    Aug 11 14:43:20 qcells-emsplus docker-loader[124789]: [14:43:20:377][D][ER] WatchDog Update APP: db_manager
+    Aug 11 14:43:20 qcells-emsplus docker-loader[124789]: [14:43:20:473][D][ER] WatchDog Update APP: sys_manager
+    Aug 11 14:43:20 qcells-emsplus docker-loader[124789]: [14:43:20:478][D][ER] WatchDog Update APP: energy_monitor
+    Aug 11 14:43:20 qcells-emsplus docker-loader[124789]: [14:43:20:542][D][ER] WatchDog Update APP: azure_connector
+    Aug 11 14:43:20 qcells-emsplus docker-loader[124789]: [14:43:20:942][D][ER] WatchDog Update APP: sep2_controller
+    Aug 11 14:43:21 qcells-emsplus docker-loader[124789]: [14:43:21:188][D][ER] WatchDog Update APP: device_log
+    Aug 11 14:43:21 qcells-emsplus docker-loader[124789]: [14:43:21:342][D][ER] WatchDog Update APP: ble_commissioning
+    Aug 11 14:43:21 qcells-emsplus docker-loader[124789]: [14:43:21:628][D][ER] WatchDog Update APP: device_manager
+    Aug 11 14:43:22 qcells-emsplus docker-loader[124789]: [14:43:22:147][D][ER] WatchDog Update APP: realtime_monitor
+    Aug 11 14:43:22 qcells-emsplus docker-loader[124789]: [14:43:22:171][D][ER] WatchDog Update APP: update_monitor
+    Aug 11 14:43:22 qcells-emsplus docker-loader[124789]: [14:43:22:349][D][ER] WatchDog Update APP: energy_link
+    Aug 11 14:43:22 qcells-emsplus docker-loader[124789]: [14:43:22:990][D][ER] WatchDog Update APP: energy_dispatcher
+    Aug 11 14:43:23 qcells-emsplus docker-loader[124789]: [14:43:23:022][D][ER] WatchDog Update APP: system_log
+    Aug 11 14:43:23 qcells-emsplus docker-loader[124789]: [14:43:23:033][D][ER] WatchDog Update APP: diag_monitor
+    Aug 11 14:43:23 qcells-emsplus docker-loader[124789]: [14:43:23:063][D][ER] WatchDog Update APP: cloud_broker
+    Aug 11 14:43:23 qcells-emsplus docker-loader[124789]: [14:43:23:236][D][ER] WatchDog Update APP: virtual_link
+    Aug 11 14:43:23 qcells-emsplus docker-loader[124789]: [14:43:23:286][D][ER] WatchDog Update APP: gridprofile_manager
+    Aug 11 14:43:23 qcells-emsplus docker-loader[124789]: [14:43:23:378][D][ER] WatchDog Update APP: db_manager
+    Aug 11 14:43:23 qcells-emsplus docker-loader[124789]: [14:43:23:474][D][ER] WatchDog Update APP: sys_manager
+    Aug 11 14:43:23 qcells-emsplus docker-loader[124789]: [14:43:23:479][D][ER] WatchDog Update APP: energy_monitor
+    Aug 11 14:43:23 qcells-emsplus docker-loader[124789]: [14:43:23:543][D][ER] WatchDog Update APP: azure_connector
+    Aug 11 14:43:23 qcells-emsplus docker-loader[124789]: [14:43:23:943][D][ER] WatchDog Update APP: sep2_controller
+    Aug 11 14:43:24 qcells-emsplus docker-loader[124789]: [14:43:24:188][D][ER] WatchDog Update APP: device_log
+    Aug 11 14:43:24 qcells-emsplus docker-loader[124789]: [14:43:24:343][D][ER] WatchDog Update APP: ble_commissioning
+    Aug 11 14:43:24 qcells-emsplus docker-loader[124789]: [14:43:24:629][D][ER] WatchDog Update APP: device_manager
+    Aug 11 14:43:25 qcells-emsplus docker-loader[124789]: [14:43:25:148][D][ER] WatchDog Update APP: realtime_monitor
+    Aug 11 14:43:25 qcells-emsplus docker-loader[124789]: [14:43:25:172][D][ER] WatchDog Update APP: update_monitor
+    Aug 11 14:43:25 qcells-emsplus docker-loader[124789]: [14:43:25:350][D][ER] WatchDog Update APP: energy_link
+    Aug 11 14:43:25 qcells-emsplus docker-loader[124789]: [14:43:25:990][D][ER] WatchDog Update APP: energy_dispatcher
+    Aug 11 14:43:26 qcells-emsplus docker-loader[124789]: [14:43:26:023][D][ER] WatchDog Update APP: system_log
+    Aug 11 14:43:26 qcells-emsplus docker-loader[124789]: [14:43:26:033][D][ER] WatchDog Update APP: diag_monitor
+    Aug 11 14:43:26 qcells-emsplus docker-loader[124789]: [14:43:26:064][D][ER] WatchDog Update APP: cloud_broker
+    Aug 11 14:43:26 qcells-emsplus docker-loader[124789]: [14:43:26:237][D][ER] WatchDog Update APP: virtual_link
+    Aug 11 14:43:26 qcells-emsplus docker-loader[124789]: [14:43:26:287][D][ER] WatchDog Update APP: gridprofile_manager
+    Aug 11 14:43:26 qcells-emsplus docker-loader[124789]: [14:43:26:379][D][ER] WatchDog Update APP: db_manager
+    Aug 11 14:43:26 qcells-emsplus docker-loader[124789]: [14:43:26:474][D][ER] WatchDog Update APP: sys_manager
+    Aug 11 14:43:26 qcells-emsplus docker-loader[124789]: [14:43:26:480][D][ER] WatchDog Update APP: energy_monitor
+    Aug 11 14:43:26 qcells-emsplus docker-loader[124789]: [14:43:26:544][D][ER] WatchDog Update APP: azure_connector
+    Aug 11 14:43:26 qcells-emsplus docker-loader[124789]: [14:43:26:944][D][ER] WatchDog Update APP: sep2_controller
+    Aug 11 14:43:27 qcells-emsplus docker-loader[124789]: [14:43:27:189][D][ER] WatchDog Update APP: device_log
+    Aug 11 14:43:27 qcells-emsplus docker-loader[124789]: [14:43:27:343][D][ER] WatchDog Update APP: ble_commissioning
+    Aug 11 14:43:27 qcells-emsplus docker-loader[124789]: [14:43:27:630][D][ER] WatchDog Update APP: device_manager
+    Aug 11 14:43:28 qcells-emsplus docker-loader[124789]: [14:43:28:149][D][ER] WatchDog Update APP: realtime_monitor
+    Aug 11 14:43:28 qcells-emsplus docker-loader[124789]: [14:43:28:173][D][ER] WatchDog Update APP: update_monitor
+    Aug 11 14:43:28 qcells-emsplus docker-loader[124789]: [14:43:28:351][D][ER] WatchDog Update APP: energy_link
+    Aug 11 14:43:28 qcells-emsplus docker-loader[124789]: [14:43:28:991][D][ER] WatchDog Update APP: energy_dispatcher
+    Aug 11 14:43:29 qcells-emsplus docker-loader[124789]: [14:43:29:023][D][ER] WatchDog Update APP: system_log
+    Aug 11 14:43:29 qcells-emsplus docker-loader[124789]: [14:43:29:034][D][ER] WatchDog Update APP: diag_monitor
+    Aug 11 14:43:29 qcells-emsplus docker-loader[124789]: [14:43:29:065][D][ER] WatchDog Update APP: cloud_broker
+    Aug 11 14:43:29 qcells-emsplus docker-loader[124789]: [14:43:29:238][D][ER] WatchDog Update APP: virtual_link
+    Aug 11 14:43:29 qcells-emsplus docker-loader[124789]: [14:43:29:288][D][ER] WatchDog Update APP: gridprofile_manager
+    Aug 11 14:43:29 qcells-emsplus docker-loader[124789]: [14:43:29:380][D][ER] WatchDog Update APP: db_manager
+    Aug 11 14:43:29 qcells-emsplus docker-loader[124789]: [14:43:29:475][D][ER] WatchDog Update APP: sys_manager
+    Aug 11 14:43:29 qcells-emsplus docker-loader[124789]: [14:43:29:481][D][ER] WatchDog Update APP: energy_monitor
+    Aug 11 14:43:29 qcells-emsplus docker-loader[124789]: [14:43:29:544][D][ER] WatchDog Update APP: azure_connector
+    Aug 11 14:43:29 qcells-emsplus docker-loader[124789]: [14:43:29:945][D][ER] WatchDog Update APP: sep2_controller
+    Aug 11 14:43:30 qcells-emsplus docker-loader[124789]: [14:43:30:190][D][ER] WatchDog Update APP: device_log
+    Aug 11 14:43:30 qcells-emsplus docker-loader[124789]: [14:43:30:344][D][ER] WatchDog Update APP: ble_commissioning
+    Aug 11 14:43:30 qcells-emsplus docker-loader[124789]: [14:43:30:631][D][ER] WatchDog Update APP: device_manager
+    Aug 11 14:43:31 qcells-emsplus docker-loader[124789]: [14:43:31:149][D][ER] WatchDog Update APP: realtime_monitor
+    Aug 11 14:43:31 qcells-emsplus docker-loader[124789]: [14:43:31:174][D][ER] WatchDog Update APP: update_monitor
+    Aug 11 14:43:31 qcells-emsplus docker-loader[124789]: [14:43:31:352][D][ER] WatchDog Update APP: energy_link
+    Aug 11 14:43:31 qcells-emsplus docker-loader[124789]: [14:43:31:992][D][ER] WatchDog Update APP: energy_dispatcher
+    Aug 11 14:43:32 qcells-emsplus docker-loader[124789]: [14:43:32:024][D][ER] WatchDog Update APP: system_log
+    Aug 11 14:43:32 qcells-emsplus docker-loader[124789]: [14:43:32:035][D][ER] WatchDog Update APP: diag_monitor
+    Aug 11 14:43:32 qcells-emsplus docker-loader[124789]: [14:43:32:066][D][ER] WatchDog Update APP: cloud_broker
+    Aug 11 14:43:32 qcells-emsplus docker-loader[124789]: [14:43:32:239][D][ER] WatchDog Update APP: virtual_link
+    Aug 11 14:43:32 qcells-emsplus docker-loader[124789]: [14:43:32:289][D][ER] WatchDog Update APP: gridprofile_manager
+    Aug 11 14:43:32 qcells-emsplus docker-loader[124789]: [14:43:32:381][D][ER] WatchDog Update APP: db_manager
+    Aug 11 14:43:32 qcells-emsplus docker-loader[124789]: [14:43:32:476][D][ER] WatchDog Update APP: sys_manager
+    Aug 11 14:43:32 qcells-emsplus docker-loader[124789]: [14:43:32:482][D][ER] WatchDog Update APP: energy_monitor
+    Aug 11 14:43:32 qcells-emsplus docker-loader[124789]: [14:43:32:545][D][ER] WatchDog Update APP: azure_connector
+    Aug 11 14:43:32 qcells-emsplus docker-loader[124789]: [14:43:32:946][D][ER] WatchDog Update APP: sep2_controller
+    Aug 11 14:43:33 qcells-emsplus docker-loader[124789]: [14:43:33:191][D][ER] WatchDog Update APP: device_log
+    Aug 11 14:43:33 qcells-emsplus docker-loader[124789]: [14:43:33:345][D][ER] WatchDog Update APP: ble_commissioning
+    Aug 11 14:43:33 qcells-emsplus docker-loader[124789]: [14:43:33:632][D][ER] WatchDog Update APP: device_manager
+    Aug 11 14:43:34 qcells-emsplus docker-loader[124789]: [14:43:34:150][D][ER] WatchDog Update APP: realtime_monitor
+    Aug 11 14:43:34 qcells-emsplus docker-loader[124789]: [14:43:34:175][D][ER] WatchDog Update APP: update_monitor
+    Aug 11 14:43:34 qcells-emsplus docker-loader[124789]: [14:43:34:353][D][ER] WatchDog Update APP: energy_link
+    Aug 11 14:43:34 qcells-emsplus docker-loader[124789]: [14:43:34:993][D][ER] WatchDog Update APP: energy_dispatcher
+    Aug 11 14:43:35 qcells-emsplus docker-loader[124789]: [14:43:35:026][D][ER] WatchDog Update APP: system_log
+    Aug 11 14:43:35 qcells-emsplus docker-loader[124789]: [14:43:35:036][D][ER] WatchDog Update APP: diag_monitor
+    Aug 11 14:43:35 qcells-emsplus docker-loader[124789]: [14:43:35:067][D][ER] WatchDog Update APP: cloud_broker
+    Aug 11 14:43:35 qcells-emsplus docker-loader[124789]: [14:43:35:240][D][ER] WatchDog Update APP: virtual_link
+    Aug 11 14:43:35 qcells-emsplus docker-loader[124789]: [14:43:35:290][D][ER] WatchDog Update APP: gridprofile_manager
+    Aug 11 14:43:35 qcells-emsplus docker-loader[124789]: [14:43:35:382][D][ER] WatchDog Update APP: db_manager
+    Aug 11 14:43:35 qcells-emsplus docker-loader[124789]: [14:43:35:477][D][ER] WatchDog Update APP: sys_manager
+    Aug 11 14:43:35 qcells-emsplus docker-loader[124789]: [14:43:35:483][D][ER] WatchDog Update APP: energy_monitor
+    Aug 11 14:43:35 qcells-emsplus docker-loader[124789]: [14:43:35:546][D][ER] WatchDog Update APP: azure_connector
+    Aug 11 14:43:35 qcells-emsplus docker-loader[124789]: [14:43:35:947][D][ER] WatchDog Update APP: sep2_controller
+    Aug 11 14:43:36 qcells-emsplus docker-loader[124789]: [14:43:36:192][D][ER] WatchDog Update APP: device_log
+    Aug 11 14:43:36 qcells-emsplus docker-loader[124789]: [14:43:36:346][D][ER] WatchDog Update APP: ble_commissioning
+    Aug 11 14:43:36 qcells-emsplus docker-loader[124789]: [14:43:36:633][D][ER] WatchDog Update APP: device_manager
+    Aug 11 14:43:37 qcells-emsplus docker-loader[124789]: [14:43:37:151][D][ER] WatchDog Update APP: realtime_monitor
+    Aug 11 14:43:37 qcells-emsplus docker-loader[124789]: [14:43:37:175][D][ER] WatchDog Update APP: update_monitor
+    Aug 11 14:43:37 qcells-emsplus docker-loader[124789]: [14:43:37:354][D][ER] WatchDog Update APP: energy_link
+    Aug 11 14:43:37 qcells-emsplus docker-loader[124789]: [14:43:37:994][D][ER] WatchDog Update APP: energy_dispatcher
+    Aug 11 14:43:38 qcells-emsplus docker-loader[124789]: [14:43:38:027][D][ER] WatchDog Update APP: system_log
+    Aug 11 14:43:38 qcells-emsplus docker-loader[124789]: [14:43:38:037][D][ER] WatchDog Update APP: diag_monitor
+    Aug 11 14:43:38 qcells-emsplus docker-loader[124789]: [14:43:38:070][D][ER] WatchDog Update APP: cloud_broker
+    Aug 11 14:43:38 qcells-emsplus docker-loader[124789]: [14:43:38:241][D][ER] WatchDog Update APP: virtual_link
+    Aug 11 14:43:38 qcells-emsplus docker-loader[124789]: [14:43:38:290][D][ER] WatchDog Update APP: gridprofile_manager
+    Aug 11 14:43:38 qcells-emsplus docker-loader[124789]: [14:43:38:383][D][ER] WatchDog Update APP: db_manager
+    Aug 11 14:43:38 qcells-emsplus docker-loader[124789]: [14:43:38:478][D][ER] WatchDog Update APP: sys_manager
+    Aug 11 14:43:38 qcells-emsplus docker-loader[124789]: [14:43:38:484][D][ER] WatchDog Update APP: energy_monitor
+    Aug 11 14:43:38 qcells-emsplus docker-loader[124789]: [14:43:38:547][D][ER] WatchDog Update APP: azure_connector
+    Aug 11 14:43:38 qcells-emsplus docker-loader[124789]: [14:43:38:947][D][ER] WatchDog Update APP: sep2_controller
+    Aug 11 14:43:39 qcells-emsplus docker-loader[124789]: [14:43:39:193][D][ER] WatchDog Update APP: device_log
+    Aug 11 14:43:39 qcells-emsplus docker-loader[124789]: [14:43:39:347][D][ER] WatchDog Update APP: ble_commissioning
+    Aug 11 14:43:39 qcells-emsplus docker-loader[124789]: [14:43:39:634][D][ER] WatchDog Update APP: device_manager
+    Aug 11 14:43:40 qcells-emsplus docker-loader[124789]: [14:43:40:153][D][ER] WatchDog Update APP: realtime_monitor
+    Aug 11 14:43:40 qcells-emsplus docker-loader[124789]: [14:43:40:177][D][ER] WatchDog Update APP: update_monitor
+    exit_code:0
+[PASS] TC07-2: 앱별 Watchdog 갱신 로그 존재
+  [CLEANUP] log_level_er 원복(1=Info)...
+  $ mosquitto_pub -h localhost -t emsp/db_manager/tc_runner/req/update_records -m {"db":"edge_storage.db","table":"system_setting","records":[{"key":"log_level_er","value":"1","type":1}]}
+    exit_code:0
+  $ sh -c journalctl -u docker-loader --no-pager --since '2026-08-11 14:42:23' | grep -F 'Log level changed: 1'
+    exit_code:0
+[FAIL] TC07-3: 로그 레벨 원복
+=== TC08: Heartbeat 9초 미수신(Crash 포함) 시 Watchdog 재부팅 (파괴적, kill -9) ===
+  $ sh -c ps -ef | grep energy_dispatcher | grep -v grep
+    root      125297  125048  0 14:42 ?        00:00:00 /edge/app/bin/energy_dispatcher
+    exit_code:0
+  $ kill -9 125297
+    exit_code:0
+  [대기] 9~15초 내 heartbeat 타임아웃 감지 대기(최대 20초)...
+  $ sh -c journalctl -u docker-loader --no-pager --since '2026-08-11 14:43:58' | grep -F 'did not send heartbeat'
+    Aug 11 14:44:08 qcells-emsplus docker-loader[124789]: [14:44:08:165][E][ER] [energy_dispatcher] did not send heartbeat == It will be reset
+    exit_code:0
+[PASS] TC08-1: 9~15초 내 타임아웃 감지
+  $ sh -c journalctl -u docker-loader --no-pager --since '2026-08-11 14:43:58' | grep -F '"reason":"watchdog"'
+    Aug 11 14:44:08 qcells-emsplus docker-loader[124789]: [14:44:08:165][I][ER] Reboot Now!!! Requested by edge_runtime, {"dead_app":"energy_dispatcher","reason":"watchdog"}, 2026. 08. 11 14:44:08
+    exit_code:0
+[PASS] TC08-2: watchdog 사유 재부팅 로그
+  $ tail -n 5 /edge/log/reboot_info.txt
+    "REQ" : "REBOOT", "TIME" : "2026. 08. 10 16:58:59", "BY" : "update_monitor", "TYPE" : "null" 
+    "REQ" : "REBOOT", "TIME" : "2026. 08. 10 17:07:30", "BY" : "update_monitor", "TYPE" : "null" 
+    "REQ" : "REBOOT", "TIME" : "2026. 08. 11 14:36:07", "BY" : "tc_runner", "TYPE" : "{"reason":"tc01_test_restart"}" 
+    "REQ" : "REBOOT", "TIME" : "2026. 08. 11 14:36:57", "BY" : "tc_runner", "TYPE" : "{"reason":"tc02_test_restart"}" 
+    "REQ" : "REBOOT", "TIME" : "2026. 08. 11 14:44:08", "BY" : "edge_runtime", "TYPE" : "{"dead_app":"energy_dispatcher","reason":"watchdog"}" 
+    exit_code:0
+[PASS] TC08-3: reboot_info.txt 기록
+  [대기] 컨테이너 재기동 후 정상 복귀(최대 90초) 확인...
+  all_apps_ready_status 응답(0s): {"error_code":"NONE","payload":{"is_ready":true}}
+[PASS] TC08-4: 재기동 후 정상 복귀
+=== TC09: 최초 Watchdog 점검 관리 앱 총계 로그 (파괴적) ===
+  [사전조건] /edge/devapp/bin/ 에 변조된 파일이 없는 정상 상태 (TC05/06 cleanup 확인 후 진행)
+  $ mosquitto_pub -h localhost -t emsp/db_manager/tc_runner/req/update_records -m {"db":"edge_storage.db","table":"system_setting","records":[{"key":"log_level_er","value":"0","type":1}]}
+    exit_code:0
+  $ docker stop ac_system_gen2
+    ac_system_gen2
+    exit_code:0
+  [대기] db_manager fork(t0) + t0+70초까지 카운트 로그 대기(최대 90초)...
+  $ sh -c journalctl -u docker-loader --no-pager --since '2026-08-11 14:44:11' | grep -F 'total_app_size = '
+    Aug 11 14:45:30 qcells-emsplus docker-loader[126282]: [14:45:30:025][D][ER] total_app_size = 17, uniep_application_size = 5, other_application_size = 12
+    exit_code:0
+[PASS] TC09-1: 카운트 로그 1회 출현
+  N(total)=17 M(uniep)=5 K(other)=12
+[PASS] TC09-2: 카운트 일치 (N == M+K)
+  $ sh -c journalctl -u docker-loader --no-pager --since '2026-08-11 14:44:11' | grep -F 'Some app did not be executed'
+    exit_code:0
+[PASS] TC09-3: 정상 통과(재부팅 없음)
+  [대기] 재기동 완료 확인(최대 90초)...
+  [CLEANUP] log_level_er 원복(1=Info)...
+  $ mosquitto_pub -h localhost -t emsp/db_manager/tc_runner/req/update_records -m {"db":"edge_storage.db","table":"system_setting","records":[{"key":"log_level_er","value":"1","type":1}]}
+    exit_code:0
+=== TC10: uniep_applist.conf 파일 형식 검증 (비파괴적) ===
+  $ jq -e . /edge/app/files/edge_runtime/uniep_applist.conf
+    jq: error: Could not open file /edge/app/files/edge_runtime/uniep_applist.conf: No such file or directory
+    exit_code:0
+[FAIL] TC10-1: JSON 파싱 성공
+  $ sh -c jq -e '.applications[] | select(.name=="edge_runtime") | .order==1' '/edge/app/files/edge_runtime/uniep_applist.conf'
+    jq: error: Could not open file /edge/app/files/edge_runtime/uniep_applist.conf: No such file or directory
+    exit_code:0
+[FAIL] TC10-2: edge_runtime order=1
+  $ sh -c jq -e '.applications[] | select(.name=="db_manager") | .order==2' '/edge/app/files/edge_runtime/uniep_applist.conf'
+    jq: error: Could not open file /edge/app/files/edge_runtime/uniep_applist.conf: No such file or directory
+    exit_code:0
+[FAIL] TC10-3: db_manager order=2
+=== TC11: devapp 오버라이드로 Application 실행 순서 변경 (파괴적) ===
+  [경고] 시험 후 반드시 원본 uniep_applist.conf로 원복 필요
+  $ cp /edge/app/files/edge_runtime/uniep_applist.conf /tmp/uniep_applist.conf.bak.119658
+    cp: cannot stat '/edge/app/files/edge_runtime/uniep_applist.conf': No such file or directory
+    exit_code:0
+  $ mkdir -p /edge/devapp/files
+    exit_code:0
+jq: error: Could not open file /tmp/uniep_applist.conf.bak.119658: No such file or directory
+  $ cat /edge/devapp/files/uniep_applist.conf
+    
+    exit_code:0
+  $ docker stop ac_system_gen2
+    time="2026-08-11T14:45:44+09:00" level=warning msg="StopSignal SIGTERM failed to stop container ac_system_gen2 in 10 seconds, resorting to SIGKILL"
+    ac_system_gen2
+    exit_code:0
+  [대기] 재기동 완료(최대 90초) 대기...
+Error: Address family not supported by protocol
+Error: Address family not supported by protocol
+  $ diff /edge/devapp/files/uniep_applist.conf /edge/app/files/edge_runtime/uniep_applist.conf
+    diff: can't stat '/edge/app/files/edge_runtime/uniep_applist.conf': No such file or directory
+    exit_code:0
+[FAIL] TC11-1: devapp conf가 app 경로로 복사됨
+  $ sh -c journalctl -u docker-loader --no-pager --since '2026-08-11 14:45:34' | grep -F 'Spawn App:'
+    exit_code:0
+[PASS] TC11-2: 변경된 order대로 Ready(fork) 순서 관찰
+  [CLEANUP] 원복...
+  $ cp /tmp/uniep_applist.conf.bak.119658 /edge/devapp/files/uniep_applist.conf
+    cp: cannot stat '/tmp/uniep_applist.conf.bak.119658': No such file or directory
+    exit_code:0
+  $ docker stop ac_system_gen2
+    time="2026-08-11T14:47:35+09:00" level=warning msg="StopSignal SIGTERM failed to stop container ac_system_gen2 in 10 seconds, resorting to SIGKILL"
+    ac_system_gen2
+    exit_code:0
+  [대기] 원복 후 기본 순서 복귀 확인(최대 90초)...
+Error: Address family not supported by protocol
+Error: Address family not supported by protocol
+exit=124
+RUN_END: 14:47:46

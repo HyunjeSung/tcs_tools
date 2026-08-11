@@ -17,7 +17,10 @@ send_and_wait() {
     local timeout="${3:-30}"
     local tid="tc-$(date +%s)"
     local full_payload
-    full_payload=$(printf '{"tid":"%s","payload":%s}' "$tid" "$payload")
+    # uniep BaseApp 핸들러는 message(=수신 JSON 전체)에서 필드를 바로 읽는다("payload"로
+    # 감싸지 않음, tid는 MQTT5 프로퍼티에서 옴·JSON의 tid는 무시됨) — 그래서 payload
+    # 필드를 최상위로 flatten해서 보낸다(실측 확인: nested면 "Missing required parameter").
+    full_payload=$(printf '%s' "$payload" | jq -c --arg tid "$tid" '. + {tid: $tid}')
     local resp_topic="emsp/${SOURCE}/${TARGET}/res/${service}"
     local req_topic="emsp/${TARGET}/${SOURCE}/req/${service}"
     local resp_file="/tmp/mqtt_resp_$$_${service}"
@@ -106,10 +109,12 @@ tc02_iptables_status() {
         assert "TC02-1: get_iptables_status 응답 수신" "FAIL"
     fi
 
-    if echo "$resp" | grep -q '"status":"success"'; then
-        assert "TC02-2: 응답 status가 success" "PASS"
+    # get_iptables_status 응답 payload에는 "status" 필드가 없음(rules_text/service_active만
+    # 있음, 실측 확인) — 이 서비스의 성공 여부는 envelope의 error_code로 판정한다.
+    if echo "$resp" | grep -q '"error_code":"NONE"'; then
+        assert "TC02-2: 응답 error_code가 NONE(성공)" "PASS"
     else
-        assert "TC02-2: 응답 status가 success" "FAIL"
+        assert "TC02-2: 응답 error_code가 NONE(성공)" "FAIL"
     fi
 
     dump_cmd iptables -L -n -v
@@ -455,9 +460,8 @@ tc10_cmd_host_whitelist() {
     sysfs_temp=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
     echo "  temp_reported=${temp_reported} sysfs_temp=${sysfs_temp}"
     if [ -n "$temp_reported" ] && [ "$temp_reported" != "null" ] && [ -n "$sysfs_temp" ]; then
-        diff=$(( sysfs_temp - temp_reported ))
-        diff=${diff#-}
-        if [ "$diff" -lt 5000 ]; then
+        diff=$(awk -v a="$sysfs_temp" -v b="$temp_reported" 'BEGIN{d=a-b; if (d<0) d=-d; print d}')
+        if awk -v d="$diff" 'BEGIN{exit !(d<5000)}'; then
             assert "TC10-4: 온도 값이 thermal_zone0과 근접" "PASS"
         else
             assert "TC10-4: 온도 값이 thermal_zone0과 근접" "FAIL" "diff=${diff}"

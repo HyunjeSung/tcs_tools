@@ -1,7 +1,555 @@
 ############################################################
-# tc_web_interface 통합 Evidence
-# 생성: (실행 후 채움)
-# DUT: 192.168.10.25 (qcells-emsplus)
-# 스크립트 md5: (실행 후 채움)
-# 결과: 미실행
+# web_interface TC 통합 Evidence
+# 생성: 2026-08-11 16:55:04
+# DUT: 192.168.10.25
+# 스크립트 md5: a7ec2d61bdf9ac4f06622984e351f9c8
+# 결과: PASS=24 / FAIL=2
 ############################################################
+
+############################################################
+# FILE: web_interface_run2/main.log
+############################################################
+Warning: Permanently added '192.168.10.25' (ECDSA) to the list of known hosts.
+============================================
+ web_interface TC
+ HOST=192.168.10.25 PORT=9112
+ Tue Aug 11 16:52:35 KST 2026
+============================================
+=== TC01: API 문서 제공 (Swagger/OpenAPI 문서 서버) ===
+  $ curl -sk -o /dev/null -w %{http_code} https://192.168.10.25:9112/platform/docs.json
+    200
+    exit_code:0
+[PASS] TC01-1: docs.json 200 응답
+  $ curl -sk https://192.168.10.25:9112/platform/docs.json
+    {"openapi":"3.0.3","info":{"title":"UniEP Web Interface API","description":"UniEP Web Interface REST API\n\n## Authentication\n\nMost endpoints require JWT Bearer token authentication.\n\n**How to get a token:**\n1. Call `POST /auth/token` with your `auth_key` and `auth_secret`\n2. Copy the `token` from the response\n3. Click the **Authorize** button and paste the token\n\n**Credentials:**\n- `auth_key` and `auth_secret` are provided by QCELLS.\n- Contact [Cheol Sim](mailto:cheol.sim@qcells.com) or [Yeonsoo Chung](mailto:yeonsoo.chung@qcells.com) for more information.\n","version":"1.0.0","contact":{"name":"UniEP Team"}},"servers":[{"url":"/","description":"HTTPS Server"}],"components":{"securitySchemes":{"Permission":{"type":"http","scheme":"bearer","bearerFormat":"JWT","description":"JWT Bearer Token Authentication.\n\n**How to get a token:**\n1. Call `POST /auth/token` with your credentials\n2. Copy the token from the response\n3. Paste it here (without \"Bearer \" prefix)\n\n**Token format:** `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...`\n"}},"schemas":{"CommonResponse":{"type":"object","required":["httpStatus","meta"],"properties":{"httpStatus":{"type":"integer","example":201},"meta":{"type":"object","required":["timestamp"],"properties":{"timestamp":{"type":"string"}},"example":{"timestamp":"2025-07-24T16:36:50.244","build_date":"2025/11/10 07:45:55","build_model":"AC_SYSTEM_GEN2","build_type":"Debug","build_version":"X011110"}}}},"Success":{"allOf":[{"$ref":"#/components/schemas/CommonResponse"},{"type":"object","properties":{"httpStatus":{"example":200}}}]},"ClientError":{"allOf":[{"$ref":"#/components/schemas/CommonResponse"},{"type":"object","properties":{"httpStatus":{"example":400},"data":{"type":"object","properties":{"errorCode":{"type":"integer","description":"Application-level error code identifying the specific failure.\n`100-199` MQTT transport, `200-299` MQTT server response,\n`300-399` HTTP / system layer.\nDistinguishes failures that share an HTTP status - e.g. `404`\nis `310` (ROUTE_NOT_FOUND) or `312` (FILE_NOT_FOUND).\n"},"errorCodeName":{"type":"string","description":"String name of `errorCode` (e.g. `SYSTEM_SHUTDOWN`)"},"message":{"type":"string"},"path":{"type":"string"},"method":{"type":"string"},"query":{"type":"object"},"body":{"type":"object"}},"example":{"errorCode":307,"errorCodeName":"INVALID_JSON","message":"Bad request","path":"/foo/bar","method":"POST","query":{"key":"value"},"body":{"key":"value"}}}}}]},"UnauthorizedError":{"allOf":[{"$ref":"#/components/schemas/CommonResponse"},{"type":"object","properties":{"httpStatus":{"example":401},"data":{"type":"object","properties":{"errorCode":{"type":"integer","description":"Application-level error code identifying the specific failure.\n`100-199` MQTT transport, `200-299` MQTT server response,\n`300-399` HTTP / system layer.\nDistinguishes failures that share an HTTP status - e.g. `404`\nis `310` (ROUTE_NOT_FOUND) or `312` (FILE_NOT_FOUND).\n"},"errorCodeName":{"type":"string","description":"String name of `errorCode` (e.g. `SYSTEM_SHUTDOWN`)"},"message":{"type":"string"},"path":{"type":"string"},"method":{"type":"string"},"query":{"type":"object"},"body":{"type":"object"}},"example":{"errorCode":305,"errorCodeName":"UNAUTHENTICATED","message":"Authentication required","path":"/foo/bar","method":"POST","query":{"key":"value"},"body":{"key":"value"}}}}}]},"ForbiddenError":{"allOf":[{"$ref":"#/components/schemas/CommonResponse"},{"type":"object","properties":{"httpStatus":{"example":403},"data":{"type":"object","properties":{"errorCode":{"type":"integer","description":"Application-level error code identifying the specific failure.\n`100-199` MQTT transport, `200-299` MQTT server response,\n`300-399` HTTP / system layer.\nDistinguishes failures that share an HTTP status - e.g. `404`\nis `310` (ROUTE_NOT_FOUND) or `312` (FILE_NOT_FOUND).\n"},"errorCodeName":{"type":"string","description":"String name of `errorCode` (e.g. `SYSTEM_SHUTDOWN`)"},"message":{"type":"string"},"path":{"type":"string"},"method":{"type":"string"},"query":{"type":"object"},"body":{"type":"object"}},"example":{"errorCode":306,"errorCodeName":"PERMISSION_DENIED","message":"Insufficient permissions","path":"/foo/bar","method":"POST","query":{"key":"value"},"body":{"key":"value"}}}}}]},"NotFoundError":{"allOf":[{"$ref":"#/components/schemas/CommonResponse"},{"type":"object","properties":{"httpStatus":{"example":404},"data":{"type":"object","properties":{"errorCode":{"type":"integer","description":"Application-level error code identifying the specific failure.\n`100-199` MQTT transport, `200-299` MQTT server response,\n`300-399` HTTP / system layer.\nDistinguishes failures that share an HTTP status - e.g. `404`\nis `310` (ROUTE_NOT_FOUND) or `312` (FILE_NOT_FOUND).\n"},"errorCodeName":{"type":"string","description":"String name of `errorCode` (e.g. `SYSTEM_SHUTDOWN`)"},"message":{"type":"string"},"path":{"type":"string"},"method":{"type":"string"},"query":{"type":"object"},"body":{"type":"object"}},"example":{"errorCode":310,"errorCodeName":"ROUTE_NOT_FOUND","message":"Resource not found","path":"/foo/bar","method":"POST","query":{"key":"value"},"body":{"key":"value"}}}}}]},"MethodNotAllowedError":{"allOf":[{"$ref":"#/components/schemas/CommonResponse"},{"type":"object","properties":{"httpStatus":{"example":405},"data":{"type":"object","properties":{"errorCode":{"type":"integer","description":"Application-level error code identifying the specific failure.\n`100-199` MQTT transport, `200-299` MQTT server response,\n`300-399` HTTP / system layer.\nDistinguishes failures that share an HTTP status - e.g. `404`\nis `310` (ROUTE_NOT_FOUND) or `312` (FILE_NOT_FOUND).\n"},"errorCodeName":{"type":"string","description":"String name of `errorCode` (e.g. `SYSTEM_SHUTDOWN`)"},"message":{"type":"string"},"path":{"type":"string"},"method":{"type":"string"},"query":{"type":"object"},"body":{"type":"object"}},"example":{"errorCode":310,"errorCodeName":"ROUTE_NOT_FOUND","message":"Method not allowed","path":"/foo/bar","method":"POST","query":{"key":"value"},"body":{"key":"value"}}}}}]},"ConflictError":{"allOf":[{"$ref":"#/components/schemas/CommonResponse"},{"type":"object","properties":{"httpStatus":{"example":409},"data":{"type":"object","properties":{"errorCode":{"type":"integer","description":"Application-level error code identifying the specific failure.\n`100-199` MQTT transport, `200-299` MQTT server response,\n`300-399` HTTP / system layer.\nDistinguishes failures that share an HTTP status - e.g. `404`\nis `310` (ROUTE_NOT_FOUND) or `312` (FILE_NOT_FOUND).\n"},"errorCodeName":{"type":"string","description":"String name of `errorCode` (e.g. `SYSTEM_SHUTDOWN`)"},"message":{"type":"string"},"path":{"type":"string"},"method":{"type":"string"},"query":{"type":"object"},"body":{"type":"object"}},"example":{"errorCode":399,"errorCodeName":"INTERNAL_ERROR","message":"Resource conflict","path":"/foo/bar","method":"POST","query":{"key":"value"},"body":{"key":"value"}}}}}]},"UnsupportedMediaTypeError":{"allOf":[{"$ref":"#/components/schemas/CommonResponse"},{"type":"object","properties":{"httpStatus":{"example":415},"data":{"type":"object","properties":{"errorCode":{"type":"integer","description":"Application-level error code identifying the specific failure.\n`100-199` MQTT transport, `200-299` MQTT server response,\n`300-399` HTTP / system layer.\nDistinguishes failures that share an HTTP status - e.g. `404`\nis `310` (ROUTE_NOT_FOUND) or `312` (FILE_NOT_FOUND).\n"},"errorCodeName":{"type":"string","description":"String name of `errorCode` (e.g. `SYSTEM_SHUTDOWN`)"},"message":{"type":"string"},"path":{"type":"string"},"method":{"type":"string"},"query":{"type":"object"},"body":{"type":"object"}},"example":{"errorCode":304,"errorCodeName":"UNSUPPORTED_CONTENT_TYPE","message":"Unsupported media type","path":"/foo/bar","method":"POST","query":{"key":"value"},"body":{"key":"value"}}}}}]},"RateLimitError":{"allOf":[{"$ref":"#/components/schemas/CommonResponse"},{"type":"object","properties":{"httpStatus":{"example":429},"data":{"type":"object","properties":{"errorCode":{"type":"integer","description":"Application-level error code identifying the specific failure.\n`100-199` MQTT transport, `200-299` MQTT server response,\n`300-399` HTTP / system layer.\nDistinguishes failures that share an HTTP status - e.g. `404`\nis `310` (ROUTE_NOT_FOUND) or `312` (FILE_NOT_FOUND).\n"},"errorCodeName":{"type":"string","description":"String name of `errorCode` (e.g. `SYSTEM_SHUTDOWN`)"},"message":{"type":"string"},"path":{"type":"string"},"method":{"type":"string"},"query":{"type":"object"},"body":{"type":"object"}},"example":{"errorCode":303,"errorCodeName":"RATE_LIMIT_EXCEEDED","message":"Too many requests","path":"/foo/bar","method":"POST","query":{"key":"value"},"body":{"key":"value"}}}}}]},"ServerError":{"allOf":[{"$ref":"#/components/schemas/CommonResponse"},{"type":"object","properties":{"httpStatus":{"example":500},"data":{"type":"object","properties":{"errorCode":{"type":"integer","description":"Application-level error code identifying the specific failure.\n`100-199` MQTT transport, `200-299` MQTT server response,\n`300-399` HTTP / system layer.\nDistinguishes failures that share an HTTP status - e.g. `404`\nis `310` (ROUTE_NOT_FOUND) or `312` (FILE_NOT_FOUND).\n"},"errorCodeName":{"type":"string","description":"String name of `errorCode` (e.g. `SYSTEM_SHUTDOWN`)"},"message":{"type":"string"},"path":{"type":"string"},"method":{"type":"string"},"query":{"type":"object"},"body":{"type":"object"}},"example":{"errorCode":399,"errorCodeName":"INTERNAL_ERROR","message":"Internal server error","path":"/foo/bar","method":"POST","query":{"key":"value"},"body":{"key":"value"}}}}}]},"ServiceUnavailableError":{"allOf":[{"$ref":"#/components/schemas/CommonResponse"},{"type":"object","properties":{"httpStatus":{"example":503},"data":{"type":"object","properties":{"errorCode":{"type":"integer","description":"Application-level error code identifying the specific failure.\n`100-199` MQTT transport, `200-299` MQTT server response,\n`300-399` HTTP / system layer.\nDistinguishes failures that share an HTTP status - e.g. `404`\nis `310` (ROUTE_NOT_FOUND) or `312` (FILE_NOT_FOUND).\n"},"errorCodeName":{"type":"string","description":"String name of `errorCode` (e.g. `SYSTEM_SHUTDOWN`)"},"message":{"type":"string"},"path":{"type":"string"},"method":{"type":"string"},"query":{"type":"object"},"body":{"type":"object"}},"example":{"errorCode":301,"errorCodeName":"SYSTEM_SHUTDOWN","message":"Service temporarily unavailable","path":"/foo/bar","method":"POST","query":{"key":"value"},"body":{"key":"value"}}}}}]},"TokenRequest":{"type":"object","required":["auth_key","auth_secret","subject"],"properties":{"auth_key":{"type":"string","description":"Authentication key"},"auth_secret":{"type":"string","description":"Authentication secret"},"subject":{"type":"string","description":"Token subject"},"customExpiresIn":{"type":"string","description":"Custom expiration time (e.g., '7d', '24h').\nOnly available for clients(\"qcells-factory\" and \"qcells-api\") that have been registered with custom expiration capability.\nOther clients will always receive tokens with the default expiration (1d).\n"}},"example":{"auth_key":"client_key","auth_secret":"client_secret","subject":"user123"}},"TokenResponse":{"allOf":[{"$ref":"#/components/schemas/Success"},{"type":"object","properties":{"data":{"type":"object","required":["status","token","expiresIn","client","roles"],"properties":{"status":{"type":"string"},"token":{"type":"string"},"expiresIn":{"type":"string"},"client":{"type":"string"},"roles":{"type":"array","items":{"type":"string"}}},"example":{"status":"success","token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...","expiresIn":"1d","client":"platform_client","roles":["admin","user"]}}}}]},"HealthResponse":{"allOf":[{"$ref":"#/components/schemas/Success"},{"type":"object","properties":{"data":{"type":"object","required":["status","timestamp","uptime","mqtt","iothub","httpServiceReady"],"properties":{"status":{"type":"string"},"timestamp":{"type":"string"},"uptime":{"type":"integer"},"mqtt":{"type":"boolean"},"iothub":{"type":"boolean"},"httpServiceReady":{"type":"boolean","description":"True when the HTTP service has finished startup and is no longer gated by the readiness middleware."}},"example":{"status":"healthy","timestamp":"2025-07-24T16:36:50.244","uptime":100,"mqtt":true,"iothub":false,"httpServiceReady":true}}}}]},"HealthSystemResponse":{"allOf":[{"$ref":"#/components/schemas/Success"},{"type":"object","properties":{"data":{"type":"object"}}}]},"PlatformInfoResponse":{"allOf":[{"$ref":"#/components/schemas/Success"},{"type":"object","properties":{"data":{"type":"object","required":["build_date","build_model","build_type","build_version"],"properties":{"build_date":{"type":"string"},"build_model":{"type":"string"},"build_type":{"type":"string"},"build_version":{"type":"string"}},"example":{"build_date":"2025/11/10 07:45:55","build_model":"AC_SYSTEM_GEN2","build_type":"Debug","build_version":"X011110","distro_codename":"kirkstone","id":"qcells-edge","is_valid":true,"name":"QCells Edge","pretty_name":"QCells Edge 5.15-kirkstone (kirkstone)","version":"5.15-kirkstone (kirkstone)","version_id":"5.15-kirkstone"}}}}]},"SystemLogResponse":{"allOf":[{"$ref":"#/components/schemas/Success"},{"type":"object","properties":{"data":{"type":"object","properties":{"filename":{"type":"string","description":"File name to be downloaded"},"contentType":{"type":"string","description":"File MIME type"},"size":{"type":"integer","description":"File size (bytes)"},"downloadUrl":{"type":"string","description":"Download URL (optional)"}},"example":{"filename":"current_system_log.log","contentType":"text/plain","size":1048576,"downloadUrl":"/download/current_system_log.log"}}}}]},"TelemetryResponse":{"allOf":[{"$ref":"#/components/schemas/Success"},{"type":"object","properties":{"data":{"type":"object"}}}]},"NotificationsResponse":{"allOf":[{"$ref":"#/components/schemas/Success"},{"type":"object","properties":{"data":{"type":"object"}}}]},"PublishMessageRequest":{"type":"object","description":"Message to publish","example":{"key":"value"}},"PublishMessageResponse":{"allOf":[{"$ref":"#/components/schemas/Success"},{"type":"object","properties":{"data":{"type":"object","properties":{"errorCode":{"type":"integer","description":"Application-level error code.\n`100-199` MQTT transport, `200-299` MQTT server response,\n`300-399` HTTP / system layer. `200` (NONE) means success.\n"},"errorCodeName":{"type":"string","description":"String name of `errorCode` (e.g. `NONE`, `DEVICE_NOT_FOUND`)"},"requestTarget":{"type":"string","description":"MQTT request target"},"requestService":{"type":"string","description":"MQTT request service"},"requestMessage":{"type":"string","description":"Original request message (JSON string)"},"responseMessage":{"description":"MQTT response message (Please check object contents in MQTT IPC documentation)"}},"example":{"errorCode":200,"errorCodeName":"NONE","requestTarget":"sys_manager","requestService":"get_system_info","requestMessage":"{}","responseMessage":{"status":"online"}}}}}]},"PublishBatchMessageRequest":{"type":"array","items":{"required":["target","service"],"type":"object","properties":{"target":{"type":"string","description":"Target system name"},"service":{"type":"string","description":"Service name"},"message":{"type":"object","description":"Message payload"}},"example":{"target":"sys_manager","service":"get_system_info","message":{"status":"online"}}},"example":[{"target":"sys_manager","service":"get_system_info","message":{"status":"online"}},{"target":"sys_manager","service":"get_internet_status","message":{"status":"online"}}]},"PublishBatchMessageResponse":{"allOf":[{"$ref":"#/components/schemas/Success"},{"type":"object","properties":{"data":{"type":"object","description":"Map of results keyed by \"target/service\"","additionalProperties":{"type":"object","properties":{"errorCode":{"type":"integer","description":"Application-level error code.\n`100-199` MQTT transport, `200-299` MQTT server response,\n`300-399` HTTP / system layer. `200` (NONE) means success.\n"},"errorCodeName":{"type":"string","description":"String name of `errorCode` (e.g. `NONE`, `DEVICE_NOT_FOUND`)"},"requestTarget":{"type":"string","description":"MQTT request target"},"requestService":{"type":"string","description":"MQTT request service"},"requestMessage":{"type":"string","description":"Original request message (JSON string)"},"responseMessage":{"description":"MQTT response message"}},"example":{"errorCode":200,"errorCodeName":"NONE","requestTarget":"sys_manager","requestService":"get_system_info","requestMessage":"{}","responseMessage":{"status":"online"}}},"example":{"sys_manager/get_system_info":{"errorCode":200,"errorCodeName":"NONE","requestTarget":"sys_manager","requestService":"get_system_info","requestMessage":"{}","responseMessage":{"status":"online"}},"sys_manager/get_internet_status":{"errorCode":200,"errorCodeName":"NONE","requestTarget":"sys_manager","requestService":"get_internet_status","requestMessage":"{}","responseMessage":{"status":"online"}}}}}}]}}},"paths":{"/auth/token":{"post":{"summary":"Generate JWT token","description":"Generate a JWT token for authentication\n\nauth_key and auth_secret are provided by the QCELLS.\n\n**Security policies:**\n- Default token validity is 1 day.\n- Only clients(\"qcells-factory\" and \"qcells-api\") that have been registered with custom expiration capability can specify custom expiration via `customExpiresIn`.\n- After 10 consecutive failed authentication attempts (across all clients) within a 1-hour period, authentication will be locked for 30 minutes.\n- Lockout state persists across system reboots.\n\nContact QCELLS for more information.\n- [Cheol Sim, QCELLS](mailto:cheol.sim@qcells.com)\n- [Yeonsoo Chung, QCELLS](mailto:yeonsoo.chung@qcells.com)\n","tags":["Authentication"],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/TokenRequest"}}}},"responses":{"200":{"description":"Token generated successfully","content":{"application/json":{"schema":{"$ref":"#/components/schemas/TokenResponse"}}}},"400":{"description":"Bad request","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ClientError"}}}},"401":{"description":"Invalid credentials","content":{"application/json":{"schema":{"$ref":"#/components/schemas/UnauthorizedError"}}}},"403":{"description":"Forbidden","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ForbiddenError"}}}},"404":{"description":"Not Found","content":{"application/json":{"schema":{"$ref":"#/components/schemas/NotFoundError"}}}},"405":{"description":"Method not allowed","content":{"application/json":{"schema":{"$ref":"#/components/schemas/MethodNotAllowedError"}}}},"409":{"description":"Conflict","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ConflictError"}}}},"415":{"description":"Unsupported media type","content":{"application/json":{"schema":{"$ref":"#/components/schemas/UnsupportedMediaTypeError"}}}},"429":{"description":"Too many requests","content":{"application/json":{"schema":{"$ref":"#/components/schemas/RateLimitError"}}}},"500":{"description":"Internal server error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ServerError"}}}},"503":{"description":"Service unavailable","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ServiceUnavailableError"}}}}}}},"/health":{"get":{"summary":"Get health status","description":"Get the overall health status of the system.\n\n**Note:** This endpoint is available during service startup (readiness bypass) and does not require authentication.\n","tags":["Health"],"responses":{"200":{"description":"Health status retrieved successfully","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HealthResponse"}}}},"400":{"description":"Bad request","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ClientError"}}}},"401":{"description":"Invalid credentials","content":{"application/json":{"schema":{"$ref":"#/components/schemas/UnauthorizedError"}}}},"403":{"description":"Forbidden","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ForbiddenError"}}}},"404":{"description":"Not Found","content":{"application/json":{"schema":{"$ref":"#/components/schemas/NotFoundError"}}}},"405":{"description":"Method not allowed","content":{"application/json":{"schema":{"$ref":"#/components/schemas/MethodNotAllowedError"}}}},"409":{"description":"Conflict","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ConflictError"}}}},"415":{"description":"Unsupported media type","content":{"application/json":{"schema":{"$ref":"#/components/schemas/UnsupportedMediaTypeError"}}}},"429":{"description":"Too many requests","content":{"application/json":{"schema":{"$ref":"#/components/schemas/RateLimitError"}}}},"500":{"description":"Internal server error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ServerError"}}}},"503":{"description":"Service unavailable","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ServiceUnavailableError"}}}}}}},"/health/system":{"get":{"summary":"Get system status","description":"Get detailed system status including CPU, memory, and disk usage","tags":["Health"],"security":[{"Permission":["health:read"]}],"responses":{"200":{"description":"System status retrieved successfully","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HealthSystemResponse"}}}},"400":{"description":"Bad request","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ClientError"}}}},"401":{"description":"Invalid credentials","content":{"application/json":{"schema":{"$ref":"#/components/schemas/UnauthorizedError"}}}},"403":{"description":"Forbidden","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ForbiddenError"}}}},"404":{"description":"Not Found","content":{"application/json":{"schema":{"$ref":"#/components/schemas/NotFoundError"}}}},"405":{"description":"Method not allowed","content":{"application/json":{"schema":{"$ref":"#/components/schemas/MethodNotAllowedError"}}}},"409":{"description":"Conflict","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ConflictError"}}}},"415":{"description":"Unsupported media type","content":{"application/json":{"schema":{"$ref":"#/components/schemas/UnsupportedMediaTypeError"}}}},"429":{"description":"Too many requests","content":{"application/json":{"schema":{"$ref":"#/components/schemas/RateLimitError"}}}},"500":{"description":"Internal server error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ServerError"}}}},"503":{"description":"Service unavailable","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ServiceUnavailableError"}}}}}}},"/platform/info":{"get":{"summary":"Get platform information","description":"Get platform information for detail.\n\n**Note:** This endpoint does not require authentication.\n","tags":["System"],"responses":{"200":{"description":"Platform information retrieved successfully","content":{"application/json":{"schema":{"$ref":"#/components/schemas/PlatformInfoResponse"}}}},"400":{"description":"Bad request","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ClientError"}}}},"401":{"description":"Invalid credentials","content":{"application/json":{"schema":{"$ref":"#/components/schemas/UnauthorizedError"}}}},"403":{"description":"Forbidden","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ForbiddenError"}}}},"404":{"description":"Not Found","content":{"application/json":{"schema":{"$ref":"#/components/schemas/NotFoundError"}}}},"405":{"description":"Method not allowed","content":{"application/json":{"schema":{"$ref":"#/components/schemas/MethodNotAllowedError"}}}},"409":{"description":"Conflict","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ConflictError"}}}},"415":{"description":"Unsupported media type","content":{"application/json":{"schema":{"$ref":"#/components/schemas/UnsupportedMediaTypeError"}}}},"429":{"description":"Too many requests","content":{"application/json":{"schema":{"$ref":"#/components/schemas/RateLimitError"}}}},"500":{"description":"Internal server error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ServerError"}}}},"503":{"description":"Service unavailable","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ServiceUnavailableError"}}}}}}},"/export/system/log":{"get":{"summary":"Export system logs","description":"Export system logs for analysis","tags":["System"],"security":[{"Permission":["export:system:log"]}],"responses":{"200":{"description":"System logs exported successfully","content":{"application/json":{"schema":{"$ref":"#/components/schemas/SystemLogResponse"}},"text/plain":{"schema":{"type":"string","description":"Plain text system logs"}}}},"400":{"description":"Bad request","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ClientError"}}}},"401":{"description":"Invalid credentials","content":{"application/json":{"schema":{"$ref":"#/components/schemas/UnauthorizedError"}}}},"403":{"description":"Forbidden","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ForbiddenError"}}}},"404":{"description":"Not Found","content":{"application/json":{"schema":{"$ref":"#/components/schemas/NotFoundError"}}}},"405":{"description":"Method not allowed","content":{"application/json":{"schema":{"$ref":"#/components/schemas/MethodNotAllowedError"}}}},"409":{"description":"Conflict","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ConflictError"}}}},"415":{"description":"Unsupported media type","content":{"application/json":{"schema":{"$ref":"#/components/schemas/UnsupportedMediaTypeError"}}}},"429":{"description":"Too many requests","content":{"application/json":{"schema":{"$ref":"#/components/schemas/RateLimitError"}}}},"500":{"description":"Internal server error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ServerError"}}}},"503":{"description":"Service unavailable","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ServiceUnavailableError"}}}}}}},"/telemetry":{"get":{"summary":"Get telemetry data","description":"Get system telemetry data\n\nThe response data is composed of objects, and each key can be mapped by searching for the data names defined in the two references below.\n\nPlease refer to the following links:\n- [Telemetry SPI Data Reference](https://growingenergylabs.atlassian.net/wiki/x/PAADggI)\n- [Telemetry CAN Data Reference](https://growingenergylabs.atlassian.net/wiki/x/pQNUfAI)\n\n\nUse the `query` parameter to filter telemetry items by key substring matching.\nOnly items whose key contains any of the provided filter strings will be returned.\nThe `timestamp` field is always included regardless of filters.\n\n**Example:** `GET /telemetry?query=BDC_Power_1s&query=grid_200_AphB`\n\nIf `query` is omitted, the full telemetry snapshot is returned (default behavior).\n","tags":["Telemetry"],"security":[{"Permission":["telemetry:read"]}],"parameters":[{"name":"query","in":"query","required":false,"schema":{"type":"array","items":{"type":"string","maxLength":256},"maxItems":100},"style":"form","explode":true,"description":"Filter telemetry items by key substring matching.\nEach value is matched as a substring against telemetry keys.\n","example":["BDC_Power_1s","grid_200_AphB"]}],"responses":{"200":{"description":"Telemetry data retrieved successfully","content":{"application/json":{"schema":{"$ref":"#/components/schemas/TelemetryResponse"}}}},"400":{"description":"Bad request","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ClientError"}}}},"401":{"description":"Invalid credentials","content":{"application/json":{"schema":{"$ref":"#/components/schemas/UnauthorizedError"}}}},"403":{"description":"Forbidden","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ForbiddenError"}}}},"404":{"description":"Not Found","content":{"application/json":{"schema":{"$ref":"#/components/schemas/NotFoundError"}}}},"405":{"description":"Method not allowed","content":{"application/json":{"schema":{"$ref":"#/components/schemas/MethodNotAllowedError"}}}},"409":{"description":"Conflict","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ConflictError"}}}},"415":{"description":"Unsupported media type","content":{"application/json":{"schema":{"$ref":"#/components/schemas/UnsupportedMediaTypeError"}}}},"429":{"description":"Too many requests","content":{"application/json":{"schema":{"$ref":"#/components/schemas/RateLimitError"}}}},"500":{"description":"Internal server error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ServerError"}}}},"503":{"description":"Service unavailable","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ServiceUnavailableError"}}}}}}},"/notifications":{"get":{"summary":"Get Notifications data","description":"Get system notifications data","tags":["Notifications"],"security":[{"Permission":["notifications:read"]}],"responses":{"200":{"description":"Notifications data retrieved successfully","content":{"application/json":{"schema":{"$ref":"#/components/schemas/NotificationsResponse"}}}},"400":{"description":"Bad request","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ClientError"}}}},"401":{"description":"Invalid credentials","content":{"application/json":{"schema":{"$ref":"#/components/schemas/UnauthorizedError"}}}},"403":{"description":"Forbidden","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ForbiddenError"}}}},"404":{"description":"Not Found","content":{"application/json":{"schema":{"$ref":"#/components/schemas/NotFoundError"}}}},"405":{"description":"Method not allowed","content":{"application/json":{"schema":{"$ref":"#/components/schemas/MethodNotAllowedError"}}}},"409":{"description":"Conflict","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ConflictError"}}}},"415":{"description":"Unsupported media type","content":{"application/json":{"schema":{"$ref":"#/components/schemas/UnsupportedMediaTypeError"}}}},"429":{"description":"Too many requests","content":{"application/json":{"schema":{"$ref":"#/components/schemas/RateLimitError"}}}},"500":{"description":"Internal server error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ServerError"}}}},"503":{"description":"Service unavailable","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ServiceUnavailableError"}}}}}}},"/notifications/{name}":{"get":{"summary":"Get notification by name","description":"Get a specific notification by its name","tags":["Notifications"],"security":[{"Permission":["notifications:read"]}],"parameters":[{"name":"name","in":"path","required":true,"schema":{"type":"string"},"description":"Notification name"}],"responses":{"200":{"description":"Notifications data retrieved successfully","content":{"application/json":{"schema":{"$ref":"#/components/schemas/NotificationsResponse"}}}},"400":{"description":"Bad request","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ClientError"}}}},"401":{"description":"Invalid credentials","content":{"application/json":{"schema":{"$ref":"#/components/schemas/UnauthorizedError"}}}},"403":{"description":"Forbidden","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ForbiddenError"}}}},"404":{"description":"Not Found","content":{"application/json":{"schema":{"$ref":"#/components/schemas/NotFoundError"}}}},"405":{"description":"Method not allowed","content":{"application/json":{"schema":{"$ref":"#/components/schemas/MethodNotAllowedError"}}}},"409":{"description":"Conflict","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ConflictError"}}}},"415":{"description":"Unsupported media type","content":{"application/json":{"schema":{"$ref":"#/components/schemas/UnsupportedMediaTypeError"}}}},"429":{"description":"Too many requests","content":{"application/json":{"schema":{"$ref":"#/components/schemas/RateLimitError"}}}},"500":{"description":"Internal server error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ServerError"}}}},"503":{"description":"Service unavailable","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ServiceUnavailableError"}}}}}}},"/notifications/meta/stats":{"get":{"summary":"Get notification statistics","description":"Get notification statistics and metadata","tags":["Notifications"],"security":[{"Permission":["notifications:read"]}],"responses":{"200":{"description":"Notifications data retrieved successfully","content":{"application/json":{"schema":{"$ref":"#/components/schemas/NotificationsResponse"}}}},"400":{"description":"Bad request","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ClientError"}}}},"401":{"description":"Invalid credentials","content":{"application/json":{"schema":{"$ref":"#/components/schemas/UnauthorizedError"}}}},"403":{"description":"Forbidden","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ForbiddenError"}}}},"404":{"description":"Not Found","content":{"application/json":{"schema":{"$ref":"#/components/schemas/NotFoundError"}}}},"405":{"description":"Method not allowed","content":{"application/json":{"schema":{"$ref":"#/components/schemas/MethodNotAllowedError"}}}},"409":{"description":"Conflict","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ConflictError"}}}},"415":{"description":"Unsupported media type","content":{"application/json":{"schema":{"$ref":"#/components/schemas/UnsupportedMediaTypeError"}}}},"429":{"description":"Too many requests","content":{"application/json":{"schema":{"$ref":"#/components/schemas/RateLimitError"}}}},"500":{"description":"Internal server error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ServerError"}}}},"503":{"description":"Service unavailable","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ServiceUnavailableError"}}}}}}},"/notification/{target}/{service}":{"post":{"summary":"Publish notification via MQTT","description":"Publish a fire-and-forget notification message to the internal MQTT bus.\n\nUnlike `POST /publish/{target}/{service}` which sends a request and waits for a response,\nthis endpoint broadcasts a one-way notification using `mqttResponseManager.notify()`.\n\nThe notification is published to the topic pattern: `emsp/{appId}/{target}/noti/{service}`\n\nUse the optional `retain` query parameter to set the MQTT retain flag.\n","tags":["Notifications"],"security":[{"Permission":["publish:notification"]}],"parameters":[{"name":"target","in":"path","required":true,"schema":{"type":"string"},"description":"Notification target (e.g. \"all\" for broadcast, or a specific app ID)","example":"all"},{"name":"service","in":"path","required":true,"schema":{"type":"string"},"description":"Notification service name (used as the MQTT notification topic suffix)","example":"api_web_interface_ready"},{"name":"retain","in":"query","required":false,"schema":{"type":"string","enum":["true","false"],"default":"false"},"description":"Whether to set the MQTT retain flag on the notification message"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"description":"Notification payload (any valid JSON)","example":{"key":"value"}}}}},"responses":{"200":{"description":"Notification published successfully","content":{"application/json":{"schema":{"allOf":[{"$ref":"#/components/schemas/Success"},{"type":"object","properties":{"data":{"type":"object","properties":{"target":{"type":"string","description":"Notification target"},"service":{"type":"string","description":"Notification service name"},"retain":{"type":"boolean","description":"Whether the retain flag was set"}},"example":{"target":"all","service":"telemetry","retain":false}}}}]}}}},"400":{"description":"Bad request","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ClientError"}}}},"401":{"description":"Invalid credentials","content":{"application/json":{"schema":{"$ref":"#/components/schemas/UnauthorizedError"}}}},"403":{"description":"Forbidden","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ForbiddenError"}}}},"404":{"description":"Not Found","content":{"application/json":{"schema":{"$ref":"#/components/schemas/NotFoundError"}}}},"405":{"description":"Method not allowed","content":{"application/json":{"schema":{"$ref":"#/components/schemas/MethodNotAllowedError"}}}},"409":{"description":"Conflict","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ConflictError"}}}},"415":{"description":"Unsupported media type","content":{"application/json":{"schema":{"$ref":"#/components/schemas/UnsupportedMediaTypeError"}}}},"429":{"description":"Too many requests","content":{"application/json":{"schema":{"$ref":"#/components/schemas/RateLimitError"}}}},"500":{"description":"Internal server error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ServerError"}}}},"503":{"description":"Service unavailable","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ServiceUnavailableError"}}}}}}},"/publish/{target}/{service}":{"post":{"summary":"Publish message to MQTT","description":"Publish a message to a specific MQTT topic\n\nDetail Internal IPC Protocol documentation is available at the following link.\n\n[MQTT IPC Protocol Documentation](https://172.23.1.181:20202/)\n\n**Request Guards:**\nCertain target/service/payload combinations are blocked by request guards.\n- `db_manager` / `update_records`, `upsert_records`, `insert_records` with `table: \"device_info\"` — direct writes are blocked.\n\nTo bypass guards, include the `X-Bypass-Guard` header with the configured secret.\n","tags":["MQTT"],"security":[{"Permission":["publish:message"]}],"parameters":[{"name":"target","in":"path","required":true,"schema":{"type":"string"},"description":"Target system name","example":"sys_manager"},{"name":"service","in":"path","required":true,"schema":{"type":"string"},"description":"Service name","example":"get_system_info"},{"name":"X-Bypass-Guard","in":"header","required":false,"schema":{"type":"string"},"description":"Secret value to bypass request guards"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/PublishMessageRequest"}}}},"responses":{"200":{"description":"Message published successfully","content":{"application/json":{"schema":{"$ref":"#/components/schemas/PublishMessageResponse"}}}},"400":{"description":"Bad request","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ClientError"}}}},"401":{"description":"Invalid credentials","content":{"application/json":{"schema":{"$ref":"#/components/schemas/UnauthorizedError"}}}},"403":{"description":"Forbidden","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ForbiddenError"}}}},"404":{"description":"Not Found","content":{"application/json":{"schema":{"$ref":"#/components/schemas/NotFoundError"}}}},"405":{"description":"Method not allowed","content":{"application/json":{"schema":{"$ref":"#/components/schemas/MethodNotAllowedError"}}}},"409":{"description":"Conflict","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ConflictError"}}}},"415":{"description":"Unsupported media type","content":{"application/json":{"schema":{"$ref":"#/components/schemas/UnsupportedMediaTypeError"}}}},"429":{"description":"Too many requests","content":{"application/json":{"schema":{"$ref":"#/components/schemas/RateLimitError"}}}},"500":{"description":"Internal server error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ServerError"}}}},"503":{"description":"Service unavailable","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ServiceUnavailableError"}}}}}}},"/publish/batch":{"post":{"summary":"Publish batch messages to MQTT","description":"Publish multiple messages to MQTT topics\n\nDetail Internal IPC Protocol documentation is available at the following link.\n\n[MQTT IPC Protocol Documentation](https://172.23.1.181:20202/)\n\n**Request Guards:**\nEach message in the batch is individually validated by request guards. Blocked messages return with errorCode 201 (INVALID_REQUEST), which maps to HTTP 400.\nTo bypass guards, include the `X-Bypass-Guard` header with the configured secret.\n","parameters":[{"name":"X-Bypass-Guard","in":"header","required":false,"schema":{"type":"string"},"description":"Secret value to bypass request guards"}],"tags":["MQTT"],"security":[{"Permission":["publish:batch:message"]}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/PublishBatchMessageRequest"}}}},"responses":{"200":{"description":"Batch messages published successfully","content":{"application/json":{"schema":{"$ref":"#/components/schemas/PublishBatchMessageResponse"}}}},"400":{"description":"Bad request","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ClientError"}}}},"401":{"description":"Invalid credentials","content":{"application/json":{"schema":{"$ref":"#/components/schemas/UnauthorizedError"}}}},"403":{"description":"Forbidden","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ForbiddenError"}}}},"404":{"description":"Not Found","content":{"application/json":{"schema":{"$ref":"#/components/schemas/NotFoundError"}}}},"405":{"description":"Method not allowed","content":{"application/json":{"schema":{"$ref":"#/components/schemas/MethodNotAllowedError"}}}},"409":{"description":"Conflict","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ConflictError"}}}},"415":{"description":"Unsupported media type","content":{"application/json":{"schema":{"$ref":"#/components/schemas/UnsupportedMediaTypeError"}}}},"429":{"description":"Too many requests","content":{"application/json":{"schema":{"$ref":"#/components/schemas/RateLimitError"}}}},"500":{"description":"Internal server error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ServerError"}}}},"503":{"description":"Service unavailable","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ServiceUnavailableError"}}}}}}}},"tags":[{"name":"Authentication","description":"Authentication and authorization endpoints"},{"name":"Health","description":"Health check and system status endpoints"},{"name":"System","description":"System information and management endpoints"},{"name":"Telemetry","description":"Telemetry data endpoints"},{"name":"Notifications","description":"Notification management endpoints"},{"name":"MQTT","description":"MQTT message publishing endpoints"}]}
+    exit_code:0
+[PASS] TC01-2: docs.json이 유효한 OpenAPI 문서
+  $ curl -skL -o /dev/null -w %{http_code} https://192.168.10.25:9112/platform/docs
+    200
+    exit_code:0
+[PASS] TC01-3: Swagger UI HTML 200 응답
+  matched_paths_count=5
+[PASS] TC01-4: 5개 핵심 엔드포인트가 paths에 존재
+=== TC02: SKIP (개발자 검토 대기 — tc_web_interface.md 참고) ===
+=== TC03: MQTT-HTTP Bridge 지원 ===
+  [SKIP] WI_ADMIN_AUTH_KEY/WI_AUTH_KEY 미설정 — TC03 전체 skip
+=== TC04: SKIP (개발자 검토 대기 — tc_web_interface.md 참고) ===
+=== TC05: JWT 토큰 검증 ===
+  [SKIP] WI_AUTH_KEY 미설정 — TC05 전체 skip
+=== TC06: 경로 순회 공격 방지 ===
+  $ curl -sk https://192.168.10.25:9112/../../../etc/passwd
+    {"httpStatus":401,"meta":{"timestamp":"2026-08-11T16:52:35.888","build_date":"2026/08/11 05:27:00","build_model":"AC_SYSTEM_GEN2","build_type":"debug","build_version":"X100811"},"data":{"message":"QCELLS Authorization header required","path":"/etc/passwd","method":"GET","query":{},"errorCode":305,"errorCodeName":"UNAUTHENTICATED","context":{"expectedFormat":"Bearer <token>"}}}
+    exit_code:0
+  $ curl -sk -o /dev/null -w %{http_code} https://192.168.10.25:9112/../../../etc/passwd
+    401
+    exit_code:0
+  payload=/../../../etc/passwd http_code=401
+  $ curl -sk https://192.168.10.25:9112/..%2f..%2f..%2fetc/passwd
+    {"httpStatus":401,"meta":{"timestamp":"2026-08-11T16:52:36.030","build_date":"2026/08/11 05:27:00","build_model":"AC_SYSTEM_GEN2","build_type":"debug","build_version":"X100811"},"data":{"message":"QCELLS Authorization header required","path":"/..%2f..%2f..%2fetc/passwd","method":"GET","query":{},"errorCode":305,"errorCodeName":"UNAUTHENTICATED","context":{"expectedFormat":"Bearer <token>"}}}
+    exit_code:0
+  $ curl -sk -o /dev/null -w %{http_code} https://192.168.10.25:9112/..%2f..%2f..%2fetc/passwd
+    401
+    exit_code:0
+  payload=/..%2f..%2f..%2fetc/passwd http_code=401
+  $ curl -sk https://192.168.10.25:9112/..\..\..\etc\passwd
+    {"httpStatus":401,"meta":{"timestamp":"2026-08-11T16:52:36.167","build_date":"2026/08/11 05:27:00","build_model":"AC_SYSTEM_GEN2","build_type":"debug","build_version":"X100811"},"data":{"message":"QCELLS Authorization header required","path":"/..\\..\\..\\etc\\passwd","method":"GET","query":{},"errorCode":305,"errorCodeName":"UNAUTHENTICATED","context":{"expectedFormat":"Bearer <token>"}}}
+    exit_code:0
+  $ curl -sk -o /dev/null -w %{http_code} https://192.168.10.25:9112/..\..\..\etc\passwd
+    401
+    exit_code:0
+  payload=/..\..\..\etc\passwd http_code=401
+  $ curl -sk https://192.168.10.25:9112/.%00./.%00./.%00./etc/passwd
+    {"httpStatus":401,"meta":{"timestamp":"2026-08-11T16:52:36.305","build_date":"2026/08/11 05:27:00","build_model":"AC_SYSTEM_GEN2","build_type":"debug","build_version":"X100811"},"data":{"message":"QCELLS Authorization header required","path":"/.%00./.%00./.%00./etc/passwd","method":"GET","query":{},"errorCode":305,"errorCodeName":"UNAUTHENTICATED","context":{"expectedFormat":"Bearer <token>"}}}
+    exit_code:0
+  $ curl -sk -o /dev/null -w %{http_code} https://192.168.10.25:9112/.%00./.%00./.%00./etc/passwd
+    401
+    exit_code:0
+  payload=/.%00./.%00./.%00./etc/passwd http_code=401
+[PASS] TC06-1: URL Path Traversal 전부 4xx (root: 미노출)
+  $ curl -sk -o /dev/null -w %{http_code} https://192.168.10.25:9112/export/system/log?file=../../../etc/passwd
+    401
+    exit_code:0
+[PASS] TC06-2: Query Param Traversal(미인증) -> 401
+  [SKIP] TC06-3: admin 토큰 없음 (WI_ADMIN_AUTH_KEY 미설정) — skip
+  $ curl -sk -o /dev/null -w %{http_code} https://192.168.10.25:9112/auth/token%00.jpg
+    404
+    exit_code:0
+[PASS] TC06-4: Null Byte Injection 전부 4xx
+=== TC07: Injection 공격 방지 ===
+  $ curl -sk -o /dev/null -w %{http_code} -X POST https://192.168.10.25:9112/auth/token -H Content-Type: application/json -d {"auth_key":"admin OR 1=1--","auth_secret":"x","subject":"x"}
+    401
+    exit_code:0
+[PASS] TC07-1: SQL Injection 페이로드 -> 401
+  $ curl -sk -X POST https://192.168.10.25:9112/auth/token -H Content-Type: application/json -d {"auth_key":"admin OR 1=1--","auth_secret":"x","subject":"x"}
+    {"httpStatus":401,"meta":{"timestamp":"2026-08-11T16:52:36.654","build_date":"2026/08/11 05:27:00","build_model":"AC_SYSTEM_GEN2","build_type":"debug","build_version":"X100811"},"data":{"message":"Client not found","path":"/auth/token","method":"POST","query":{},"body":{"auth_key":"admin OR 1=1--","auth_secret":"x","subject":"x"},"errorCode":316,"errorCodeName":"INVALID_CREDENTIALS","context":{"auth_key":"admin OR 1=1--","reason":"client_not_found"}}}
+    exit_code:0
+[PASS] TC07-2: 응답에 토큰 미포함
+=== TC08: CORS ===
+  $ curl -sk -i -X OPTIONS https://192.168.10.25:9112/health -H Origin: https://example.com -H Access-Control-Request-Method: GET
+    HTTP/1.1 204 No Content
+    RateLimit-Policy: 600;w=60
+    RateLimit-Limit: 600
+    RateLimit-Remaining: 583
+    RateLimit-Reset: 59
+    Content-Security-Policy: default-src 'self';base-uri 'self';font-src 'self' https: data:;form-action 'self';frame-ancestors 'self';img-src 'self' data:;object-src 'none';script-src 'self';script-src-attr 'none';style-src 'self' https: 'unsafe-inline';upgrade-insecure-requests
+    Cross-Origin-Opener-Policy: same-origin
+    Cross-Origin-Resource-Policy: same-origin
+    Origin-Agent-Cluster: ?1
+    Referrer-Policy: no-referrer
+    Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+    X-Content-Type-Options: nosniff
+    X-DNS-Prefetch-Control: off
+    X-Download-Options: noopen
+    X-Frame-Options: SAMEORIGIN
+    X-Permitted-Cross-Domain-Policies: none
+    X-XSS-Protection: 0
+    Access-Control-Allow-Origin: *
+    Access-Control-Allow-Methods: GET,POST,PUT,DELETE,OPTIONS
+    Access-Control-Allow-Headers: Content-Type,Authorization,X-Bypass-Guard
+    Access-Control-Max-Age: 3600
+    Content-Length: 0
+    Date: Tue, 11 Aug 2026 07:52:36 GMT
+    Connection: keep-alive
+    Keep-Alive: timeout=5
+    
+    exit_code:0
+  parsed_header=[Access-Control-Allow-Methods: GET,POST,PUT,DELETE,OPTIONS]
+[PASS] TC08-1: Allow-Methods 헤더 값 정확히 일치
+  $ curl -sk -i -X OPTIONS https://192.168.10.25:9112/health -H Origin: https://example.com -H Access-Control-Request-Method: PATCH
+    HTTP/1.1 204 No Content
+    RateLimit-Policy: 600;w=60
+    RateLimit-Limit: 600
+    RateLimit-Remaining: 582
+    RateLimit-Reset: 59
+    Content-Security-Policy: default-src 'self';base-uri 'self';font-src 'self' https: data:;form-action 'self';frame-ancestors 'self';img-src 'self' data:;object-src 'none';script-src 'self';script-src-attr 'none';style-src 'self' https: 'unsafe-inline';upgrade-insecure-requests
+    Cross-Origin-Opener-Policy: same-origin
+    Cross-Origin-Resource-Policy: same-origin
+    Origin-Agent-Cluster: ?1
+    Referrer-Policy: no-referrer
+    Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+    X-Content-Type-Options: nosniff
+    X-DNS-Prefetch-Control: off
+    X-Download-Options: noopen
+    X-Frame-Options: SAMEORIGIN
+    X-Permitted-Cross-Domain-Policies: none
+    X-XSS-Protection: 0
+    Access-Control-Allow-Origin: *
+    Access-Control-Allow-Methods: GET,POST,PUT,DELETE,OPTIONS
+    Access-Control-Allow-Headers: Content-Type,Authorization,X-Bypass-Guard
+    Access-Control-Max-Age: 3600
+    Content-Length: 0
+    Date: Tue, 11 Aug 2026 07:52:36 GMT
+    Connection: keep-alive
+    Keep-Alive: timeout=5
+    
+    exit_code:0
+  cross-check method=PATCH header=[Access-Control-Allow-Methods: GET,POST,PUT,DELETE,OPTIONS] (base와 동일 여부: yes)
+  $ curl -sk -i -X OPTIONS https://192.168.10.25:9112/health -H Origin: https://example.com -H Access-Control-Request-Method: HEAD
+    HTTP/1.1 204 No Content
+    RateLimit-Policy: 600;w=60
+    RateLimit-Limit: 600
+    RateLimit-Remaining: 581
+    RateLimit-Reset: 59
+    Content-Security-Policy: default-src 'self';base-uri 'self';font-src 'self' https: data:;form-action 'self';frame-ancestors 'self';img-src 'self' data:;object-src 'none';script-src 'self';script-src-attr 'none';style-src 'self' https: 'unsafe-inline';upgrade-insecure-requests
+    Cross-Origin-Opener-Policy: same-origin
+    Cross-Origin-Resource-Policy: same-origin
+    Origin-Agent-Cluster: ?1
+    Referrer-Policy: no-referrer
+    Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+    X-Content-Type-Options: nosniff
+    X-DNS-Prefetch-Control: off
+    X-Download-Options: noopen
+    X-Frame-Options: SAMEORIGIN
+    X-Permitted-Cross-Domain-Policies: none
+    X-XSS-Protection: 0
+    Access-Control-Allow-Origin: *
+    Access-Control-Allow-Methods: GET,POST,PUT,DELETE,OPTIONS
+    Access-Control-Allow-Headers: Content-Type,Authorization,X-Bypass-Guard
+    Access-Control-Max-Age: 3600
+    Content-Length: 0
+    Date: Tue, 11 Aug 2026 07:52:36 GMT
+    Connection: keep-alive
+    Keep-Alive: timeout=5
+    
+    exit_code:0
+  cross-check method=HEAD header=[Access-Control-Allow-Methods: GET,POST,PUT,DELETE,OPTIONS] (base와 동일 여부: yes)
+  $ curl -sk -i -X OPTIONS https://192.168.10.25:9112/health -H Origin: https://example.com -H Access-Control-Request-Method: CONNECT
+    HTTP/1.1 204 No Content
+    RateLimit-Policy: 600;w=60
+    RateLimit-Limit: 600
+    RateLimit-Remaining: 580
+    RateLimit-Reset: 59
+    Content-Security-Policy: default-src 'self';base-uri 'self';font-src 'self' https: data:;form-action 'self';frame-ancestors 'self';img-src 'self' data:;object-src 'none';script-src 'self';script-src-attr 'none';style-src 'self' https: 'unsafe-inline';upgrade-insecure-requests
+    Cross-Origin-Opener-Policy: same-origin
+    Cross-Origin-Resource-Policy: same-origin
+    Origin-Agent-Cluster: ?1
+    Referrer-Policy: no-referrer
+    Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+    X-Content-Type-Options: nosniff
+    X-DNS-Prefetch-Control: off
+    X-Download-Options: noopen
+    X-Frame-Options: SAMEORIGIN
+    X-Permitted-Cross-Domain-Policies: none
+    X-XSS-Protection: 0
+    Access-Control-Allow-Origin: *
+    Access-Control-Allow-Methods: GET,POST,PUT,DELETE,OPTIONS
+    Access-Control-Allow-Headers: Content-Type,Authorization,X-Bypass-Guard
+    Access-Control-Max-Age: 3600
+    Content-Length: 0
+    Date: Tue, 11 Aug 2026 07:52:36 GMT
+    Connection: keep-alive
+    Keep-Alive: timeout=5
+    
+    exit_code:0
+  cross-check method=CONNECT header=[Access-Control-Allow-Methods: GET,POST,PUT,DELETE,OPTIONS] (base와 동일 여부: yes)
+  $ curl -sk -i -X OPTIONS https://192.168.10.25:9112/health -H Origin: https://example.com -H Access-Control-Request-Method: TRACE
+    HTTP/1.1 204 No Content
+    RateLimit-Policy: 600;w=60
+    RateLimit-Limit: 600
+    RateLimit-Remaining: 579
+    RateLimit-Reset: 59
+    Content-Security-Policy: default-src 'self';base-uri 'self';font-src 'self' https: data:;form-action 'self';frame-ancestors 'self';img-src 'self' data:;object-src 'none';script-src 'self';script-src-attr 'none';style-src 'self' https: 'unsafe-inline';upgrade-insecure-requests
+    Cross-Origin-Opener-Policy: same-origin
+    Cross-Origin-Resource-Policy: same-origin
+    Origin-Agent-Cluster: ?1
+    Referrer-Policy: no-referrer
+    Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+    X-Content-Type-Options: nosniff
+    X-DNS-Prefetch-Control: off
+    X-Download-Options: noopen
+    X-Frame-Options: SAMEORIGIN
+    X-Permitted-Cross-Domain-Policies: none
+    X-XSS-Protection: 0
+    Access-Control-Allow-Origin: *
+    Access-Control-Allow-Methods: GET,POST,PUT,DELETE,OPTIONS
+    Access-Control-Allow-Headers: Content-Type,Authorization,X-Bypass-Guard
+    Access-Control-Max-Age: 3600
+    Content-Length: 0
+    Date: Tue, 11 Aug 2026 07:52:37 GMT
+    Connection: keep-alive
+    Keep-Alive: timeout=5
+    
+    exit_code:0
+  cross-check method=TRACE header=[Access-Control-Allow-Methods: GET,POST,PUT,DELETE,OPTIONS] (base와 동일 여부: yes)
+  $ curl -sk -o /dev/null -w %{http_code} -X PATCH https://192.168.10.25:9112/health
+    405
+    exit_code:0
+[FAIL] TC08-2: PATCH 실제 요청 시 404(라우트 없음)
+  [REASON] http_code=405
+=== TC09: SSL 암호화 스위트 ===
+  $ curl -vk https://192.168.10.25:9112/health
+    * STATE: INIT => CONNECT handle 0xaaaaead8b090; line 1834 (connection #-5000)
+    * Added connection 0. The cache now contains 1 members
+    * family0 == v4, family1 == v6
+    *   Trying 192.168.10.25:9112...
+    * STATE: CONNECT => CONNECTING handle 0xaaaaead8b090; line 1895 (connection #0)
+      % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                     Dload  Upload   Total   Spent    Left  Speed
+      0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0* Connected to 192.168.10.25 (192.168.10.25) port 9112 (#0)
+    * STATE: CONNECTING => PROTOCONNECT handle 0xaaaaead8b090; line 2027 (connection #0)
+    * ALPN, offering http/1.1
+    * Didn't find Session ID in cache for host HTTPS://192.168.10.25:9112
+    * TLSv1.0 (OUT), TLS header, Certificate Status (22):
+    } [5 bytes data]
+    * TLSv1.3 (OUT), TLS handshake, Client hello (1):
+    } [512 bytes data]
+    * STATE: PROTOCONNECT => PROTOCONNECTING handle 0xaaaaead8b090; line 2047 (connection #0)
+    * TLSv1.2 (IN), TLS header, Certificate Status (22):
+    { [5 bytes data]
+    * TLSv1.3 (IN), TLS handshake, Server hello (2):
+    { [122 bytes data]
+    * TLSv1.2 (IN), TLS header, Finished (20):
+    { [5 bytes data]
+    * TLSv1.2 (IN), TLS header, Supplemental data (23):
+    { [5 bytes data]
+    * TLSv1.3 (IN), TLS handshake, Encrypted Extensions (8):
+    { [21 bytes data]
+    * TLSv1.2 (IN), TLS header, Supplemental data (23):
+    { [5 bytes data]
+    * TLSv1.3 (IN), TLS handshake, Certificate (11):
+    { [952 bytes data]
+    * TLSv1.2 (IN), TLS header, Supplemental data (23):
+    { [5 bytes data]
+    * TLSv1.3 (IN), TLS handshake, CERT verify (15):
+    { [264 bytes data]
+    * TLSv1.2 (IN), TLS header, Supplemental data (23):
+    { [5 bytes data]
+    * TLSv1.3 (IN), TLS handshake, Finished (20):
+    { [52 bytes data]
+    * TLSv1.2 (OUT), TLS header, Finished (20):
+    } [5 bytes data]
+    * TLSv1.3 (OUT), TLS change cipher, Change cipher spec (1):
+    } [1 bytes data]
+    * TLSv1.2 (OUT), TLS header, Supplemental data (23):
+    } [5 bytes data]
+    * TLSv1.3 (OUT), TLS handshake, Finished (20):
+    } [52 bytes data]
+    * SSL connection using TLSv1.3 / TLS_AES_256_GCM_SHA384
+    * ALPN, server accepted to use http/1.1
+    * Server certificate:
+    *  subject: C=KR; ST=Seoul; O=Hanwha Qcells; OU=Smart HEM product team; CN=Cheol Sim; emailAddress=cheol.sim@qcells.com
+    *  start date: Jun 13 05:41:07 2025 GMT
+    *  expire date: Jun 13 05:41:07 2026 GMT
+    *  issuer: C=KR; ST=Seoul; O=Hanwha Qcells; OU=Smart HEM product team; CN=Cheol Sim; emailAddress=cheol.sim@qcells.com
+    *  SSL certificate verify result: self-signed certificate (18), continuing anyway.
+    * STATE: PROTOCONNECTING => DO handle 0xaaaaead8b090; line 2066 (connection #0)
+    * TLSv1.2 (OUT), TLS header, Supplemental data (23):
+    } [5 bytes data]
+    > GET /health HTTP/1.1
+    > Host: 192.168.10.25:9112
+    > User-Agent: curl/7.82.0
+    > Accept: */*
+    > 
+    * STATE: DO => DID handle 0xaaaaead8b090; line 2146 (connection #0)
+    * STATE: DID => PERFORMING handle 0xaaaaead8b090; line 2265 (connection #0)
+    * TLSv1.2 (IN), TLS header, Supplemental data (23):
+    { [5 bytes data]
+    * TLSv1.3 (IN), TLS handshake, Newsession Ticket (4):
+    { [265 bytes data]
+    * Didn't find Session ID in cache for host HTTPS://192.168.10.25:9112
+    * Added Session ID to cache for HTTPS://192.168.10.25:9112 [server]
+    * TLSv1.2 (IN), TLS header, Supplemental data (23):
+    { [5 bytes data]
+    * TLSv1.3 (IN), TLS handshake, Newsession Ticket (4):
+    { [265 bytes data]
+    * Found Session ID in cache for host HTTPS://192.168.10.25:9112
+    * old SSL session ID is stale, removing
+    * Added Session ID to cache for HTTPS://192.168.10.25:9112 [server]
+    * TLSv1.2 (IN), TLS header, Supplemental data (23):
+    { [5 bytes data]
+    * Mark bundle as not supporting multiuse
+    * HTTP 1.1 or later with persistent connection
+    < HTTP/1.1 200 OK
+    < RateLimit-Policy: 600;w=60
+    < RateLimit-Limit: 600
+    < RateLimit-Remaining: 577
+    < RateLimit-Reset: 59
+    < Content-Security-Policy: default-src 'self';base-uri 'self';font-src 'self' https: data:;form-action 'self';frame-ancestors 'self';img-src 'self' data:;object-src 'none';script-src 'self';script-src-attr 'none';style-src 'self' https: 'unsafe-inline';upgrade-insecure-requests
+    < Cross-Origin-Opener-Policy: same-origin
+    < Cross-Origin-Resource-Policy: same-origin
+    < Origin-Agent-Cluster: ?1
+    < Referrer-Policy: no-referrer
+    < Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+    < X-Content-Type-Options: nosniff
+    < X-DNS-Prefetch-Control: off
+    < X-Download-Options: noopen
+    < X-Frame-Options: SAMEORIGIN
+    < X-Permitted-Cross-Domain-Policies: none
+    < X-XSS-Protection: 0
+    < Access-Control-Allow-Origin: *
+    < Content-Type: application/json; charset=utf-8
+    < Content-Length: 560
+    < ETag: W/"230-6AZb2t2ao63mO92z+I5Vr15VYrE"
+    < Date: Tue, 11 Aug 2026 07:52:37 GMT
+    < Connection: keep-alive
+    < Keep-Alive: timeout=5
+    < 
+    { [560 bytes data]
+    * STATE: PERFORMING => DONE handle 0xaaaaead8b090; line 2464 (connection #0)
+    * multi_done: status: 0 prem: 0 done: 0
+    100   560  100   560    0     0  14282      0 --:--:-- --:--:-- --:--:-- 14736
+    * Connection #0 to host 192.168.10.25 left intact
+    * Expire cleared (transfer 0xaaaaead8b090)
+    {"httpStatus":200,"meta":{"timestamp":"2026-08-11T16:52:37.156","build_date":"2026/08/11 05:27:00","build_model":"AC_SYSTEM_GEN2","build_type":"debug","build_version":"X100811"},"data":{"timestamp":"2026-08-11T16:52:37.156","uptime":2222,"mqtt":true,"iothub":false,"iothubUri":"","httpServiceReady":true,"devices":[{"connected":true,"intended_disconnect":false,"protocol":"QcellsSPI","protocol_rid":"bdeaca72-cffd-45ec-9d1b-bdab714c3673"},{"connected":false,"intended_disconnect":false,"protocol":"CAN","protocol_rid":"d084d68a-5204-4617-92f6-6c95a7d7278f"}]}}
+    exit_code:0
+  SSL_connection_TLSv1.3_match_count=1
+[PASS] TC09-1: 기본 접속이 TLSv1.3으로 협상됨
+  $ openssl s_client -connect 192.168.10.25:9112 -tls1_3 -ciphersuites TLS_AES_256_GCM_SHA384
+    Can't use SSL_get_servername
+    depth=0 C = KR, ST = Seoul, O = Hanwha Qcells, OU = Smart HEM product team, CN = Cheol Sim, emailAddress = cheol.sim@qcells.com
+    verify error:num=18:self-signed certificate
+    verify return:1
+    depth=0 C = KR, ST = Seoul, O = Hanwha Qcells, OU = Smart HEM product team, CN = Cheol Sim, emailAddress = cheol.sim@qcells.com
+    verify error:num=10:certificate has expired
+    notAfter=Jun 13 05:41:07 2026 GMT
+    verify return:1
+    depth=0 C = KR, ST = Seoul, O = Hanwha Qcells, OU = Smart HEM product team, CN = Cheol Sim, emailAddress = cheol.sim@qcells.com
+    notAfter=Jun 13 05:41:07 2026 GMT
+    verify return:1
+    CONNECTED(00000003)
+    ---
+    Certificate chain
+     0 s:C = KR, ST = Seoul, O = Hanwha Qcells, OU = Smart HEM product team, CN = Cheol Sim, emailAddress = cheol.sim@qcells.com
+       i:C = KR, ST = Seoul, O = Hanwha Qcells, OU = Smart HEM product team, CN = Cheol Sim, emailAddress = cheol.sim@qcells.com
+       a:PKEY: rsaEncryption, 2048 (bit); sigalg: RSA-SHA256
+       v:NotBefore: Jun 13 05:41:07 2025 GMT; NotAfter: Jun 13 05:41:07 2026 GMT
+    ---
+    Server certificate
+    -----BEGIN CERTIFICATE-----
+    MIIDpzCCAo8CFBjslJswMzyx30jb9/dPz97UTlFqMA0GCSqGSIb3DQEBCwUAMIGP
+    MQswCQYDVQQGEwJLUjEOMAwGA1UECAwFU2VvdWwxFjAUBgNVBAoMDUhhbndoYSBR
+    Y2VsbHMxHzAdBgNVBAsMFlNtYXJ0IEhFTSBwcm9kdWN0IHRlYW0xEjAQBgNVBAMM
+    CUNoZW9sIFNpbTEjMCEGCSqGSIb3DQEJARYUY2hlb2wuc2ltQHFjZWxscy5jb20w
+    HhcNMjUwNjEzMDU0MTA3WhcNMjYwNjEzMDU0MTA3WjCBjzELMAkGA1UEBhMCS1Ix
+    DjAMBgNVBAgMBVNlb3VsMRYwFAYDVQQKDA1IYW53aGEgUWNlbGxzMR8wHQYDVQQL
+    DBZTbWFydCBIRU0gcHJvZHVjdCB0ZWFtMRIwEAYDVQQDDAlDaGVvbCBTaW0xIzAh
+    BgkqhkiG9w0BCQEWFGNoZW9sLnNpbUBxY2VsbHMuY29tMIIBIjANBgkqhkiG9w0B
+    AQEFAAOCAQ8AMIIBCgKCAQEAyxJTbDYAQ6vHZdffWSUqBR82T/aEP5WVQ9YhjpTu
+    sDDCWpHniovW6+XZj6fLYHNfwy6JhiNGZAZQHDaRKwWmgysmoMyj02YGAA8uNG4J
+    NTlqj/GwzJUw1ts0ncQEsozq4VuTmaIQaeg/rf4PmT72F7/4rG9y/ma/4aT+JZKl
+    JWj147J/IT0i/lNM5udSLVuJb5YCV1sogh6hc0UAIjtjdcLAPT8oiJ1tVBxrj8Wu
+    8sek5bY2uayc078m1W2qTFtK+9ST0oqmT3xlL+0SChl055LfYvt9ulKpNQdQo5mR
+    rC/0nNMWqk5n/IUBLYQ5zAY2daFFFL9nXXPulsW4nYyCqwIDAQABMA0GCSqGSIb3
+    DQEBCwUAA4IBAQA1/BYLn7qVdU2TIwp4JAOuhqxF1D2lnLoNl/BRPENSgzfjO6CF
+    im9jPU1JddpinQBQkzH+4cRTBnjfBGcZ5iMFIPYZX8X0na3R9SLiamA/wtXz+uiJ
+    vm0ni22jrOU9+ikAqXlDkXQ61O+e9gvvCzV+d4EXdJdslu6xCwr4tMR0b8flF6FU
+    USOBsR5xg/s4AhlvUXD0UHLhRnoW5sADF2Nf9f3bRaLdTAWrDxZWSGssCP9cmzVB
+    z4sUTQR77O0VQ2TaoawH46LkJWDgI0h9ao9ae8BBsxVjfqSPNEXU+My4ychYMqHy
+    9fOmXRkm6H5arwEXzQWL6ckPdtHVWi93QwE0
+    -----END CERTIFICATE-----
+    subject=C = KR, ST = Seoul, O = Hanwha Qcells, OU = Smart HEM product team, CN = Cheol Sim, emailAddress = cheol.sim@qcells.com
+    issuer=C = KR, ST = Seoul, O = Hanwha Qcells, OU = Smart HEM product team, CN = Cheol Sim, emailAddress = cheol.sim@qcells.com
+    ---
+    No client certificate CA names sent
+    Peer signing digest: SHA256
+    Peer signature type: RSA-PSS
+    Server Temp Key: X25519, 253 bits
+    ---
+    SSL handshake has read 1495 bytes and written 301 bytes
+    Verification error: certificate has expired
+    ---
+    New, TLSv1.3, Cipher is TLS_AES_256_GCM_SHA384
+    Server public key is 2048 bit
+    Secure Renegotiation IS NOT supported
+    Compression: NONE
+    Expansion: NONE
+    No ALPN negotiated
+    Early data was not sent
+    Verify return code: 10 (certificate has expired)
+    ---
+    DONE
+    exit_code:0
+  cipher_match_count=1
+[PASS] TC09-2: TLS_AES_256_GCM_SHA384 강제 시 핸드셰이크 성공
+=== TC10: TLS 1.3 강제 (구버전 TLS 거부) ===
+  $ curl -sk --tls-max 1.0 -o /dev/null -w %{http_code} https://192.168.10.25:9112/health
+    000
+    exit_code:35
+[PASS] TC10-1: TLS 1.0 접속 시 000
+  $ curl -sk --tls-max 1.1 -o /dev/null -w %{http_code} https://192.168.10.25:9112/health
+    000
+    exit_code:35
+[PASS] TC10-2: TLS 1.1 접속 시 000
+  $ curl -sk --tls-max 1.2 -o /dev/null -w %{http_code} https://192.168.10.25:9112/health
+    000
+    exit_code:35
+[PASS] TC10-3: TLS 1.2 접속 시 000
+  $ curl -sk --tlsv1.3 -o /dev/null -w %{http_code} https://192.168.10.25:9112/health
+    200
+    exit_code:0
+[PASS] TC10-4: TLS 1.3 접속 시 200
+=== TC11: Content-Type 검증 ===
+  $ curl -sk -o /dev/null -w %{http_code} -X POST https://192.168.10.25:9112/health -H Content-Type: text/plain -d test data
+    415
+    exit_code:0
+[PASS] TC11-1: text/plain -> 415
+  $ curl -sk -o /dev/null -w %{http_code} -X POST https://192.168.10.25:9112/health -H Content-Type: application/xml -d <test/>
+    415
+    exit_code:0
+[PASS] TC11-2: application/xml -> 415
+  $ curl -sk -o /dev/null -w %{http_code} -X POST https://192.168.10.25:9112/health -H Content-Type: text/html -d <html></html>
+    415
+    exit_code:0
+[PASS] TC11-3: text/html -> 415
+=== TC13: XSS ===
+  $ curl -sk -o /dev/null -w %{http_code} -X POST https://192.168.10.25:9112/auth/token -H Content-Type: application/json -d {"auth_key":"<script>alert(1)</script>","auth_secret":"test","subject":"test"}
+    401
+    exit_code:0
+[PASS] TC13-1: 응답 상태 401
+  $ curl -sk -i -X POST https://192.168.10.25:9112/auth/token -H Content-Type: application/json -d {"auth_key":"<script>alert(1)</script>","auth_secret":"test","subject":"test"}
+    HTTP/1.1 401 Unauthorized
+    RateLimit-Policy: 600;w=60
+    RateLimit-Limit: 600
+    RateLimit-Remaining: 571
+    RateLimit-Reset: 58
+    Content-Security-Policy: default-src 'self';base-uri 'self';font-src 'self' https: data:;form-action 'self';frame-ancestors 'self';img-src 'self' data:;object-src 'none';script-src 'self';script-src-attr 'none';style-src 'self' https: 'unsafe-inline';upgrade-insecure-requests
+    Cross-Origin-Opener-Policy: same-origin
+    Cross-Origin-Resource-Policy: same-origin
+    Origin-Agent-Cluster: ?1
+    Referrer-Policy: no-referrer
+    Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+    X-Content-Type-Options: nosniff
+    X-DNS-Prefetch-Control: off
+    X-Download-Options: noopen
+    X-Frame-Options: SAMEORIGIN
+    X-Permitted-Cross-Domain-Policies: none
+    X-XSS-Protection: 0
+    Access-Control-Allow-Origin: *
+    Content-Type: application/json; charset=utf-8
+    Content-Length: 483
+    ETag: W/"1e3-07YuNCtabf7h5ACqGZXaEtX2TpI"
+    Date: Tue, 11 Aug 2026 07:52:37 GMT
+    Connection: keep-alive
+    Keep-Alive: timeout=5
+    
+    {"httpStatus":401,"meta":{"timestamp":"2026-08-11T16:52:37.766","build_date":"2026/08/11 05:27:00","build_model":"AC_SYSTEM_GEN2","build_type":"debug","build_version":"X100811"},"data":{"message":"Client not found","path":"/auth/token","method":"POST","query":{},"body":{"auth_key":"<script>alert(1)</script>","auth_secret":"test","subject":"test"},"errorCode":316,"errorCodeName":"INVALID_CREDENTIALS","context":{"auth_key":"<script>alert(1)</script>","reason":"client_not_found"}}}
+    exit_code:0
+  parsed_content_type=[Content-Type: application/json; charset=utf-8]
+[PASS] TC13-2: Content-Type이 application/json
+  X-Content-Type-Options_match_count=1
+[PASS] TC13-3: X-Content-Type-Options: nosniff 존재
+=== TC14: HSTS ===
+  $ curl -sk -i https://192.168.10.25:9112/health
+    HTTP/1.1 200 OK
+    RateLimit-Policy: 600;w=60
+    RateLimit-Limit: 600
+    RateLimit-Remaining: 570
+    RateLimit-Reset: 58
+    Content-Security-Policy: default-src 'self';base-uri 'self';font-src 'self' https: data:;form-action 'self';frame-ancestors 'self';img-src 'self' data:;object-src 'none';script-src 'self';script-src-attr 'none';style-src 'self' https: 'unsafe-inline';upgrade-insecure-requests
+    Cross-Origin-Opener-Policy: same-origin
+    Cross-Origin-Resource-Policy: same-origin
+    Origin-Agent-Cluster: ?1
+    Referrer-Policy: no-referrer
+    Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+    X-Content-Type-Options: nosniff
+    X-DNS-Prefetch-Control: off
+    X-Download-Options: noopen
+    X-Frame-Options: SAMEORIGIN
+    X-Permitted-Cross-Domain-Policies: none
+    X-XSS-Protection: 0
+    Access-Control-Allow-Origin: *
+    Content-Type: application/json; charset=utf-8
+    Content-Length: 560
+    ETag: W/"230-ZT5QRb4MqlWC6jGKC16LpfhE5Ws"
+    Date: Tue, 11 Aug 2026 07:52:37 GMT
+    Connection: keep-alive
+    Keep-Alive: timeout=5
+    
+    {"httpStatus":200,"meta":{"timestamp":"2026-08-11T16:52:37.846","build_date":"2026/08/11 05:27:00","build_model":"AC_SYSTEM_GEN2","build_type":"debug","build_version":"X100811"},"data":{"timestamp":"2026-08-11T16:52:37.846","uptime":2222,"mqtt":true,"iothub":false,"iothubUri":"","httpServiceReady":true,"devices":[{"connected":true,"intended_disconnect":false,"protocol":"QcellsSPI","protocol_rid":"bdeaca72-cffd-45ec-9d1b-bdab714c3673"},{"connected":false,"intended_disconnect":false,"protocol":"CAN","protocol_rid":"d084d68a-5204-4617-92f6-6c95a7d7278f"}]}}
+    exit_code:0
+  parsed_header=[Strict-Transport-Security: max-age=31536000; includeSubDomains; preload]
+[PASS] TC14-1: HSTS 헤더 값 정확히 일치
+=== TC15: Log Level Control ===
+  [SKIP] admin 토큰 없음 (WI_ADMIN_AUTH_KEY 미설정) — TC15 전체 skip
+=== TC12: Rate Limit ===
+  [주의] 60초 이내 650회 요청 부하 시험 — 다른 TC와 rate limit 버킷을 공유하므로 단독 실행 권장
+  $ for i in $(seq 1 650); do curl -sk -o /dev/null -w '%{http_code}\n' https://$HOST:$PORT/health; done | sort | uniq -c
+        570 200
+         80 429
+  429_count=80
+[FAIL] TC12-1: 650회 중 429 응답이 40~60회 범위로 발생
+  [REASON] 429_count=80
+  $ curl -sk -i https://192.168.10.25:9112/health
+    HTTP/1.1 429 Too Many Requests
+    X-Powered-By: Express
+    RateLimit-Policy: 600;w=60
+    RateLimit-Limit: 600
+    RateLimit-Remaining: 0
+    RateLimit-Reset: 21
+    Retry-After: 21
+    Content-Type: application/json; charset=utf-8
+    Content-Length: 372
+    ETag: W/"174-7WHb1d9NQHm7bVhSxxX2Bhq6V2w"
+    Date: Tue, 11 Aug 2026 07:53:15 GMT
+    Connection: keep-alive
+    Keep-Alive: timeout=5
+    
+    {"httpStatus":429,"meta":{"timestamp":"2026-08-11T16:53:15.024","build_date":"2026/08/11 05:27:00","build_model":"AC_SYSTEM_GEN2","build_type":"debug","build_version":"X100811"},"data":{"message":"Too many requests. Please try again later.","path":"/health","method":"GET","query":{},"errorCode":303,"errorCodeName":"RATE_LIMIT_EXCEEDED","context":{"ip":"192.168.10.25"}}}
+    exit_code:0
+  parsed_header=[RateLimit-Limit: 600]
+[PASS] TC12-2: RateLimit-Limit 헤더 값 == 600
+
+============================================
+ 결과: PASS=24  FAIL=2
+============================================
+exit=0

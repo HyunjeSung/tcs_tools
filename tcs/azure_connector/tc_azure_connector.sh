@@ -12,6 +12,12 @@ TELEMETRY_TABLE="iothub_msgs_telemetry"
 PASS=0
 FAIL=0
 
+# TC07/TC08은 azure_connector 전용 내부 DB(iothub_messages.db, db_manager IPC로 노출되지
+# 않는 private 테이블)의 row 수를 직접 세야 하는데, 이 DUT에는 sqlite3 CLI가 없다(실측
+# 확인: which sqlite3 0건). 카운트 실패(빈 문자열)를 "0행"으로 오판하지 않도록 가드.
+HAS_SQLITE3=1
+command -v sqlite3 >/dev/null 2>&1 || HAS_SQLITE3=0
+
 send_and_wait() {
     local service="$1"
     local payload="$2"
@@ -19,7 +25,10 @@ send_and_wait() {
     local timeout="${3:-30}"
     local tid="tc-$(date +%s)"
     local full_payload
-    full_payload=$(printf '{"tid":"%s","payload":%s}' "$tid" "$payload")
+    # uniep BaseApp 핸들러는 message(=수신 JSON 전체)에서 필드를 바로 읽는다("payload"로
+    # 감싸지 않음, tid는 MQTT5 프로퍼티에서 옴·JSON의 tid는 무시됨) — 그래서 payload
+    # 필드를 최상위로 flatten해서 보낸다(실측 확인: nested면 "Missing required parameter").
+    full_payload=$(printf '%s' "$payload" | jq -c --arg tid "$tid" '. + {tid: $tid}')
     local resp_topic="emsp/${SOURCE}/${TARGET}/res/${service}"
     local req_topic="emsp/${TARGET}/${SOURCE}/req/${service}"
     local resp_file="/tmp/mqtt_resp_$$_${service}"
@@ -313,12 +322,17 @@ tc08_reconnect_telemetry_drain() {
         assert "TC08-1: 재연결 로그 확인" "FAIL"
     fi
 
+    if [ "$HAS_SQLITE3" = "0" ]; then
+        assert "TC08-2: telemetry row가 재연결 후 0으로 감소" "FAIL" "sqlite3 CLI가 DUT에 없어 카운트 불가"
+        assert "TC08-3: QueueProcessor 발송 로그 존재" "FAIL" "sqlite3 CLI가 DUT에 없어 이 TC 전체 판정 불가"
+        return
+    fi
+
     echo "  [POLL] telemetry row 0 도달까지 최대 180초, 10초 간격 폴링..."
-    local elapsed=0 remain=1
+    local elapsed=0 remain=""
     while [ "$elapsed" -lt 180 ]; do
         dump_cmd sqlite3 "$db" "SELECT COUNT(*) FROM ${table};"
         remain=$(sqlite3 "$db" "SELECT COUNT(*) FROM ${table};" 2>/dev/null)
-        [ -z "$remain" ] && remain=0
         [ "$remain" = "0" ] && break
         sleep 10
         elapsed=$((elapsed + 10))
@@ -436,6 +450,12 @@ tc11_cert_validity() {
         assert "TC11-1: 4개 인증서 파일 존재" "PASS"
     else
         assert "TC11-1: 4개 인증서 파일 존재" "FAIL"
+        # 파일 자체가 없으면 openssl/diff가 전부 빈 출력(에러)을 내고, 빈 출력끼리
+        # diff하면 "일치"로 오판되는 등 이후 TC11-2~4가 거짓 PASS를 낼 수 있어 스킵.
+        assert "TC11-2: full_chain_cert.pem 체인 검증 OK" "FAIL" "인증서 파일 부재로 검증 불가"
+        assert "TC11-3: 키페어 일치" "FAIL" "인증서 파일 부재로 검증 불가"
+        assert "TC11-4: 해당 인증서로 IoT Hub 연결 성립" "FAIL" "인증서 파일 부재로 검증 불가"
+        return
     fi
 
     local verify_out

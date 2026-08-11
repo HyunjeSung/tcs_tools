@@ -47,23 +47,30 @@
 [PASS] TC01-2: 빈 files 배열 거부
 ```
 
-### 2. TC02-5 로그 문구가 DUT 배포 바이너리에 없음 (DUT 빌드 vs 로컬 checkout 드리프트 의심)
+### 2. (정정, 2026-08-11) TC02-5 "detect_count=0" 은 result.md 작성 시 옮겨적기 오류 — 드리프트 아님
 
-TC02-1~4(ADU `.done` 파일 4단계 시뮬레이션)는 MQTT 알림 payload(`workflow_step`/`result_code`)로
-확실히 PASS 확인됐지만, tc-plan이 근거로 든 로그 문구(`"[UPDATE] .done file detected for step: "`,
-`adu_agent_monitor.cpp:143`)는 `journalctl`에서 0건 검출됐다. 로컬 git 체크아웃 소스에는 해당
-LOG(INFO) 라인이 존재하므로, DUT에 실제 배포된 바이너리가 로컬 checkout과 다를 가능성이 있다
-(`project_dut_build_vs_git_checkout` 참고). TC02-1~4가 이미 충분한 근거이므로 TC02-5는 판정에서
-제외하고 참고 정보로만 남겼다.
+최초 result.md에는 TC02-5 `detect_count=0`으로 기록돼 DUT 배포 바이너리가 로컬 git
+checkout과 다를 가능성(드리프트)을 의심했으나, `evidence_full.log` 원본을 다시 확인한 결과
+**실제 값은 `detect_count=4`** (evidence_full.log:517) — TC02-1~4 각 단계마다 `[UPDATE] .done
+file detected for step: ...`(`adu_agent_monitor.cpp:143`) 로그가 정확히 1건씩, 총 4건 모두
+정상 기록돼 있었다(예: `17:07:06 ... [UPDATE] .done file detected for step: is-installed,
+mtime: -4651314773`). DUT BUILD_DATE(`2026/08/07 05:25:58`)와 해당 소스 라인의 마지막 커밋
+(`a5abe4506`, 2025-06-19)을 대조해도 드리프트를 의심할 이유가 없다 — 애초에 로그 자체가
+정상 검출됐으므로 드리프트 가설은 성립하지 않는다. **결론: 드리프트 없음, 이전 문서화가
+잘못됐던 것.** 아래는 정정된 근거.
 
 **근거 — `evidence_full.log`**:
 ```
 [Step: apply, resultCode=700]
   수신 payload: {...,"result_code":700,...,"workflow_step":"apply"}
 [PASS] TC02-apply: apply 단계 알림 수신 (resultCode=700)
-...
 [TC02-5] .done file detected 로그 카운트 확인 (참고용 — PASS/FAIL 미포함)
-  detect_count=0 (참고용, TC02-1~4 결과가 실질 판정)
+  $ journalctl -u docker-loader --since 5 minutes ago
+    Aug 10 17:07:06 qcells-emsplus docker-loader[33385]: [17:07:06:714][I][UM] [UPDATE] .done file detected for step: is-installed, mtime: -4651314773
+    Aug 10 17:07:08 qcells-emsplus docker-loader[33385]: [17:07:08:084][I][UM] [UPDATE] .done file detected for step: download, mtime: -4651314772
+    Aug 10 17:07:10 qcells-emsplus docker-loader[33385]: [17:07:10:094][I][UM] [UPDATE] .done file detected for step: install, mtime: -4651314769
+    Aug 10 17:07:11 qcells-emsplus docker-loader[33385]: [17:07:11:407][I][UM] [UPDATE] .done file detected for step: apply, mtime: -4651314768
+  detect_count=4 (참고용, TC02-1~4 결과가 실질 판정)
 ```
 
 ### 3. TC11에서 "Another update is already in progress" 관측 (판정에는 무관)
@@ -108,7 +115,21 @@ TC12는 자동화 불가 항목 목록(문서 전용, PASS/FAIL 대상 아님).
 
 ## 다음 단계 (개발자 검토 필요)
 
-- TC05: 리소스 사전 점검(`/etc/adu-resource-limit.conf` 등)이 update_monitor 소관인지 확인
-- TC09-1: HW 호환성 검사 실제 경로 확인
-- TC02-5: DUT 배포 바이너리와 로컬 checkout 드리프트 여부 확인 (빌드 버전 대조)
-- TC01 큐 정렬/중복거부, TC10 실제 진행률 검증: 컨테이너 재시작을 감수한 별도 격리 phase(`--tc01-pre/-post` 류)로 재설계할지 여부 결정
+- **TC05 (정정, 2026-08-11):** `/etc/adu-resource-limit.conf`, `MIN_DISK_KB`/`MIN_MEM_KB`,
+  resultCode 905001/905002 근거를 `application/update_monitor` 뿐 아니라
+  `ac_system_gen2` 전체 + `uniep/host_agent`까지 확장해 재검색했으나 **어디에도
+  구현이 없다** (`grep -rln`, 0건). DUT에도 `/etc/adu-resource-limit.conf` 파일 자체가
+  없음(`ls`: No such file or directory). **결론: 현재 코드베이스에는 미구현으로 보임** —
+  Key107 요구사항이 아직 개발되지 않았거나, 로컬에 체크아웃되지 않은 별도 저장소(클라우드
+  측 등)에 있을 가능성. 개발자 확인 필요.
+- **TC09-1 (정정, 2026-08-11):** hwrevision 검사는 update_monitor 코드가 아니라
+  swupdate 바이너리 네이티브 기능이 맞음 — DUT `/usr/bin/swupdate`에 `strings`로
+  `check_hw_compatibility`, `/etc/hwrevision` 문자열이 실제로 존재함을 확인(컴파일에
+  포함됨). 다만 **DUT 파일시스템에 `/etc/hwrevision` 파일 자체가 없음**(`ls`: No such
+  file or directory) — SWUpdate 표준 동작상 `SWUPDATE_HW_COMPATIBILITY_FILE`이 없으면
+  hw 호환성 체크를 건너뛴다. 즉 **현재 이 DUT 빌드에서는 hw 호환성 체크가 사실상
+  비활성 상태**로 보인다. TC09를 의미 있게 검증하려면 `/etc/hwrevision` 파일이 이 빌드에
+  provisioning 되어야 하는지(빠졌다면 왜) 개발자 확인 필요.
+- TC02-5: ~~드리프트 의심~~ → 위 2번 항목에서 정정 완료, 드리프트 아님(result.md 옮겨적기
+  오류였음). 추가 조치 불필요.
+- TC01 큐 정렬/중복거부, TC10 실제 진행률 검증: 컨테이너 재시작을 감수한 별도 격리 phase(`--tc01-pre/-post` 류)로 재설계할지 여부 결정 (사용자 판단 필요)

@@ -25,7 +25,10 @@ send_and_wait() {
     local timeout="${3:-30}"
     local tid="tc-$(date +%s)"
     local full_payload
-    full_payload=$(printf '{"tid":"%s","payload":%s}' "$tid" "$payload")
+    # uniep BaseApp 핸들러는 message(=수신 JSON 전체)에서 필드를 바로 읽는다("payload"로
+    # 감싸지 않음, tid는 MQTT5 프로퍼티에서 옴·JSON의 tid는 무시됨) — 그래서 payload
+    # 필드를 최상위로 flatten해서 보낸다(실측 확인: nested면 "Missing required parameter").
+    full_payload=$(printf '%s' "$payload" | jq -c --arg tid "$tid" '. + {tid: $tid}')
     local resp_topic="emsp/${SOURCE}/${TARGET}/res/${service}"
     local req_topic="emsp/${TARGET}/${SOURCE}/req/${service}"
     local resp_file="/tmp/mqtt_resp_$$_${service}"
@@ -88,8 +91,11 @@ setup_config() {
     if ! command -v jq > /dev/null 2>&1; then
         echo "  [ERROR] jq 미설치 — configuration.json 파싱 불가, 이후 TC 는 metric 미검출로 FAIL 처리됨"
     fi
-    dump_cmd cat "$CONFIG_PATH"
-    jq -c '[.deviceList[]? | .deviceMetricList[]? | {
+    # /edge/app은 컨테이너 이미지에 baked-in된 경로라 호스트(SSH 세션)에서는 안 보임 —
+    # docker exec로 컨테이너 내부에서 직접 읽는다(실측 확인: edge_runtime/device_manager
+    # TC에서 같은 원인으로 host-side cat이 항상 "No such file" 오판을 낸 사례 있음).
+    dump_cmd docker exec ac_system_gen2 cat "$CONFIG_PATH"
+    docker exec ac_system_gen2 cat "$CONFIG_PATH" 2>/dev/null | jq -c '[.deviceList[]? | .deviceMetricList[]? | {
         rid: .rid,
         metricPath: .metricPath,
         telemetryPeriod: (.readingType.telemetryPeriod // 60),
@@ -97,7 +103,7 @@ setup_config() {
         tenMultiplier: (.readingType.tenMultiplier // 0),
         accumulationType: (.accumulationType // ""),
         flowDirectionType: (.readingType.flowDirectionType // "")
-    }]' "$CONFIG_PATH" > "$METRICS_FILE" 2>/dev/null
+    }]' > "$METRICS_FILE" 2>/dev/null
     [ -s "$METRICS_FILE" ] || echo "[]" > "$METRICS_FILE"
     dump_cmd cat "$METRICS_FILE"
 }
@@ -107,10 +113,13 @@ setup_config() {
 # ============================================================
 tc01_report_filtering() {
     echo "=== TC01: Report 항목 필터링 ==="
+    # .[0]은 계산식(calculation) 기반 metric(metricPath 없음, 대신 calculation 필드)일
+    # 수 있어(실측 확인: pv_200_W가 정확히 이 케이스) metricPath가 실제로 있는 첫 항목을
+    # 고른다.
     local rid path period
-    rid=$(jq -r '.[0].rid // empty' "$METRICS_FILE")
-    path=$(jq -r '.[0].metricPath // empty' "$METRICS_FILE")
-    period=$(jq -r '.[0].telemetryPeriod // 60' "$METRICS_FILE")
+    rid=$(jq -r '[.[] | select(.metricPath != null)][0].rid // empty' "$METRICS_FILE")
+    path=$(jq -r '[.[] | select(.metricPath != null)][0].metricPath // empty' "$METRICS_FILE")
+    period=$(jq -r '[.[] | select(.metricPath != null)][0].telemetryPeriod // 60' "$METRICS_FILE")
 
     if [ -z "$rid" ] || [ -z "$path" ]; then
         echo "  [SKIP] configuration.json 에서 사용 가능한 metric 을 찾지 못함"

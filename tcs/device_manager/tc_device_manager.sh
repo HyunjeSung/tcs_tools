@@ -25,7 +25,10 @@ send_and_wait() {
     local timeout="${3:-30}"
     local tid="tc-$(date +%s)"
     local full_payload
-    full_payload=$(printf '{"tid":"%s","payload":%s}' "$tid" "$payload")
+    # uniep BaseApp 핸들러는 message(=수신 JSON 전체)에서 필드를 바로 읽는다("payload"로
+    # 감싸지 않음, tid는 MQTT5 프로퍼티에서 옴·JSON의 tid는 무시됨) — 그래서 payload
+    # 필드를 최상위로 flatten해서 보낸다(실측 확인: nested면 "Missing required parameter").
+    full_payload=$(printf '%s' "$payload" | jq -c --arg tid "$tid" '. + {tid: $tid}')
     local resp_topic="emsp/${SOURCE}/${TARGET}/res/${service}"
     local req_topic="emsp/${TARGET}/${SOURCE}/req/${service}"
     local resp_file="/tmp/mqtt_resp_$$_${service}"

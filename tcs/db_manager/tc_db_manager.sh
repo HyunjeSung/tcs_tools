@@ -20,7 +20,10 @@ send_and_wait() {
     local timeout="${3:-30}"
     local tid="tc-$(date +%s)"
     local full_payload
-    full_payload=$(printf '{"tid":"%s","payload":%s}' "$tid" "$payload")
+    # uniep BaseApp 핸들러는 message(=수신 JSON 전체)에서 필드를 바로 읽는다("payload"로
+    # 감싸지 않음, tid는 MQTT5 프로퍼티에서 옴·JSON의 tid는 무시됨) — 그래서 payload
+    # 필드를 최상위로 flatten해서 보낸다(실측 확인: nested면 "Missing required parameter").
+    full_payload=$(printf '%s' "$payload" | jq -c --arg tid "$tid" '. + {tid: $tid}')
     local resp_topic="emsp/${SOURCE}/${TARGET}/res/${service}"
     local req_topic="emsp/${TARGET}/${SOURCE}/req/${service}"
     local resp_file="/tmp/mqtt_resp_$$_${service}"
@@ -42,7 +45,10 @@ publish_noti() {
     [ -z "$payload" ] && payload="{}"
     local tid="tc-$(date +%s)"
     local full_payload
-    full_payload=$(printf '{"tid":"%s","payload":%s}' "$tid" "$payload")
+    # uniep BaseApp 핸들러는 message(=수신 JSON 전체)에서 필드를 바로 읽는다("payload"로
+    # 감싸지 않음, tid는 MQTT5 프로퍼티에서 옴·JSON의 tid는 무시됨) — 그래서 payload
+    # 필드를 최상위로 flatten해서 보낸다(실측 확인: nested면 "Missing required parameter").
+    full_payload=$(printf '%s' "$payload" | jq -c --arg tid "$tid" '. + {tid: $tid}')
     local noti_topic="emsp/all/${SOURCE}/noti/${event}"
     mosquitto_pub -h "$MQTT_HOST" -t "$noti_topic" -m "$full_payload"
 }
@@ -67,22 +73,8 @@ assert() {
 }
 
 # select_all_records/select_records 응답 payload는 "db_manager.cpp"의 DbRecordResult
-# 구조를 그대로 실어보내지만, msg_ipc 봉투("tid"/"payload" 등)에 얼마나 깊이 nesting
-# 되는지는 res topic을 실측하기 전까지 확정할 수 없다. 어느 depth에 있든 "records"
-# 배열을 찾아내도록 재귀 탐색한다 (TC01/TC03/TC04/TC06/TC07/TC08 공용).
-PY_FIND_RECORDS='
-import json, sys
-
-def find_records(o):
-    if isinstance(o, dict):
-        if isinstance(o.get("records"), list):
-            return o["records"]
-        for v in o.values():
-            r = find_records(v)
-            if r is not None:
-                return r
-    return None
-'
+# 구조를 그대로 실어보낸다 — 실측 확인(res topic): 항상 .payload.records 위치에 고정
+# (DUT에 python3가 없어 원래 있던 재귀 탐색 python 헬퍼는 jq 기반 직접 접근으로 교체함).
 
 # ============================================================
 # TC01: Configuration 테이블 생성 및 select_all_records 조회
@@ -113,7 +105,7 @@ tc01_configuration_select_all() {
         assert "TC01-3: table 필드 일치" "FAIL"
     fi
 
-    if echo "$resp" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if isinstance(d.get('records'), list) else 1)" 2>/dev/null; then
+    if echo "$resp" | jq -e '.payload.records | type == "array"' >/dev/null 2>&1; then
         assert "TC01-4: records 필드가 JSON 배열" "PASS"
     else
         assert "TC01-4: records 필드가 JSON 배열" "FAIL"
@@ -188,17 +180,7 @@ tc03_persistent_state_update_records() {
     echo "  select_all_records 응답: ${all_resp:-<empty>}"
 
     local pick
-    pick=$(echo "$all_resp" | python3 -c "
-${PY_FIND_RECORDS}
-try:
-    d = json.load(sys.stdin)
-    recs = find_records(d) or []
-    if recs:
-        rec = recs[0]
-        print('%s|%s|%s' % (rec.get('key', ''), rec.get('value', ''), rec.get('type', '')))
-except Exception:
-    pass
-" 2>/dev/null)
+    pick=$(echo "$all_resp" | jq -r '.payload.records[0] | select(. != null) | "\(.key)|\(.value)|\(.type)"' 2>/dev/null)
 
     if [ -z "$pick" ]; then
         assert "TC03-0: 대상 키 확보 (select_all_records)" "FAIL" "persistent_state records 파싱 실패: $all_resp"
@@ -262,18 +244,7 @@ tc04_system_setting_log_level() {
     fi
 
     local original_level
-    original_level=$(echo "$select_resp" | python3 -c "
-${PY_FIND_RECORDS}
-try:
-    d = json.load(sys.stdin)
-    recs = find_records(d) or []
-    for rec in recs:
-        if rec.get('key') == 'log_level_db':
-            print(rec.get('value',''))
-            break
-except Exception:
-    pass
-" 2>/dev/null)
+    original_level=$(echo "$select_resp" | jq -r '.payload.records[] | select(.key == "log_level_db") | .value' 2>/dev/null | head -1)
     echo "  ORIGINAL_LEVEL=${original_level}"
 
     local baseline
@@ -340,18 +311,7 @@ tc06_pre() {
     echo "  select_records 응답: ${select_resp:-<empty>}"
 
     local original_level
-    original_level=$(echo "$select_resp" | python3 -c "
-${PY_FIND_RECORDS}
-try:
-    d = json.load(sys.stdin)
-    recs = find_records(d) or []
-    for rec in recs:
-        if rec.get('key') == 'log_level_db':
-            print(rec.get('value',''))
-            break
-except Exception:
-    pass
-" 2>/dev/null)
+    original_level=$(echo "$select_resp" | jq -r '.payload.records[] | select(.key == "log_level_db") | .value' 2>/dev/null | head -1)
 
     if [ -z "$original_level" ]; then
         echo "  [SKIP] log_level_db 값 확인 실패 — TC06 스킵"
@@ -486,15 +446,7 @@ tc08_system_setting_select_all() {
         assert "TC08-2: table 필드 일치" "FAIL"
     fi
 
-    if echo "$resp" | python3 -c "
-${PY_FIND_RECORDS}
-try:
-    d = json.load(sys.stdin)
-    recs = find_records(d) or []
-    sys.exit(0 if any(r.get('key') == 'timezone' and r.get('type') == 10 for r in recs) else 1)
-except Exception:
-    sys.exit(1)
-" 2>/dev/null; then
+    if echo "$resp" | jq -e '.payload.records[] | select(.key == "timezone" and .type == 10)' >/dev/null 2>&1; then
         assert "TC08-3: timezone 키 포함, type=10" "PASS"
     else
         assert "TC08-3: timezone 키 포함, type=10" "FAIL"
@@ -521,15 +473,26 @@ tc09_db_file_location() {
         assert "TC09-2: Secure DB 파일 존재" "FAIL"
     fi
 
-    dump_cmd file "$DB_PATH"
-    if file "$DB_PATH" 2>/dev/null | grep -qi "SQLite 3.x database"; then
+    # DUT에 `file`/`sqlite3` CLI가 없음(busybox 기반, 실측 확인: which/find 전부 0건) —
+    # SQLite 포맷은 파일 헤더 매직 문자열("SQLite format 3\0", 앞 16바이트)을 직접 읽어 확인.
+    dump_cmd head -c 16 "$DB_PATH"
+    if head -c 16 "$DB_PATH" 2>/dev/null | grep -qa "SQLite format 3"; then
         assert "TC09-3: SQLite 포맷 확인" "PASS"
     else
         assert "TC09-3: SQLite 포맷 확인" "FAIL"
     fi
 
-    dump_cmd sqlite3 "$DB_PATH" ".tables"
-    if sqlite3 "$DB_PATH" ".tables" 2>/dev/null | grep -qE "system_setting|persistent_state|configuration"; then
+    # sqlite3 CLI 없이 필수 테이블 존재를 확인 — 앱 자체 IPC(select_all_records)로 각
+    # 테이블 조회가 result:true로 응답하는지로 대체 판정(테이블이 없으면 앱이 에러를 냄).
+    local t all_ok
+    all_ok=1
+    for t in system_setting persistent_state configuration; do
+        local tresp
+        tresp=$(send_and_wait "select_all_records" "{\"db\":\"edge_storage.db\",\"table\":\"${t}\"}" 10)
+        echo "  select_all_records(${t}) 응답: ${tresp:-<empty>}"
+        echo "$tresp" | grep -qE '"result"[[:space:]]*:[[:space:]]*true' || all_ok=0
+    done
+    if [ "$all_ok" -eq 1 ]; then
         assert "TC09-4: 필수 테이블 존재" "PASS"
     else
         assert "TC09-4: 필수 테이블 존재" "FAIL"

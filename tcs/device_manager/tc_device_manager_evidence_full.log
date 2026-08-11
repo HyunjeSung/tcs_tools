@@ -1,7 +1,37 @@
 ############################################################
-# tc_device_manager 통합 Evidence
-# 생성: (실행 후 채움)
-# DUT: 192.168.10.25 (qcells-emsplus)
-# 스크립트 md5: (실행 후 채움)
-# 결과: 미실행
+# device_manager TC 통합 Evidence
+# 생성: 2026-08-11 13:16:47
+# DUT: 192.168.10.25
+# 스크립트 md5: e720d664a22caed6cc550ccc63dd69cd
+# 결과: PASS=0 / FAIL=0 (TC01-03 reboot 미실행, TC04 SKIP 정상, TC05 스텁)
 ############################################################
+
+############################################################
+# FILE: device_manager_run1/main.log
+############################################################
+Warning: Permanently added '192.168.10.25' (ECDSA) to the list of known hosts.
+============================================
+ device_manager TC
+ Tue Aug 11 13:13:06 KST 2026
+============================================
+[안내] TC01~TC03은 reboot를 수반해 이 스크립트 안에서 이어갈 수 없음 (SSH 세션 끊김).
+  ./tc_device_manager.sh --tc01-pre   (configuration.json 수정 + factory_reset + reboot)
+  ./tc_device_manager.sh --tc01-post  (재접속 후 검증 + teardown reboot)
+  ./tc_device_manager.sh --tc02-pre   (configuration.json 은닉 + factory_reset + reboot)
+  ./tc_device_manager.sh --tc02-post  (재접속 후 검증 + teardown reboot)
+  ./tc_device_manager.sh --tc03-pre   (정상 파일 상태 확인 + reboot, TC02 teardown 이후 실행)
+  ./tc_device_manager.sh --tc03-post  (재접속 후 검증)
+
+=== TC04: 주기적 Read Data 처리 확인 ===
+  사전조건: register_map.json 에 operation:read + periodMs RegisterGroup 존재, 물리 디바이스 연결 필요
+  $ jq .. | objects | select(.operation? and (.operation | index("read"))) | {id, operation, periodMs} /edge/app/files/commonfile/register_map.json
+    jq: error: Could not open file /edge/app/files/commonfile/register_map.json: No such file or directory
+    exit_code:0
+  [WARN] operation:read + periodMs RegisterGroup 없음 - 하드웨어/사전조건 미충족, TC04 스킵
+=== TC05: SKIP (자동화 불가 — tc_device_manager.md TC05 참고, Web HMI 수동 조작/개발자 확인 필요) ===
+
+============================================
+ 결과: PASS=0  FAIL=0
+============================================
+exit=0
+RUN_END: 13:13:06

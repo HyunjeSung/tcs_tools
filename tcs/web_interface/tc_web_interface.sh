@@ -51,17 +51,16 @@ tc01_api_docs() {
 
     dump_cmd curl -sk "https://$HOST:$PORT/platform/docs.json"
     local docs_json="$OUTPUT"
-    printf '%s' "$docs_json" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('openapi','').startswith('3.'); assert len(d.get('paths',{}))>0" >/tmp/tc_wi_py_$$ 2>&1
-    local py_rc=$?
-    sed 's/^/    /' /tmp/tc_wi_py_$$
-    rm -f /tmp/tc_wi_py_$$
-    if [ "$py_rc" -eq 0 ]; then
+    # DUT에 python3가 없음(실측 확인, db_manager TC 조사 참고) — jq로 대체.
+    if printf '%s' "$docs_json" | jq -e '(.openapi | startswith("3.")) and (.paths | length > 0)' >/dev/null 2>&1; then
         assert "TC01-2: docs.json이 유효한 OpenAPI 문서" "PASS"
     else
-        assert "TC01-2: docs.json이 유효한 OpenAPI 문서" "FAIL" "python3 검증 exit=$py_rc"
+        assert "TC01-2: docs.json이 유효한 OpenAPI 문서" "FAIL"
     fi
 
-    dump_cmd curl -sk -o /dev/null -w '%{http_code}' "https://$HOST:$PORT/platform/docs"
+    # -L 없이는 Swagger UI의 흔한 trailing-slash 리다이렉트(301)를 그대로 오판할 수 있어
+    # 리다이렉트를 따라간 최종 코드로 판정한다.
+    dump_cmd curl -skL -o /dev/null -w '%{http_code}' "https://$HOST:$PORT/platform/docs"
     code="$OUTPUT"
     if [ "$code" = "200" ]; then
         assert "TC01-3: Swagger UI HTML 200 응답" "PASS"
