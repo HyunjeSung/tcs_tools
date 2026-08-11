@@ -814,6 +814,38 @@ case "${1}" in
     --tc12) tc12_running_process_check ;;
     --tc13) tc13_project_app ;;
     --tc14) tc14_manual_items ;;
+    --only)
+        # 대시보드의 "선택 실행"에서 사용 — 콤마로 구분된 TC 목록을 받아 그 TC들만 실행한다.
+        # 예: sh tc_edge_runtime.sh --only TC01,TC08,TC09
+        shift
+        SELECTED="${1:-}"
+        if [ -z "$SELECTED" ]; then
+            echo "[ERROR] --only 뒤에 TC 목록이 필요합니다 (예: --only TC01,TC08,TC09)"
+            exit 1
+        fi
+        for tc in TC01 TC02 TC03 TC04 TC05 TC06 TC07 TC08 TC09 TC10 TC11 TC12 TC13 TC14; do
+            case ",${SELECTED}," in
+                *,${tc},*)
+                    case "$tc" in
+                        TC01) tc01_reboot_app_shutdown ;;
+                        TC02) tc02_reboot_info_file ;;
+                        TC03) tc03_boot_order ;;
+                        TC04) tc04_all_ready_led_green ;;
+                        TC05) tc05_boot_watchdog_60s ;;
+                        TC06) tc06_db_manager_10s_timeout ;;
+                        TC07) tc07_heartbeat_watchdog_log ;;
+                        TC08) tc08_heartbeat_timeout_crash ;;
+                        TC09) tc09_first_boot_watchdog_count ;;
+                        TC10) tc10_uniep_applist_format ;;
+                        TC11) tc11_devapp_order_override ;;
+                        TC12) tc12_running_process_check ;;
+                        TC13) tc13_project_app ;;
+                        TC14) tc14_manual_items ;;
+                    esac
+                    ;;
+            esac
+        done
+        ;;
     *)
         tc01_reboot_app_shutdown
         tc02_reboot_info_file

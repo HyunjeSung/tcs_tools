@@ -574,6 +574,40 @@ case "${1}" in
     --tc13) tc13_xss ;;
     --tc14) tc14_hsts ;;
     --tc15) tc15_log_level ;;
+    --only)
+        # 대시보드의 "선택 실행"에서 사용 — 콤마로 구분된 TC 목록을 받아 그 TC들만 실행한다.
+        # 예: sh tc_web_interface.sh --only TC01,TC08,TC13
+        # TC12(Rate Limit)는 다른 TC의 rate limit 버킷에 영향을 줄 수 있어 단독 실행 권장.
+        shift
+        SELECTED="${1:-}"
+        if [ -z "$SELECTED" ]; then
+            echo "[ERROR] --only 뒤에 TC 목록이 필요합니다 (예: --only TC01,TC08,TC13)"
+            exit 1
+        fi
+        for tc in TC01 TC02 TC03 TC04 TC05 TC06 TC07 TC08 TC09 TC10 TC11 TC13 TC14 TC15 TC12; do
+            case ",${SELECTED}," in
+                *,${tc},*)
+                    case "$tc" in
+                        TC01) tc01_api_docs ;;
+                        TC02) tc02_mqtt_disconnect ;;
+                        TC03) tc03_bridge ;;
+                        TC04) tc04_log_masking ;;
+                        TC05) tc05_jwt ;;
+                        TC06) tc06_path_traversal ;;
+                        TC07) tc07_injection ;;
+                        TC08) tc08_cors ;;
+                        TC09) tc09_tls_cipher ;;
+                        TC10) tc10_tls_min_version ;;
+                        TC11) tc11_content_type ;;
+                        TC12) tc12_rate_limit ;;
+                        TC13) tc13_xss ;;
+                        TC14) tc14_hsts ;;
+                        TC15) tc15_log_level ;;
+                    esac
+                    ;;
+            esac
+        done
+        ;;
     *)
         tc01_api_docs
         tc02_mqtt_disconnect

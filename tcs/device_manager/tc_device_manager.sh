@@ -429,6 +429,27 @@ case "${1}" in
     --tc05)
         tc05_manual_review
         ;;
+    --only)
+        # 대시보드의 "선택 실행"에서 사용 — TC01~03은 reboot를 수반해 지원하지 않는다
+        # (--tc01-pre/-post ~ --tc03-pre/-post 사용). TC04/TC05만 선택 가능.
+        # 예: sh tc_device_manager.sh --only TC04,TC05
+        shift
+        SELECTED="${1:-}"
+        if [ -z "$SELECTED" ]; then
+            echo "[ERROR] --only 뒤에 TC 목록이 필요합니다 (예: --only TC04,TC05)"
+            exit 1
+        fi
+        for tc in TC04 TC05; do
+            case ",${SELECTED}," in
+                *,${tc},*)
+                    case "$tc" in
+                        TC04) tc04_periodic_read ;;
+                        TC05) tc05_manual_review ;;
+                    esac
+                    ;;
+            esac
+        done
+        ;;
     *)
         echo "[안내] TC01~TC03은 reboot를 수반해 이 스크립트 안에서 이어갈 수 없음 (SSH 세션 끊김)."
         echo "  ./tc_device_manager.sh --tc01-pre   (configuration.json 수정 + factory_reset + reboot)"

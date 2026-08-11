@@ -617,6 +617,38 @@ case "${1}" in
         echo " 결과: PASS=${PASS}  FAIL=${FAIL}"
         echo "============================================"
         ;;
+    --only)
+        # 대시보드의 "선택 실행"에서 사용 — 콤마로 구분된 TC 목록을 받아 그 TC들만 실행한다.
+        # 예: sh tc_db_manager.sh --only TC01,TC03,TC07
+        # TC06(재부팅 수반, 세션 끊김)은 지원하지 않는다 (--tc06-pre/--tc06-post 사용).
+        shift
+        SELECTED="${1:-}"
+        if [ -z "$SELECTED" ]; then
+            echo "[ERROR] --only 뒤에 TC 목록이 필요합니다 (예: --only TC01,TC03,TC07)"
+            exit 1
+        fi
+        for tc in TC01 TC02 TC03 TC04 TC05 TC07 TC08 TC09 TC10; do
+            case ",${SELECTED}," in
+                *,${tc},*)
+                    case "$tc" in
+                        TC01) tc01_configuration_select_all ;;
+                        TC02) tc02_sync_configuration_cloud ;;
+                        TC03) tc03_persistent_state_update_records ;;
+                        TC04) tc04_system_setting_log_level ;;
+                        TC05) tc05_persistent_state_boot ;;
+                        TC07) tc07_persistent_state_select_all ;;
+                        TC08) tc08_system_setting_select_all ;;
+                        TC09) tc09_db_file_location ;;
+                        TC10) tc10_sync_register_map_cloud ;;
+                    esac
+                    ;;
+            esac
+        done
+        echo ""
+        echo "============================================"
+        echo " 결과: PASS=${PASS}  FAIL=${FAIL}"
+        echo "============================================"
+        ;;
     *)
         # TC06(재부팅 수반, 세션 끊김)은 기본 실행에서 제외 — 별도 --tc06-pre/--tc06-post 사용.
         tc01_configuration_select_all

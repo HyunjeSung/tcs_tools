@@ -585,6 +585,36 @@ case "${1}" in
     --tc06) setup_config; tc06_accumulation ;;
     --tc07) tc07_ipc_robustness ;;
     --tc08) tc08_cloud_portal_manual ;;
+    --only)
+        # 대시보드의 "선택 실행"에서 사용 — 콤마로 구분된 TC 목록을 받아 그 TC들만 실행한다.
+        # 예: sh tc_energy_monitor.sh --only TC01,TC03
+        shift
+        SELECTED="${1:-}"
+        if [ -z "$SELECTED" ]; then
+            echo "[ERROR] --only 뒤에 TC 목록이 필요합니다 (예: --only TC01,TC03)"
+            exit 1
+        fi
+        # TC01~06은 METRICS_FILE(SETUP 결과물)에 의존하므로 하나라도 선택되면 먼저 실행.
+        case ",${SELECTED}," in
+            *,TC0[1-6],*) setup_config ;;
+        esac
+        for tc in TC01 TC02 TC03 TC04 TC05 TC06 TC07 TC08; do
+            case ",${SELECTED}," in
+                *,${tc},*)
+                    case "$tc" in
+                        TC01) tc01_report_filtering ;;
+                        TC02) tc02_azure_transmission ;;
+                        TC03) tc03_average_calc ;;
+                        TC04) tc04_period_adjustment ;;
+                        TC05) tc05_ten_multiplier ;;
+                        TC06) tc06_accumulation ;;
+                        TC07) tc07_ipc_robustness ;;
+                        TC08) tc08_cloud_portal_manual ;;
+                    esac
+                    ;;
+            esac
+        done
+        ;;
     *)
         setup_config
         tc01_report_filtering

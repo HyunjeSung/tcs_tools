@@ -720,6 +720,39 @@ case "${1}" in
     --tc13) tc13_led_brightness_boundary ;;
     --tc14) tc14_led_scenario_stub ;;
     --tc15) tc15_led_control_ipc ;;
+    --only)
+        # 대시보드의 "선택 실행"에서 사용 — 콤마로 구분된 TC 목록을 받아 그 TC들만 실행한다.
+        # 예: sh tc_sys_manager.sh --only TC01,TC03,TC07
+        # TC12(Safe Reboot)는 세션이 끊겨 지원하지 않는다 (--tc12-pre/--tc12-post 사용).
+        shift
+        SELECTED="${1:-}"
+        if [ -z "$SELECTED" ]; then
+            echo "[ERROR] --only 뒤에 TC 목록이 필요합니다 (예: --only TC01,TC03,TC07)"
+            exit 1
+        fi
+        for tc in TC01 TC02 TC03 TC04 TC05 TC06 TC07 TC08 TC09 TC10 TC11 TC13 TC14 TC15; do
+            case ",${SELECTED}," in
+                *,${tc},*)
+                    case "$tc" in
+                        TC01) tc01_chkrootkit_scheduled ;;
+                        TC02) tc02_iptables_status ;;
+                        TC03) tc03_ntp_control ;;
+                        TC04) tc04_system_info ;;
+                        TC05) tc05_eeprom_info ;;
+                        TC06) tc06_internet_status ;;
+                        TC07) tc07_network_interface ;;
+                        TC08) tc08_host_agent_reconnect ;;
+                        TC09) tc09_whitelist_blocked_log ;;
+                        TC10) tc10_cmd_host_whitelist ;;
+                        TC11) tc11_platform_info ;;
+                        TC13) tc13_led_brightness_boundary ;;
+                        TC14) tc14_led_scenario_stub ;;
+                        TC15) tc15_led_control_ipc ;;
+                    esac
+                    ;;
+            esac
+        done
+        ;;
     *)
         tc01_chkrootkit_scheduled
         tc02_iptables_status

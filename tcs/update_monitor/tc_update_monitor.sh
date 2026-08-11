@@ -703,6 +703,36 @@ case "${1}" in
     --tc10) tc10_progress_notification ;;
     --tc11) tc11_docker_precheck ;;
     --tc12) tc12_manual_items_list ;;
+    --only)
+        # 대시보드의 "선택 실행"에서 사용 — 콤마로 구분된 TC 목록을 받아 그 TC들만 실행한다.
+        # 예: sh tc_update_monitor.sh --only TC01,TC03,TC11
+        shift
+        SELECTED="${1:-}"
+        if [ -z "$SELECTED" ]; then
+            echo "[ERROR] --only 뒤에 TC 목록이 필요합니다 (예: --only TC01,TC03,TC11)"
+            exit 1
+        fi
+        for tc in TC01 TC02 TC03 TC04 TC05 TC06 TC07 TC08 TC09 TC10 TC11 TC12; do
+            case ",${SELECTED}," in
+                *,${tc},*)
+                    case "$tc" in
+                        TC01) tc01_batch_update_protocol ;;
+                        TC02) tc02_adu_step_manifest ;;
+                        TC03) tc03_adu_agent_log ;;
+                        TC04) tc04_firmware_download_resume ;;
+                        TC05) tc05_placeholder ;;
+                        TC06) tc06_network_interruption_retry ;;
+                        TC07) tc07_sha256_hash_mismatch ;;
+                        TC08) tc08_corrupted_swu_blocked ;;
+                        TC09) tc09_hw_compatibility ;;
+                        TC10) tc10_progress_notification ;;
+                        TC11) tc11_docker_precheck ;;
+                        TC12) tc12_manual_items_list ;;
+                    esac
+                    ;;
+            esac
+        done
+        ;;
     *)
         tc01_batch_update_protocol
         tc02_adu_step_manifest

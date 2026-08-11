@@ -175,11 +175,12 @@ CATALOG_DEVICE_LOG = [
 CUSTOM_TC_TIMEOUTS_DEVICE_LOG = {}  # --only 플래그 미지원 — 선택 실행 UI는 비어있으면 자동 숨김
 
 # 아래 8개 앱(update_monitor ~ energy_monitor)은 AC Gen2 TestCase.xlsx "Unified Edge
-# Platform" 카테고리 기반으로 tc-plan/dev 에이전트가 신규 작성(2026-08-10). 모두
-# --only 미지원, 대신 --tcNN 개별 flag는 지원. reboot:True는 dev agent가 실제로
-# SSH 세션이 끊기는 재부팅이라 판단해 -pre/-post로 분리한 TC에만 붙어있다 — 파괴적
-# 컨테이너 재시작(kill -9, bin 변조 등)이라도 스크립트 안에서 자체 polling으로 끝나면
-# reboot:False로 둔 것(단일 SSH 세션 내에서 완결).
+# Platform" 카테고리 기반으로 tc-plan/dev 에이전트가 신규 작성(2026-08-10), DUT 실기
+# 검증 및 --only 선택 실행 지원 추가(2026-08-11). reboot:True는 실제로 SSH 세션이
+# 끊기는 재부팅이라 판단해 -pre/-post로 분리한 TC에만 붙어있다 — 파괴적 컨테이너
+# 재시작(kill -9, bin 변조 등)이라도 스크립트 안에서 자체 polling으로 끝나면
+# reboot:False로 둔 것(단일 SSH 세션 내에서 완결). CUSTOM_TC_TIMEOUTS_*에는 reboot
+# 전용 -pre/-post TC를 제외한 나머지만 담아 선택 실행 대상으로 노출한다.
 
 CATALOG_UPDATE_MONITOR = [
     {"id": "default", "label": "전체 실행 (TC01~TC12, 재부팅/스텁 TC 제외)", "flag": None,
@@ -210,7 +211,10 @@ CATALOG_UPDATE_MONITOR = [
     {"id": "tc12", "label": "TC12 자동화 불가 항목 목록", "flag": "--tc12",
      "timeout": 180, "reboot": False, "note": "클라우드 OTA 전체 흐름 / Web HMI 수동 조작"},
 ]
-CUSTOM_TC_TIMEOUTS_UPDATE_MONITOR = {}  # --only 플래그 미지원
+CUSTOM_TC_TIMEOUTS_UPDATE_MONITOR = {
+    "TC01": 180, "TC02": 180, "TC03": 180, "TC04": 180, "TC05": 180, "TC06": 180,
+    "TC07": 180, "TC08": 180, "TC09": 180, "TC10": 180, "TC11": 180, "TC12": 180,
+}
 
 CATALOG_SYS_MANAGER = [
     {"id": "default", "label": "전체 실행 (TC01~TC16, 재부팅/스텁 TC 제외)", "flag": None,
@@ -249,7 +253,11 @@ CATALOG_SYS_MANAGER = [
     {"id": "tc15", "label": "TC15 LED 제어", "flag": "--tc15",
      "timeout": 180, "reboot": False, "note": "밝기 0~255 + RGB 색상, IPC 경유"},
 ]
-CUSTOM_TC_TIMEOUTS_SYS_MANAGER = {}  # --only 플래그 미지원
+CUSTOM_TC_TIMEOUTS_SYS_MANAGER = {
+    "TC01": 180, "TC02": 180, "TC03": 180, "TC04": 180, "TC05": 180, "TC06": 180,
+    "TC07": 180, "TC08": 180, "TC09": 180, "TC10": 180, "TC11": 180,
+    "TC13": 180, "TC14": 180, "TC15": 180,
+}  # TC12는 reboot로 세션이 끊겨 미포함 (--tc12-pre/-post 전용 버튼만 사용)
 
 CATALOG_DB_MANAGER = [
     {"id": "default", "label": "전체 실행 (TC01~TC11, 재부팅/스텁 TC 제외)", "flag": None,
@@ -278,7 +286,10 @@ CATALOG_DB_MANAGER = [
     {"id": "tc10", "label": "TC10 Register Map 최신 정보 Cloud Sync", "flag": "--tc10",
      "timeout": 180, "reboot": False, "note": "SyncRegisterMapRequest"},
 ]
-CUSTOM_TC_TIMEOUTS_DB_MANAGER = {}  # --only 플래그 미지원
+CUSTOM_TC_TIMEOUTS_DB_MANAGER = {
+    "TC01": 180, "TC02": 180, "TC03": 180, "TC04": 180, "TC05": 180,
+    "TC07": 180, "TC08": 180, "TC09": 180, "TC10": 180,
+}  # TC06은 reboot로 세션이 끊겨 미포함 (--tc06-pre/-post 전용 버튼만 사용)
 
 CATALOG_DEVICE_MANAGER = [
     {"id": "default", "label": "전체 실행 (TC01~TC05, 재부팅/스텁 TC 제외)", "flag": None,
@@ -301,7 +312,9 @@ CATALOG_DEVICE_MANAGER = [
     {"id": "tc05", "label": "TC05 자동화 불가 / 검토 필요 항목 목록", "flag": "--tc05",
      "timeout": 180, "reboot": False, "note": None},
 ]
-CUSTOM_TC_TIMEOUTS_DEVICE_MANAGER = {}  # --only 플래그 미지원
+CUSTOM_TC_TIMEOUTS_DEVICE_MANAGER = {
+    "TC04": 180, "TC05": 180,
+}  # TC01~03은 reboot로 세션이 끊겨 미포함 (--tcNN-pre/-post 전용 버튼만 사용)
 
 CATALOG_AZURE_CONNECTOR = [
     {"id": "default", "label": "전체 실행 (TC01~TC12, 재부팅/스텁 TC 제외)", "flag": None,
@@ -330,7 +343,10 @@ CATALOG_AZURE_CONNECTOR = [
     {"id": "tc11", "label": "TC11 X.509 인증서 파일 존재 및 유효성 검사", "flag": "--tc11",
      "timeout": 180, "reboot": False, "note": None},
 ]
-CUSTOM_TC_TIMEOUTS_AZURE_CONNECTOR = {}  # --only 플래그 미지원
+CUSTOM_TC_TIMEOUTS_AZURE_CONNECTOR = {
+    "TC01": 180, "TC02": 180, "TC03": 180, "TC04": 180, "TC05": 180, "TC06": 180,
+    "TC07": 180, "TC08": 180, "TC09": 180, "TC10": 180, "TC11": 180,
+}
 
 CATALOG_EDGE_RUNTIME = [
     {"id": "default", "label": "전체 실행 (TC01~TC14, 재부팅/스텁 TC 제외)", "flag": None,
@@ -365,7 +381,11 @@ CATALOG_EDGE_RUNTIME = [
     {"id": "tc14", "label": "TC14 자동화 불가 항목 목록", "flag": "--tc14",
      "timeout": 180, "reboot": False, "note": None},
 ]
-CUSTOM_TC_TIMEOUTS_EDGE_RUNTIME = {}  # --only 플래그 미지원
+CUSTOM_TC_TIMEOUTS_EDGE_RUNTIME = {
+    "TC01": 180, "TC02": 180, "TC03": 180, "TC04": 180, "TC05": 180, "TC06": 180,
+    "TC07": 180, "TC08": 180, "TC09": 180, "TC10": 180, "TC11": 180, "TC12": 180,
+    "TC13": 180, "TC14": 180,
+}
 
 CATALOG_WEB_INTERFACE = [
     {"id": "default", "label": "전체 실행 (TC01~TC15, 재부팅/스텁 TC 제외)", "flag": None,
@@ -402,7 +422,11 @@ CATALOG_WEB_INTERFACE = [
     {"id": "tc15", "label": "TC15 Log Level Control", "flag": "--tc15",
      "timeout": 180, "reboot": False, "note": None},
 ]
-CUSTOM_TC_TIMEOUTS_WEB_INTERFACE = {}  # --only 플래그 미지원
+CUSTOM_TC_TIMEOUTS_WEB_INTERFACE = {
+    "TC01": 180, "TC02": 180, "TC03": 180, "TC04": 180, "TC05": 180, "TC06": 180,
+    "TC07": 180, "TC08": 180, "TC09": 180, "TC10": 180, "TC11": 180, "TC12": 180,
+    "TC13": 180, "TC14": 180, "TC15": 180,
+}
 
 CATALOG_ENERGY_MONITOR = [
     {"id": "default", "label": "전체 실행 (TC01~TC08, 재부팅/스텁 TC 제외)", "flag": None,
@@ -425,7 +449,10 @@ CATALOG_ENERGY_MONITOR = [
     {"id": "tc08", "label": "TC08 자동화 불가 항목 목록", "flag": "--tc08",
      "timeout": 180, "reboot": False, "note": "Azure IoT Hub Explorer 클라우드 포털 확인"},
 ]
-CUSTOM_TC_TIMEOUTS_ENERGY_MONITOR = {}  # --only 플래그 미지원
+CUSTOM_TC_TIMEOUTS_ENERGY_MONITOR = {
+    "TC01": 180, "TC02": 180, "TC03": 180, "TC04": 180, "TC05": 180,
+    "TC06": 180, "TC07": 180, "TC08": 180,
+}
 
 
 def _register_app(app_id: str, label: str, script_name: str, catalog: list,

@@ -67,6 +67,7 @@
   .dot.on { background: var(--pass); } .dot.off { background: var(--fail); }
   .dot.unknown { background: var(--muted); }
   main { display: grid; grid-template-columns: 320px 1fr; gap: 16px; padding: 16px 24px; align-content: start; }
+  main > section, main > .right-col { min-width: 0; }
   .cards { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 4px; }
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; }
   .card .num { font-size: 24px; font-weight: 700; }
@@ -110,9 +111,10 @@
   .right-col { display: flex; flex-direction: column; gap: 16px; }
   #log { background: var(--log-bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px;
          font-family: "SF Mono", Consolas, monospace; font-size: 12px; white-space: pre-wrap;
-         max-height: 340px; overflow-y: auto; }
-  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+         overflow-wrap: anywhere; max-height: 340px; overflow-y: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; table-layout: fixed; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border);
+           overflow-wrap: anywhere; }
   th { color: var(--muted); font-weight: 500; }
   .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
   .badge.PASS, .badge.pass { background: rgba(46,204,113,.15); color: var(--pass); }

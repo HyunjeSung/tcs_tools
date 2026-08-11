@@ -507,6 +507,35 @@ case "${1}" in
     --tc09) tc09_c2d_message_reception ;;
     --tc10) tc10_connection_monitoring ;;
     --tc11) tc11_cert_validity ;;
+    --only)
+        # 대시보드의 "선택 실행"에서 사용 — 콤마로 구분된 TC 목록을 받아 그 TC들만 실행한다.
+        # 예: sh tc_azure_connector.sh --only TC01,TC06,TC11
+        shift
+        SELECTED="${1:-}"
+        if [ -z "$SELECTED" ]; then
+            echo "[ERROR] --only 뒤에 TC 목록이 필요합니다 (예: --only TC01,TC06,TC11)"
+            exit 1
+        fi
+        for tc in TC01 TC02 TC03 TC04 TC05 TC06 TC07 TC08 TC09 TC10 TC11; do
+            case ",${SELECTED}," in
+                *,${tc},*)
+                    case "$tc" in
+                        TC01) tc01_tls_version ;;
+                        TC02) tc02_dps_registration ;;
+                        TC03) tc03_cert_corrupt_reenroll ;;
+                        TC04) tc04_cert_missing_reenroll ;;
+                        TC05) tc05_cert_renewal ;;
+                        TC06) tc06_blob_upload ;;
+                        TC07) tc07_offline_telemetry_queue ;;
+                        TC08) tc08_reconnect_telemetry_drain ;;
+                        TC09) tc09_c2d_message_reception ;;
+                        TC10) tc10_connection_monitoring ;;
+                        TC11) tc11_cert_validity ;;
+                    esac
+                    ;;
+            esac
+        done
+        ;;
     *)
         tc01_tls_version
         tc02_dps_registration
