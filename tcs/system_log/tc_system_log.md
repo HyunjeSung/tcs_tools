@@ -821,6 +821,100 @@ system_log를 `kill -9` 하면 edge_runtime이 재시작하고 startup 시
 
 ---
 
+## TC17 — MessageContext tid 미검증: cmd_host 응답 위조로 결정적 재현
+
+### 목적
+
+`SystemLog::handle_response()`(`system_log.cpp:165-188`)는 `SERVICE_CMD_HOST` 응답이
+오면 **tid를 전혀 검증하지 않고** 무조건 `message_context_.complete()`를 호출한다.
+`message_context_`(`system_log.hpp:40-79`)는 tid 필드 자체가 없는 단일 공유 슬롯이라,
+"지금 이 응답이 내가 기다리던 그 요청의 응답인가"를 확인할 방법이 구조적으로 없다.
+이 TC는 완전히 무관한(위조) `tid`의 cmd_host 응답을 실제 요청이 진행 중인 도중에
+직접 발행해, 그것이 진짜 응답인 것처럼 삼켜지는지를 재현·검증한다.
+
+> **판정 관례:** 다른 TC와 동일하게 **PASS=정상 동작, FAIL=결함 재현**이다. 즉 위조
+> 응답이 실제로 소비되거나 크래시를 유발하면 FAIL — 현재 코드 상태(tid 미검증)에서는
+> 항상 FAIL이 나오는 게 정상이다. 추후 `handle_response()`에 tid 검증이 추가돼 위조가
+> 안전하게 거부되면 이 TC는 **PASS로 바뀐다**. 아직 고쳐지지 않은 결함을 이용하는
+> 시험이라 회귀 세트(빠른 실행/`--full`)에는 포함하지 않고 `--tc17` 또는
+> `--only TC17`로만 단독 실행한다.
+
+### 사전 조건
+
+- 공통 전제 조건 충족
+- `mosquitto_pub`으로 임의 토픽에 발행 가능 (MQTT 브로커 접근 권한 — 정상 운영 환경이라면
+  이 자체가 이미 신뢰 경계 밖에서의 발행을 의미하므로, 실제로는 브로커 접근 통제가
+  뚫린 상황을 가정한 시험. 이 DUT 개발 환경은 로컬 브로커라 인증 없이 발행 가능함)
+
+### 절차
+
+> TC17-1과 TC17-2는 **같은 공격 한 번을 서로 다른 두 관점에서 관찰**하는 별개 시험이다
+> (TC09가 한 번의 `factory_reset` 실행에서 TC09-1/TC09-2를 독립적으로 판정하는 것과 같은
+> 구조). 아래 절차는 TC17-1/TC17-2 공용이며, 판정 방법은 "기대 결과"에서 각각 설명한다.
+
+정밀한 타이밍을 노리는 대신 훨씬 단순한 방식을 쓴다 — `get_log_data` 한 번이 내부적으로
+`task_rotate_sync()`를 통해 `request_start_time → request_make_log → request_rotate_log →
+request_compress_log` 순으로 `request_command_sync()`를 4번 연달아 호출한다(각각 별도의
+짧은 `message_context_` 대기 창). 대량 journal 주입 없이도, 그 실행 구간 동안 위조 응답을
+짧은 간격으로 반복 발행하면 4번의 창 중 최소 하나는 반드시 맞는다.
+
+1. toupload `.log.xz` BEFORE 목록 기록
+2. `get_log_data` 요청을 백그라운드로 비동기 송신 (응답을 기다리지 않고 바로 다음 단계로)
+3. `emsp/system_log/sys_manager/res/cmd_host` 토픽에 위조 메시지를 0.2초 간격으로
+   40회(≈8초) 반복 발행 — `sys_manager.cpp:1587`의 실제 `CmdHostResponse` 성공 응답
+   형태(`status`/`cmd`/`exit_code`/`message`)를 그대로 흉내 내되, `cmd` 값은 이 디바이스에
+   **존재하지 않는 명령어**(`xze`)로 채운다 — 존재하지도 않는 명령을 성공적으로 실행했다는
+   명백히 말이 안 되는 위조조차 tid만 안 맞으면 걸러지지 않는다는 걸 함께 보여준다
+   ```
+   {"error_code":"NONE","payload":{"status":"success","cmd":"xze -f /tmp/tc17_nonexistent_cmd","exit_code":0,"message":"","injected_marker":"<고유 마커>"}}
+   ```
+   tid를 붙이지 않음 — 실제 진행 중인 요청의 tid와는 전혀 무관, service만 `cmd_host`로 일치.
+4. 백그라운드 `get_log_data` 응답을 최대 30초까지 대기
+5. cleanup: 이번 run이 새로 만든 `.xz`와 동반 파일(`.xz.meta`, raw `.log`)까지 제거
+
+### 기대 결과
+
+**TC17-1** (공격자 관점 — 위조 응답의 `status` 값이 그대로 노출되는지)
+
+위조 payload의 `cmd`는 `xze` — 보안 화이트리스트 정책에 걸려 sys_manager가 절대로
+`status:"success"`를 낼 수 없는 명령이다(실측: 진짜로 `xze`를 보내보면
+`{"error_code":"UNKNOWN","payload":{"status":"error","message":"CMD_SH failed:
+Command not allowed by security whitelist policy",...}}`만 옴). 마커 주변 문맥에서
+`"status":"..."` 값을 직접 추출해, 있을 수 없는 `"success"`가 그대로 등장하는지가 판정
+근거다.
+
+| 항목 | 기준 |
+|------|------|
+| 수정 전 (실측) | `cmd:xze`로는 나올 수 없는 `"status":"success"`가 소비(`[request_command_sync] result:`) 또는 크래시(`Promise already satisfied`) 경로로 그대로 노출 → FAIL |
+| 수정 후 (기대) | 마커 자체가 안 나타남(위조가 안전하게 거부됨) → PASS |
+
+**TC17-2** (피해자 관점 — 진짜 요청의 `status`가 무사한지, TC17-1과 무관하게 독립 확인)
+
+`get_log_data` 최종 응답을 success/error/timeout 세 상태로 직접 분류한다: `error_code:"NONE"`
+→ success, 그 외 `error_code` → error, 응답 자체가 없음(30초 타임아웃) → timeout. success일
+때만 PASS.
+
+| 항목 | 기준 |
+|------|------|
+| 수정 전 (실측) | 위조 스팸 중에도 대체로 `success`로 응답하지만, 그 성공이 진짜인지는 보장 못 함 (아래 사각지대 참고) |
+| 수정 후 (기대) | `success`로 응답하고, 그 성공이 실제로 온전함(사각지대 항목 참고 로그가 깨끗함) |
+
+**사각지대** (판정에는 미반영, 참고 로그만 남김) — start_time 단계가 위조로 하이재킹돼도
+뒤이은 make_log/rotate/compress는 셸 명령 자체는 진짜로 성공하므로 `get_log_data` 응답은
+결국 success로 나온다(실측: `systemlog__<endtime>.log.xz`처럼 더블 언더스코어로 조용히
+오염된 채 status는 success). 신규 `.xz` 파일명/`xz --test`를 참고용으로 계속 확인해 이
+사각지대를 로그에 남긴다 — `systemlog__<endtime>.log.xz`처럼 더블 언더스코어로 나타나면
+status=success여도 조용한 오염 사례(실측으로 확인됨).
+
+### PASS/FAIL Criteria
+
+| 기준 ID | 설명 | 타입 | 기준값 | 셸 검증 |
+|---------|------|------|--------|---------|
+| TC17-1 | `MessageContext`가 tid 불일치 cmd_host 응답의 위조 `status`를 그대로 노출하지 않음 | boolean | true(=마커 미등장) | 마커 주변(`grep -B3 -A1`) 문맥에서 `grep -o '"status"[[:space:]]*:[[:space:]]*"[^"]*"'`로 추출한 값이 **없어야** PASS (있으면 FAIL) |
+| TC17-2 | 위조 스팸 중에도 진짜 `get_log_data` 응답 status가 success | boolean | true(=success) | `get_resp`에 `"error_code":"NONE"` 포함 시 success(PASS), 그 외 값이면 error, 무응답(30s)이면 timeout(둘 다 FAIL) |
+
+---
+
 ## 환경 변수 (Environment Variables)
 
 | 변수 | 기본값 | 설명 |
@@ -867,6 +961,7 @@ system_log를 `kill -9` 하면 edge_runtime이 재시작하고 startup 시
 | TC14 | A (자동) | RTC 이상 동일 시작시간 다중 파일 병합 — `kill -9 system_log` 후 edge_runtime 재시작 흐름 재현 |
 | TC15 | A (자동) | task_rotate_sync compress 실패 시 raw .log 보존 — journal 대량 주입으로 180s 타임아웃 강제 유발 |
 | TC16 | A (자동) | task_capture_boot_log compress 실패 시 raw .log 보존 — TC15와 동일 기법 + `kill -9 system_log` 재시작 |
+| TC17 | A (자동) | MessageContext tid 미검증 재현 — cmd_host 응답 위조(`mosquitto_pub`) 직접 발행, 회귀 세트 미포함(단독 실행 전용) |
 
 ---
 

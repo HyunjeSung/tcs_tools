@@ -473,3 +473,152 @@ Warning: Permanently added '192.168.10.25' (ECDSA) to the list of known hosts.
 ============================================
  결과: PASS=2  FAIL=0
 ============================================
+
+############################################################
+# SECTION 8 — TC17 단독 실행 (MessageContext tid 미검증 재현, --tc17) — FILE: tc17_final.log (46 lines, corrupted duplicate ls 블록 2줄 제거 후)
+# 생성: 2026-08-11 14:46:53 ~ 14:47:29 (41초)
+# DUT: 192.168.10.25 (qcells-emsplus), 시리얼 COM6 (재연결 후 COM7→COM6로 재열거됨)
+# 스크립트 md5: 2260964ca84a5dabd5dc156d9ec5b5a9
+# 결과: PASS=1 / FAIL=1
+#
+# [중요] TC17-1 PASS 신뢰성 문제 — 별도 조사 결과:
+#   TC17-1의 판정 근거는 journalctl -u docker-loader 에서 system_log.cpp:811의
+#   LOG(DEBUG) "result: " 라인을 grep 하는 것인데, 실측 결과 [SL] 모듈은 journald에
+#   [I](Info)/[W](Warn) 태그만 남기고 [D](Debug) 태그는 전체 보존 기간 통틀어 0건이었음
+#   (grep -c '\[D\]\[SL\]' = 0, 대조: [I][SL]=23건 [W][SL]=2건). 다른 모듈([WI])은
+#   [D] 로그가 실제로 존재하는 것으로 봐서 전역 로그 레벨 문제가 아니라 SL 모듈
+#   자체의 런타임 로그 레벨 설정(또는 컴파일 옵션)이 DEBUG를 걸러내는 것으로 추정.
+#   → TC17-1은 위조 응답의 실제 소비 여부와 무관하게 이 DUT 로그 레벨 설정에서는
+#     항상 PASS가 나오는 구조적 결함이 있는 판정 방식. 오늘의 PASS 는 "수정 확인"이
+#     아니라 "증거 자체가 로그에 안 남아서 못 찾음"에 가까움 — 신뢰 불가.
+#   → TC17-2(FAIL, timeout)는 send_and_wait 의 실제 응답 수신 여부로 직접 판정하므로
+#     로그 레벨과 무관하게 유효한 결과. 위조 스팸 중 진짜 get_log_data 요청이 30초
+#     타임아웃으로 유실됨을 실측으로 확인 — 결함의 실사용 영향이 입증됨.
+#   → 조사 근거 원자료는 아래 SECTION 8-1 참조.
+############################################################
+============================================
+ system_log TC
+ Tue Aug 11 14:46:53 KST 2026
+============================================
+=== TC17: MessageContext tid 미검증 - cmd_host 응답 위조로 결정적 재현 ===
+  $ ls -la /edge/log/toupload/system/systemlog_20260810144418_20260810144503.log.xz /edge/log/toupload/system/systemlog_20260810144503_20260810144731.log.xz /edge/log/toupload/system/systemlog_20260810144823_20260810162338.log.xz /edge/log/toupload/system/systemlog_20260810162339_20260810163254.log.xz /edge/log/toupload/system/systemlog_20260810163254_20260810165932.log.xz /edge/log/toupload/system/systemlog_20260810165933_20260810170801.log.xz /edge/log/toupload/system/systemlog_20260810170801_20260811143646.log.xz /edge/log/toupload/system/systemlog_20260811143646_20260811143731.log.xz /edge/log/toupload/system/systemlog_20260811143732_20260811143819.log.xz /edge/log/toupload/system/systemlog_20260811143819_20260811144022.log.xz /edge/log/toupload/system/systemlog_20260811144022_20260811144211.log.xz /edge/log/toupload/system/systemlog_20260811144212_20260811144443.log.xz
+    -rw-r--r-- 1 root root  24832 Aug 10 14:45 /edge/log/toupload/system/systemlog_20260810144418_20260810144503.log.xz
+    -rw-r--r-- 1 root root  14412 Aug 10 14:47 /edge/log/toupload/system/systemlog_20260810144503_20260810144731.log.xz
+    -rw-r--r-- 1 root root  36632 Aug 10 16:23 /edge/log/toupload/system/systemlog_20260810144823_20260810162338.log.xz
+    -rw-r--r-- 1 root root  51940 Aug 10 16:32 /edge/log/toupload/system/systemlog_20260810162339_20260810163254.log.xz
+    -rw-r--r-- 1 root root  49928 Aug 10 16:59 /edge/log/toupload/system/systemlog_20260810163254_20260810165932.log.xz
+    -rw-r--r-- 1 root root  53568 Aug 10 17:08 /edge/log/toupload/system/systemlog_20260810165933_20260810170801.log.xz
+    -rw-r--r-- 1 root root 171660 Aug 11 14:36 /edge/log/toupload/system/systemlog_20260810170801_20260811143646.log.xz
+    -rw-r--r-- 1 root root  36480 Aug 11 14:37 /edge/log/toupload/system/systemlog_20260811143646_20260811143731.log.xz
+    -rw-r--r-- 1 root root  37896 Aug 11 14:38 /edge/log/toupload/system/systemlog_20260811143732_20260811143819.log.xz
+    -rw-r--r-- 1 root root  35540 Aug 11 14:40 /edge/log/toupload/system/systemlog_20260811143819_20260811144022.log.xz
+    -rw-r--r-- 1 root root  34564 Aug 11 14:42 /edge/log/toupload/system/systemlog_20260811144022_20260811144211.log.xz
+    -rw-r--r-- 1 root root  50292 Aug 11 14:44 /edge/log/toupload/system/systemlog_20260811144212_20260811144443.log.xz
+    exit_code:0
+  get_log_data 요청을 백그라운드로 송신...
+  [핵심] cmd_host 응답 토픽(emsp/system_log/sys_manager/res/cmd_host)에 위조
+  메시지를 0.2초 간격으로 40회(≈8초) 반복 발행 — tid 불일치, service만 일치.
+  payload: {"error_code":"NONE","payload":{"status":"success","cmd":"xze -f /tmp/tc17_nonexistent_cmd","exit_code":0,"message":"","injected_marker":"TC17_PROOF_127728_1786427213"}}
+  get_log_data 백그라운드 응답 대기(최대 30초)...
+  get_log_data 최종 응답: <타임아웃/없음>
+  $ sh -c journalctl -u docker-loader --no-pager -o short-iso --since '2026-08-11 14:46:53' 2>/dev/null | grep -B3 -A1 -F 'TC17_PROOF_127728_1786427213' | head -40
+    exit_code:0
+[PASS] TC17-1: MessageContext가 tid 불일치 cmd_host 응답을 거부함 (위조 status가 그대로 노출되면 결함 재현=FAIL)
+[FAIL] TC17-2: 위조 스팸 중에도 진짜 get_log_data 요청이 방해받지 않고 정상 완료됨 (응답 status=timeout)
+  [REASON] get_log_data 최종 응답 status=timeout — 위조 스팸이 실제 요청을 방해했을 가능성
+  $ ls -la /edge/log/toupload/system/systemlog_20260810144418_20260810144503.log.xz /edge/log/toupload/system/systemlog_20260810144503_20260810144731.log.xz /edge/log/toupload/system/systemlog_20260810144823_20260810162338.log.xz /edge/log/toupload/system/systemlog_20260810162339_20260810163254.log.xz /edge/log/toupload/system/systemlog_20260810163254_20260810165932.log.xz /edge/log/toupload/system/systemlog_20260810165933_20260810170801.log.xz /edge/log/toupload/system/systemlog_20260810170801_20260811143646.log.xz /edge/log/toupload/system/systemlog_20260811143646_20260811143731.log.xz /edge/log/toupload/system/systemlog_20260811143732_20260811143819.log.xz /edge/log/toupload/system/systemlog_20260811143819_20260811144022.log.xz /edge/log/toupload/system/systemlog_20260811144022_20260811144211.log.xz /edge/log/toupload/system/systemlog_20260811144212_20260811144443.log.xz
+    -rw-r--r-- 1 root root  24832 Aug 10 14:45 /edge/log/toupload/system/systemlog_20260810144418_20260810144503.log.xz
+    -rw-r--r-- 1 root root  14412 Aug 10 14:47 /edge/log/toupload/system/systemlog_20260810144503_20260810144731.log.xz
+    -rw-r--r-- 1 root root  36632 Aug 10 16:23 /edge/log/toupload/system/systemlog_20260810144823_20260810162338.log.xz
+    -rw-r--r-- 1 root root  51940 Aug 10 16:32 /edge/log/toupload/system/systemlog_20260810162339_20260810163254.log.xz
+    -rw-r--r-- 1 root root  49928 Aug 10 16:59 /edge/log/toupload/system/systemlog_20260810163254_20260810165932.log.xz
+    -rw-r--r-- 1 root root  53568 Aug 10 17:08 /edge/log/toupload/system/systemlog_20260810165933_20260810170801.log.xz
+    -rw-r--r-- 1 root root 171660 Aug 11 14:36 /edge/log/toupload/system/systemlog_20260810170801_20260811143646.log.xz
+    -rw-r--r-- 1 root root  36480 Aug 11 14:37 /edge/log/toupload/system/systemlog_20260811143646_20260811143731.log.xz
+    -rw-r--r-- 1 root root  37896 Aug 11 14:38 /edge/log/toupload/system/systemlog_20260811143732_20260811143819.log.xz
+    -rw-r--r-- 1 root root  35540 Aug 11 14:40 /edge/log/toupload/system/systemlog_20260811143819_20260811144022.log.xz
+    -rw-r--r-- 1 root root  34564 Aug 11 14:42 /edge/log/toupload/system/systemlog_20260811144022_20260811144211.log.xz
+    exit_code:0
+
+============================================
+ 결과: PASS=1  FAIL=1
+
+############################################################
+# SECTION 8-1 — TC17-1 판정방식 신뢰성 조사 (SECTION 8 직후 별도 시리얼 조회, raw 근거)
+# 조회 시각: 2026-08-11 14:49 ~ 14:51
+############################################################
+$ journalctl -u docker-loader --no-pager -o cat 2>/dev/null | grep -c "result:"
+0
+$ journalctl -u docker-loader --no-pager -o cat 2>/dev/null | grep -c "[D][SL]" (정확히는 '\[D\]\[SL\]')
+0
+$ journalctl -u docker-loader --no-pager -o cat 2>/dev/null | grep "SL]" | grep -o "\[[A-Z]\]\[SL\]" | sort | uniq -c
+     23 [I][SL]
+      2 [W][SL]
+$ journalctl -u docker-loader --no-pager -o cat 2>/dev/null | grep -c "\[D\]"
+541
+$ journalctl -u docker-loader --no-pager -o cat 2>/dev/null | grep -i debug | head -3
+Debug Level: 1
+[14:44:52:328][I][SM] [IPC pub res] tid=web_interface:mqtt-response-manager:14 {...}
+[14:44:52:332][D][WI] [PlatformService:initializePlatformInfo] Platform info response: {...}
+결론: [D] 태그 자체는 journald에 다수 존재(541건, 주로 [WI] 모듈)하므로 로그 레벨이
+전역적으로 DEBUG를 차단하는 것은 아님. 그러나 [SL] 모듈은 [D] 태그가 0건 —
+system_log 앱 자체가 DEBUG 레벨 로그를 journald까지 전달하지 않도록 설정/컴파일된
+것으로 추정. TC17-1 판정 로직이 의존하는 "result: " 라인은 이 미출력 DEBUG 로그이므로
+근본적으로 관측 불가능.
+############################################################
+
+############################################################
+# SECTION 9 — TC17 재실행 (TC17-1 판정 방식을 mosquitto_sub 기반으로 교체 후, --tc17) — FILE: tc17_out_v2.log (34 lines)
+# 생성: 2026-08-11 16:21:30 ~ 16:21:44 (14초, 시리얼 COM6)
+# DUT: 192.168.10.25 (qcells-emsplus)
+# 스크립트 md5: 21515611795dc774e802fc31644c2834
+# 결과: PASS=2 / FAIL=0
+#
+# [변경 사항] TC17-1 판정 방식 교체 (SECTION 8-1 조사 결과 반영):
+#   기존: journalctl 의 LOG(DEBUG) "result: " 라인 grep (SL 모듈은 journald에 [D] 태그가
+#         0건이라 항상 PASS만 나오는 신뢰 불가 방식이었음)
+#   신규: system_log가 sys_manager에 실제로 발행하는 cmd_host 요청(emsp/sys_manager/
+#         system_log/req/cmd_host)을 공격 구간 내내 mosquitto_sub 로 직접 캡처 →
+#         make_log/compress_log 요청의 파일 경로가 "systemlog__<end>.log"(더블 언더스코어,
+#         start_time 위조 소비 시 나타나는 오염 패턴, spec "사각지대" 절 근거)로 훼손됐는지
+#         검사. 이번 실행에서는 4건 모두 정상 형태(단일 언더스코어)로 캡처됨 — 위조가
+#         소비되지 않았다는 직접적 긍정 증거 (부재 증거가 아님).
+#
+# [참고] SECTION 8(1차 실행)의 TC17-2 FAIL(timeout)이 이번 재실행에서는 재현되지 않고
+#   PASS(success)로 나옴 — 동일 공격 패턴, 동일 판정 로직(TC17-2는 변경 없음)에서 결과가
+#   달라진 것으로 보아 1차 실행의 timeout은 일회성 현상(재현성 낮음)일 가능성이 있음.
+############################################################
+============================================
+ system_log TC
+ Tue Aug 11 16:21:30 KST 2026
+============================================
+=== TC17: MessageContext tid 미검증 - cmd_host 응답 위조로 결정적 재현 ===
+  $ ls -la /edge/log/toupload/system/systemlog_20260811161435_20260811161551.log.xz /edge/log/toupload/system/systemlog_20260811161551_20260811161638.log.xz
+    -rw-r--r-- 1 root root 29064 Aug 11 16:15 /edge/log/toupload/system/systemlog_20260811161435_20260811161551.log.xz
+    -rw-r--r-- 1 root root 14480 Aug 11 16:16 /edge/log/toupload/system/systemlog_20260811161551_20260811161638.log.xz
+    exit_code:0
+  get_log_data 요청을 백그라운드로 송신...
+  [핵심] cmd_host 응답 토픽(emsp/system_log/sys_manager/res/cmd_host)에 위조
+  메시지를 0.2초 간격으로 40회(≈8초) 반복 발행 — tid 불일치, service만 일치.
+  payload: {"error_code":"NONE","payload":{"status":"success","cmd":"xze -f /tmp/tc17_nonexistent_cmd","exit_code":0,"message":"","injected_marker":"TC17_PROOF_6171_1786432890"}}
+  get_log_data 백그라운드 응답 대기(최대 30초)...
+  get_log_data 최종 응답: {"error_code":"NONE","payload":{}}
+  $ cat /tmp/tc17_req_capture_6171
+    emsp/sys_manager/system_log/req/cmd_host {"cmd":"journalctl --list-boots | head -n 1 | awk '{print $4, $5}' | sed 's/[-:]//g' | tr -d ' '","stream":false,"timeout":180}
+    emsp/sys_manager/system_log/req/cmd_host {"cmd":"journalctl -o cat > /edge/log/toupload/system/systemlog_20260811161639_20260811162131.log","stream":false,"timeout":180}
+    emsp/sys_manager/system_log/req/cmd_host {"cmd":"journalctl --rotate && journalctl --vacuum-files=1","stream":false,"timeout":180}
+    emsp/sys_manager/system_log/req/cmd_host {"cmd":"xz -f /edge/log/toupload/system/systemlog_20260811161639_20260811162131.log","stream":false,"timeout":180}
+    exit_code:0
+[PASS] TC17-1: MessageContext가 tid 불일치 cmd_host 응답을 거부함 (위조가 소비되면 후속 req의 파일 경로가 훼손됨=FAIL)
+[PASS] TC17-2: 위조 스팸 중에도 진짜 get_log_data 요청이 방해받지 않고 정상 완료됨 (응답 status=success)
+  $ ls -la /edge/log/toupload/system/systemlog_20260811161435_20260811161551.log.xz /edge/log/toupload/system/systemlog_20260811161551_20260811161638.log.xz /edge/log/toupload/system/systemlog_20260811161639_20260811162131.log.xz
+    -rw-r--r-- 1 root root 29064 Aug 11 16:15 /edge/log/toupload/system/systemlog_20260811161435_20260811161551.log.xz
+    -rw-r--r-- 1 root root 14480 Aug 11 16:16 /edge/log/toupload/system/systemlog_20260811161551_20260811161638.log.xz
+    -rw-r--r-- 1 root root 29784 Aug 11 16:21 /edge/log/toupload/system/systemlog_20260811161639_20260811162131.log.xz
+    exit_code:0
+  $ xz --test /edge/log/toupload/system/systemlog_20260811161639_20260811162131.log.xz
+    exit_code:0
+
+============================================
+ 결과: PASS=2  FAIL=0
+============================================

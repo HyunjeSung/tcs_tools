@@ -1492,6 +1492,164 @@ tc16_boot_log_compress_fail() {
 }
 
 # ============================================================
+# TC17: MessageContext tid 미검증 — cmd_host 응답 위조로 결정적 재현
+#   근거: SystemLog::handle_response() (system_log.cpp:165-188)는 SERVICE_CMD_HOST
+#   응답이 오면 tid를 전혀 확인하지 않고 무조건 message_context_.complete()를 호출한다.
+#   message_context_(system_log.hpp:40-79)는 tid 필드 자체가 없는 단일 공유 슬롯이라,
+#   "지금 이 응답이 내가 기다리던 그 요청의 응답인가"를 검증할 수단이 구조적으로 없다.
+#   [재현 전략] 정밀한 타이밍을 노리는 대신 훨씬 단순한 방식을 쓴다 — get_log_data를
+#   비동기로 쏘면 내부적으로 task_rotate_sync()가 request_start_time → request_make_log
+#   → request_rotate_log → request_compress_log 순으로 request_command_sync()를 4번
+#   연달아 호출한다(각각이 message_context_ 슬롯을 잡는 별도의 짧은 창). 대량 journal
+#   주입 없이도, 그 실행 구간 동안 무관한(위조) cmd_host 응답을 0.2초 간격으로 반복
+#   발행하면 4번의 창 중 최소 하나는 반드시 맞힌다 — 언제 맞았는지 정확히 몰라도 된다.
+#   이 공격 한 번으로 서로 다른 두 가지를 관찰한다(TC09-1/TC09-2처럼 한 실행 안의
+#   독립적인 두 판정 — TC17-2는 TC17-1의 후속 단계가 아니라 같은 공격의 다른 관찰점):
+#     TC17-1: 위조 응답 자체가 소비되거나 크래시를 유발하는지 (공격자 관점)
+#     TC17-2: 그 와중에 진짜 get_log_data 요청은 방해받지 않고 정상 완료되는지 (피해자 관점)
+#   [판정 관례] 다른 TC와 동일하게 PASS=정상 동작, FAIL=결함 재현이다. 지금은 tid
+#   검증이 없어 둘 다 FAIL이 나야 정상 — handle_response()에 tid 검증이 추가되면
+#   TC17-1/TC17-2 모두 PASS로 뒤집혀야 한다.
+#   [주의] 실제 코드 결함을 이용한 재현 시험이라 회귀 세트(default/--full)에는 포함하지
+#   않는다 — --tc17 또는 --only TC17 로 단독 실행.
+# ============================================================
+tc17_message_context_tid_pollution() {
+    echo "=== TC17: MessageContext tid 미검증 - cmd_host 응답 위조로 결정적 재현 ==="
+
+    dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log.xz
+    local BEFORE_LIST
+    BEFORE_LIST=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | sort)
+
+    # --- 공격 실행 (TC17-1/TC17-2 공용, 딱 한 번만) ---
+    local MARKER="TC17_PROOF_$$_$(date +%s)"
+    local get_resp_file="/tmp/tc17_get_resp_$$"
+    local req_capture_file="/tmp/tc17_req_capture_$$"
+    local forged_payload
+    # 실제 sys_manager 응답 형태(CmdHostResponse: status/cmd/message/exit_code, 실측
+    # 예시는 sys_manager.cpp:1587 "success"/1594 "error" 참고)를 그대로 흉내 내되,
+    # cmd 값은 이 디바이스에 존재하지 않는 명령어("xze")로 채운다 — "존재하지도 않는
+    # 명령을 성공적으로 실행했다"는 명백히 말이 안 되는 위조조차 tid만 안 맞으면
+    # 걸러내지 못한다는 걸 보여주기 위함(내용 검증 부재까지 함께 증명).
+    forged_payload=$(printf '{"error_code":"NONE","payload":{"status":"success","cmd":"xze -f /tmp/tc17_nonexistent_cmd","exit_code":0,"message":"","injected_marker":"%s"}}' "$MARKER")
+
+    # system_log가 sys_manager에 실제로 발행하는 cmd_host 요청(req)을 공격 구간 내내
+    # 캡처한다 (2026-08-11 확인: emsp/sys_manager/${TARGET}/req/cmd_host). TC17-1 판정을
+    # journald LOG(DEBUG) "result: " 라인 grep 방식에서 이 MQTT req 캡처 방식으로 교체함
+    # — [SL] 모듈은 journald에 [D](Debug) 태그가 전체 보존 기간 통틀어 0건으로 확인되어
+    # (대조: 다른 모듈 [WI]는 541건) 기존 방식은 위조 소비 여부와 무관하게 항상 PASS만
+    # 내는 구조적 결함이 있었다 (evidence_full.log SECTION 8-1 참고).
+    rm -f "$req_capture_file"
+    mosquitto_sub -h "$MQTT_HOST" -t "emsp/sys_manager/${TARGET}/req/cmd_host" -v > "$req_capture_file" 2>/dev/null &
+    local REQ_SUB_PID=$!
+    sleep 0.5
+
+    echo "  get_log_data 요청을 백그라운드로 송신..."
+    ( send_and_wait "get_log_data" "{}" 30 > "$get_resp_file" ) &
+    local GET_BG_PID=$!
+
+    echo "  [핵심] cmd_host 응답 토픽(emsp/${TARGET}/sys_manager/res/cmd_host)에 위조"
+    echo "  메시지를 0.2초 간격으로 40회(≈8초) 반복 발행 — tid 불일치, service만 일치."
+    echo "  payload: ${forged_payload}"
+    local i
+    for i in $(seq 1 40); do
+        mosquitto_pub -h "$MQTT_HOST" -t "emsp/${TARGET}/sys_manager/res/cmd_host" -m "$forged_payload" 2>/dev/null
+        sleep 0.2
+    done
+
+    echo "  get_log_data 백그라운드 응답 대기(최대 30초)..."
+    wait "$GET_BG_PID"
+    local get_resp
+    get_resp=$(cat "$get_resp_file" 2>/dev/null)
+    rm -f "$get_resp_file"
+    echo "  get_log_data 최종 응답: ${get_resp:-<타임아웃/없음>}"
+    sleep 2
+
+    kill "$REQ_SUB_PID" 2>/dev/null
+    wait "$REQ_SUB_PID" 2>/dev/null
+
+    # --- TC17-1 판정: 위조 응답 자체의 운명 (공격자 관점), MQTT req 내용 훼손 여부로 직접 판정 ---
+    # task_rotate_sync()는 request_start_time() 응답의 "message" 필드를 start_time으로
+    # 써서 파일 경로(systemlog_<start>_<end>.log)를 만든다. 위조 payload의 message는
+    # 빈 문자열이므로, 만약 start_time 단계가 위조로 가로채이면 뒤이은 make_log/
+    # compress_log 요청의 cmd 안 파일 경로가 "systemlog__<end>.log"처럼 언더스코어
+    # 두 개로 훼손되어 나타난다(정상은 언더스코어 한 개) — spec의 "사각지대" 절에
+    # 이미 실측 확인된 오염 패턴을, 캡처한 실제 req/cmd_host MQTT 메시지에서 직접
+    # 검출한다(내부 로그 의존 없음, 2026-08-11 실측으로 topic/payload 형태 확인).
+    dump_cmd cat "$req_capture_file"
+    local corrupted_req
+    corrupted_req=$(grep -oE '"cmd":"[^"]*systemlog__[0-9]+\.log[^"]*"' "$req_capture_file")
+    rm -f "$req_capture_file"
+
+    if [ -n "$corrupted_req" ]; then
+        assert "TC17-1: MessageContext가 tid 불일치 cmd_host 응답을 거부함 (위조가 소비되면 후속 req의 파일 경로가 훼손됨=FAIL)" "FAIL" \
+            "system_log가 sys_manager에 보낸 실제 cmd_host req에서 훼손된 파일 경로(더블 언더스코어) 확인: ${corrupted_req}"
+        echo "    [재현 형태] request_start_time() 이 위조 응답(message=\"\")을 진짜로 소비 → 빈 start_time 으로 후속 파일 경로 생성"
+    else
+        assert "TC17-1: MessageContext가 tid 불일치 cmd_host 응답을 거부함 (위조가 소비되면 후속 req의 파일 경로가 훼손됨=FAIL)" "PASS"
+    fi
+
+    # --- TC17-2 판정: 진짜 요청의 운명 (피해자 관점, TC17-1과 별개 관찰), status로 직접 판정 ---
+    # get_log_data의 최종 응답(error_code)이 실질적으로 status와 같은 축이다 —
+    # NONE=success, 그 외 값=error, 응답 자체가 없으면(send_and_wait 30s 타임아웃)=timeout.
+    # host_agent가 응답 후에도 원격 xz를 마저 쓰는 경우가 있어(TC15/16과 동일 이유)
+    # toupload 목록이 안정될 때까지 최대 15초 대기한 뒤 판정.
+    local stab_deadline prev_count cur_count
+    stab_deadline=$(( $(date +%s) + 15 ))
+    prev_count=-1
+    while [ "$(date +%s)" -lt "$stab_deadline" ]; do
+        cur_count=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | wc -l)
+        [ "$cur_count" = "$prev_count" ] && break
+        prev_count="$cur_count"
+        sleep 2
+    done
+
+    local resp_status
+    if [ -z "$get_resp" ]; then
+        resp_status="timeout"
+    elif echo "$get_resp" | grep -q '"error_code":"NONE"'; then
+        resp_status="success"
+    else
+        resp_status="error"
+    fi
+
+    if [ "$resp_status" = "success" ]; then
+        assert "TC17-2: 위조 스팸 중에도 진짜 get_log_data 요청이 방해받지 않고 정상 완료됨 (응답 status=${resp_status})" "PASS"
+    else
+        assert "TC17-2: 위조 스팸 중에도 진짜 get_log_data 요청이 방해받지 않고 정상 완료됨 (응답 status=${resp_status})" "FAIL" \
+            "get_log_data 최종 응답 status=${resp_status} — 위조 스팸이 실제 요청을 방해했을 가능성"
+    fi
+
+    # 참고(판정에는 반영 안 함): status만으로는 못 잡는 사각지대가 있다 — start_time
+    # 단계가 위조로 하이재킹돼도 그 뒤 make_log/rotate/compress는 (엉뚱한 파일명이든
+    # 말든) 셸 명령 자체는 진짜로 성공해서 get_log_data 응답도 결국 success로 나온다
+    # (실측: systemlog__<endtime>.log.xz 처럼 더블 언더스코어 오염). 파일명/xz 무결성은
+    # 그 조용한 오염을 잡아내는 유일한 신호라 참고용으로 계속 남겨둔다.
+    local AFTER_LIST NEW_FILES NEW_XZ
+    dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log.xz
+    AFTER_LIST=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | sort)
+    NEW_FILES=$(comm -13 <(echo "$BEFORE_LIST") <(echo "$AFTER_LIST"))
+    NEW_XZ=$(echo "$NEW_FILES" | head -1)
+    if [ -n "$NEW_XZ" ]; then
+        if ! basename "$NEW_XZ" | grep -qE '^systemlog_[0-9]{14}_[0-9]{14}\.log\.xz$'; then
+            echo "    [참고, 판정 무관] 신규 파일명이 정상 형식이 아님: $(basename "$NEW_XZ") — status는 success인데도 start_time이 위조로 오염된 조용한 손상 사례일 수 있음"
+        elif ! dump_cmd xz --test "$NEW_XZ"; then
+            echo "    [참고, 판정 무관] $(basename "$NEW_XZ") 가 xz --test 실패 — status는 success인데도 실제 압축 결과물이 깨져있을 수 있음"
+        fi
+    fi
+
+    # cleanup: 이번 run이 새로 만든 .xz뿐 아니라 동반 파일(.xz.meta, raw .log)까지 제거.
+    # start_time 오염으로 "systemlog__..."(더블 언더스코어, 정상 운영에서는 나올 수
+    # 없는 형태) 잔재가 남을 수 있어 패턴으로 한 번 더 안전하게 쓸어낸다.
+    if [ -n "$NEW_FILES" ]; then
+        echo "$NEW_FILES" | while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            rm -f "$f" "${f}.meta" "${f%.xz}"
+        done
+    fi
+    rm -f "${TOUPLOAD_DIR}"/systemlog__*.* 2>/dev/null
+}
+
+# ============================================================
 # main
 # ============================================================
 echo "============================================"
@@ -1629,6 +1787,14 @@ case "${1}" in
         echo " 결과: PASS=${PASS}  FAIL=${FAIL}"
         echo "============================================"
         ;;
+    --tc17)
+        tc17_message_context_tid_pollution
+
+        echo ""
+        echo "============================================"
+        echo " 결과: PASS=${PASS}  FAIL=${FAIL}"
+        echo "============================================"
+        ;;
     --only)
         # 대시보드의 "선택 실행"에서 사용 — 콤마로 구분된 TC 목록을 받아 그 TC들만 실행한다.
         # 예: sh tc_system_log.sh --only TC01,TC03,TC07
@@ -1654,7 +1820,7 @@ case "${1}" in
         # 스크립트의 표준 실행 순서를 그대로 따른다 — 사용자가 콤마 목록을 어떤 순서로
         # 넘기든 무관하게 항상 이 순서로 실행한다. TC09(factory_reset)는 toupload/staging을
         # 통째로 비우므로, 다른 TC와 같이 선택돼도 항상 맨 마지막에 오도록 배열 끝에 둔다.
-        for tc in TC01 TC02 TC03 TC04 TC05 TC06 TC07 TC08 TC11 TC12 TC13 TC14 TC15 TC16 TC09; do
+        for tc in TC01 TC02 TC03 TC04 TC05 TC06 TC07 TC08 TC11 TC12 TC13 TC14 TC15 TC16 TC17 TC09; do
             case ",${SELECTED}," in
                 *,${tc},*)
                     case "$tc" in
@@ -1673,6 +1839,7 @@ case "${1}" in
                         TC14) tc14_rtc_same_start_merge ;;
                         TC15) tc15_rotate_sync_compress_fail ;;
                         TC16) tc16_boot_log_compress_fail ;;
+                        TC17) tc17_message_context_tid_pollution ;;
                     esac
                     ;;
             esac
@@ -1724,11 +1891,12 @@ case "${1}" in
         echo " 결과: PASS=${PASS}  FAIL=${FAIL}"
         echo "============================================"
         echo ""
-        echo "[안내] TC10(리부트)/TC15/TC16 은 별도 실행 (빠른 실행에는 포함 안 됨):"
+        echo "[안내] TC10(리부트)/TC15/TC16/TC17 은 별도 실행 (빠른 실행/--full 모두 미포함):"
         echo "  ./tc_system_log.sh --tc10-pre   (재부팅 발생)"
         echo "  ./tc_system_log.sh --tc10-post  (SSH 재접속 후)"
         echo "  ./tc_system_log.sh --tc15       (rotate_sync compress 실패, 8분+)"
         echo "  ./tc_system_log.sh --tc16       (boot_log compress 실패, 9분+)"
-        echo "  ./tc_system_log.sh --full       (TC01~09, 11~16 전체, TC15/16 포함)"
+        echo "  ./tc_system_log.sh --tc17       (MessageContext tid 미검증 재현 — TC17-1 위조 응답 소비/크래시 + TC17-2 진짜 요청 무결성)"
+        echo "  ./tc_system_log.sh --full       (TC01~09, 11~16 전체, TC15/16 포함, TC17은 미포함)"
         ;;
 esac

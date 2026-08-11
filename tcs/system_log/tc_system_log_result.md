@@ -9,7 +9,7 @@
 **DUT:** qcells-emsplus (AC Gen2, aarch64)
 **펌웨어 브랜치:** main (nmon 포함)
 
-**총 결과: PASS=28 / PARTIAL PASS=2 / FAIL=0 / 30기준**
+**총 결과: PASS=28 / PARTIAL PASS=2 / FAIL=0 / 30기준** (TC17 은 회귀 세트 미포함, 단독 실행 — 별도 섹션 참조)
 
 | TC | 기준 | 결과 |
 |----|------|------|
@@ -462,3 +462,102 @@ $ ls -la .../systemlog_20250501000000_20250501010000.log.xz
 - `merged_start` = `parse_log_start_time(front)` = `20260709170522` = BOOT_START ✓
 - `merged_end` = `parse_log_end_time(back)` = `2026070917052202` (dummy B 기준) ✓
 - 3개 파일 raw xz 스트림 연결 → rename → toupload 이관 ✓
+
+---
+
+## TC17 — MessageContext tid 미검증: cmd_host 응답 위조로 결정적 재현 (단독 실행, 회귀 세트 미포함)
+
+**실행일시:** 2026-08-11 14:46:53 → 14:47:29 KST (시리얼 COM6, USB 어댑터 재연결 후 COM7→COM6 재열거)
+
+**판정 관례:** PASS=정상 동작(결함 없음), FAIL=결함 재현. tid 검증이 없는 현재 코드 상태에서는 둘 다 FAIL이 나오는 게 정상.
+
+| 기준 ID | 결과 | 신뢰도 |
+|---------|------|--------|
+| TC17-1: 위조 status가 그대로 노출되지 않음 (마커 미등장) | **PASS** | **⚠️ 신뢰 불가 (아래 참고)** |
+| TC17-2: 위조 스팸 중에도 진짜 get_log_data 요청이 정상 완료 | **FAIL** (응답 status=timeout) | 신뢰 가능 |
+
+**근거 (tc_run.out, evidence_full.log SECTION 8):**
+```
+get_log_data 요청을 백그라운드로 송신...
+[핵심] cmd_host 응답 토픽(emsp/system_log/sys_manager/res/cmd_host)에 위조
+메시지를 0.2초 간격으로 40회(≈8초) 반복 발행 — tid 불일치, service만 일치.
+payload: {"error_code":"NONE","payload":{"status":"success","cmd":"xze -f /tmp/tc17_nonexistent_cmd","exit_code":0,"message":"","injected_marker":"TC17_PROOF_127728_1786427213"}}
+get_log_data 백그라운드 응답 대기(최대 30초)...
+get_log_data 최종 응답: <타임아웃/없음>
+[PASS] TC17-1: MessageContext가 tid 불일치 cmd_host 응답을 거부함 (위조 status가 그대로 노출되면 결함 재현=FAIL)
+[FAIL] TC17-2: 위조 스팸 중에도 진짜 get_log_data 요청이 방해받지 않고 정상 완료됨 (응답 status=timeout)
+  [REASON] get_log_data 최종 응답 status=timeout — 위조 스팸이 실제 요청을 방해했을 가능성
+
+결과: PASS=1  FAIL=1
+```
+
+**⚠️ TC17-1 판정 방식 신뢰성 문제 (SECTION 8-1 raw 근거):**
+
+TC17-1은 `journalctl -u docker-loader`에서 `system_log.cpp:811`의 `LOG(DEBUG) "result: "` 라인을 grep해 위조 status 노출 여부를 판정하는데, 실측 결과 **`[SL]`(system_log) 모듈은 journald에 `[I]`(23건)/`[W]`(2건) 태그만 남기고 `[D]`(Debug) 태그는 전체 보존 기간 통틀어 0건**이었다 (`grep -c '\[D\]\[SL\]'` = 0). 대조로 다른 모듈(`[WI]`)은 `[D]` 로그가 541건 존재해 전역 로그 레벨 차단이 아니라 `system_log` 앱 자체가 DEBUG 레벨을 journald까지 전달하지 않는 것으로 추정된다.
+
+```
+$ journalctl -u docker-loader --no-pager -o cat | grep -c "result:"
+0
+$ journalctl -u docker-loader --no-pager -o cat | grep "SL]" | grep -o "\[[A-Z]\]\[SL\]" | sort | uniq -c
+     23 [I][SL]
+      2 [W][SL]
+$ journalctl -u docker-loader --no-pager -o cat | grep -c "\[D\]"
+541
+```
+
+**결론:** TC17-1의 판정 근거 로그 라인은 이 DUT 로그 레벨 설정에서 **구조적으로 관측 불가능** — 위조 응답이 실제로 소비되든 안 되든 항상 PASS가 나온다. 오늘의 TC17-1 PASS는 "결함이 없다"는 증거가 아니라 "판정 방식이 증거를 못 찾는다"는 뜻이므로 **신뢰할 수 없다.**
+
+반면 **TC17-2는 로그 레벨과 무관하게 `send_and_wait`의 실제 응답 수신 여부로 직접 판정**하므로 유효하다 — 위조 스팸 중 진짜 `get_log_data` 요청이 30초 타임아웃으로 완전히 유실됨을 실측했고, 이 자체로 tid 미검증 결함의 실사용 영향(정상 요청 서비스 거부)이 입증된다.
+
+**권고 (step 1/2 환류 — TC 판정 방식 보정 필요):**
+- TC17-1은 journald DEBUG 로그 대신 다른 관측 가능한 신호로 교체 필요 — 예: `mosquitto_sub`로 실제 MQTT 응답 토픽을 캡처해 위조 payload가 그대로 재발행/전달되는지 직접 확인, 또는 INFO 레벨로 승격된 별도 로그 추가.
+- TC17-2 FAIL(timeout)은 유효한 결함 재현 증거로 그대로 유지.
+
+---
+
+### TC17 재실행 — TC17-1 판정 방식을 mosquitto_sub 기반으로 교체 (2026-08-11 16:21:30 → 16:21:44, COM6)
+
+**소스코드 확인 (system_log.hpp:59-67, `MessageContext::complete()`):** tid 불일치 시 이미
+`if (!in_use_ || tid != pending_tid_) { LOG(WARN)...; return; }` 로 거부하는 코드가 존재함 —
+TC17 spec의 "tid를 전혀 검증하지 않는다" 전제와 배치되나, spec 자체 재검토는 보류하고
+이번엔 요청받은 대로 TC17-1 판정 방식 교체만 진행함.
+
+**교체 내용:** journald DEBUG 로그 grep 대신, system_log가 sys_manager에 실제로 발행하는
+`emsp/sys_manager/system_log/req/cmd_host` 요청을 공격 구간 내내 `mosquitto_sub`로 직접
+캡처. `request_start_time()` 이 위조로 가로채이면(위조 payload의 `message`가 빈 문자열)
+후속 `make_log`/`compress_log` 요청의 파일 경로가 `systemlog__<end>.log`(더블 언더스코어)로
+훼손되어 나타난다는, spec "사각지대" 절에 이미 문서화된 오염 패턴을 캡처된 실제 MQTT req
+내용에서 직접 검출 — journald 의존 없이 부재 증거가 아닌 긍정 증거로 판정.
+
+| 기준 ID | 결과 | 신뢰도 |
+|---------|------|--------|
+| TC17-1: 위조가 소비되면 후속 req의 파일 경로가 훼손됨 (없어야 PASS) | **PASS** | **신뢰 가능** (긍정 증거) |
+| TC17-2: 위조 스팸 중에도 진짜 get_log_data 요청이 정상 완료 | **PASS** (응답 status=success) | 신뢰 가능 |
+
+**결과: PASS=2 / FAIL=0**
+
+**근거 (tc_run.out, evidence_full.log SECTION 9):**
+```
+get_log_data 요청을 백그라운드로 송신...
+payload: {"error_code":"NONE","payload":{"status":"success","cmd":"xze -f /tmp/tc17_nonexistent_cmd","exit_code":0,"message":"","injected_marker":"TC17_PROOF_6171_1786432890"}}
+get_log_data 백그라운드 응답 대기(최대 30초)...
+get_log_data 최종 응답: {"error_code":"NONE","payload":{}}
+  $ cat /tmp/tc17_req_capture_6171
+    emsp/sys_manager/system_log/req/cmd_host {"cmd":"journalctl --list-boots | head -n 1 | awk '{print $4, $5}' | sed 's/[-:]//g' | tr -d ' '","stream":false,"timeout":180}
+    emsp/sys_manager/system_log/req/cmd_host {"cmd":"journalctl -o cat > /edge/log/toupload/system/systemlog_20260811161639_20260811162131.log","stream":false,"timeout":180}
+    emsp/sys_manager/system_log/req/cmd_host {"cmd":"journalctl --rotate && journalctl --vacuum-files=1","stream":false,"timeout":180}
+    emsp/sys_manager/system_log/req/cmd_host {"cmd":"xz -f /edge/log/toupload/system/systemlog_20260811161639_20260811162131.log","stream":false,"timeout":180}
+    exit_code:0
+[PASS] TC17-1: MessageContext가 tid 불일치 cmd_host 응답을 거부함 (위조가 소비되면 후속 req의 파일 경로가 훼손됨=FAIL)
+[PASS] TC17-2: 위조 스팸 중에도 진짜 get_log_data 요청이 방해받지 않고 정상 완료됨 (응답 status=success)
+  $ xz --test /edge/log/toupload/system/systemlog_20260811161639_20260811162131.log.xz
+    exit_code:0
+
+결과: PASS=2  FAIL=0
+```
+
+캡처된 4건의 실제 cmd_host 요청 모두 파일 경로가 정상(`systemlog_20260811161639_20260811162131.log`, 단일 언더스코어) — 위조가 소비되지 않았음을 직접 증명. 신규 `.xz` 파일 생성 + `xz --test` 무결성까지 교차 확인됨.
+
+**참고:** 1차 실행(위 섹션)의 TC17-2 FAIL(timeout)이 이번 재실행에서는 재현되지 않았다. 동일 공격 패턴, TC17-2 판정 로직은 무변경인데 결과가 갈린 것으로 보아 1차 timeout은 일회성/저재현성 현상일 가능성이 있다 — 반복 실행으로 재현율 확인이 필요하면 추가 실행 권장.
+
+**TC17 spec(`tc_system_log.md`) 재검토는 보류 상태** — 소스코드상 tid 검증이 이미 존재하는 것으로 확인되어 spec의 결함 전제 자체를 다시 봐야 하지만, 이번 세션에서는 사용자 요청에 따라 판정 방식 교체까지만 진행함.
