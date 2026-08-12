@@ -35,3 +35,195 @@ Warning: Permanently added '192.168.10.25' (ECDSA) to the list of known hosts.
 ============================================
 exit=0
 RUN_END: 13:13:06
+
+############################################################
+# FILE: device_manager_run2/main.log (재작업 후 재실행, 2026-08-12)
+# TC01/TC02: /edge/app bind mount 없음 확인 후 SKIP 처리로 스크립트 수정
+# TC04: docker exec + host jq 파이프로 수정 후 실제 실행 성공
+# (구간 표시된 대용량 원본은 트리밍됨 — 각 dump_cmd 실행 자체는 실제 명령 결과)
+############################################################
+$ docker exec ac_system_gen2 sh -c 'jq --version' ; which jq
+sh: 1: jq: not found
+/usr/bin/jq
+jq-1.6-145-ga9f97e9e
+(=> jq는 호스트에만 있고 컨테이너 안엔 없음 — 모든 조회는 docker exec ... cat | jq 형태로 호스트 jq를 거쳐야 함)
+
+$ docker cp ac_system_gen2:/edge/app/files/commonfile/configuration.json /tmp/cfg_test.json && \
+  jq '.__tc_marker = "before_reboot_test"' /tmp/cfg_test.json > /tmp/cfg_test_marked.json && \
+  docker cp /tmp/cfg_test_marked.json ac_system_gen2:/edge/app/files/commonfile/configuration.json && \
+  docker exec ac_system_gen2 sh -c 'cat /edge/app/files/commonfile/configuration.json' | jq '.__tc_marker'
+"before_reboot_test"
+
+$ docker inspect ac_system_gen2 --format 'Created={{.Created}}'
+Created=2026-08-12 09:01:34.97307175 +0900 KST
+
+$ systemctl restart docker-loader; systemctl is-active docker-loader
+active
+
+$ docker inspect ac_system_gen2 --format 'Created={{.Created}}'
+Created=2026-08-12 09:32:36.19450957 +0900 KST
+(=> 컨테이너 재생성 확인 — Created 타임스탬프 변경)
+
+$ docker exec ac_system_gen2 sh -c 'cat /edge/app/files/commonfile/configuration.json' | jq '.__tc_marker'
+null
+(=> systemctl restart docker-loader 만으로도 /edge/app 밑 파일 수정이 유실됨 확인.
+    docker-loader.sh 의 "docker run --rm" + "docker rm -f" 재기동 로직 때문 —
+    /edge/app 은 /edge/devapp,/edge/db,/edge/log 와 달리 bind mount 안 됨.
+    => TC01/TC02는 이 DUT에서 자동화 불가로 SKIP 처리, tc_device_manager.md 참고)
+
+$ sh /tc_device_manager.sh --tc04  (수정된 스크립트, DUT에서 실행)
+
+============================================
+ device_manager TC
+ Wed Aug 12 09:40:27 KST 2026
+============================================
+=== TC04: 주기적 Read Data 처리 확인 ===
+  사전조건: register_map.json 에 operation:read + periodMs RegisterGroup 존재, 물리 디바이스 연결 필요
+  $ docker exec ac_system_gen2 cat /edge/app/files/commonfile/register_map.json | jq '.. | objects | select(.operation? and (.operation | index("read"))) | {id, operation, periodMs}'
+    {
+      "id": "read",
+      "operation": [
+        "read"
+      ],
+      "periodMs": 1000
+    }
+    {
+      "id": "read",
+      "operation": [
+        "read"
+      ],
+      "periodMs": null
+    }
+    exit_code:0
+  대상 periodMs=1000
+  device_cycle_data 알림 30초간 캡처 중...
+  $ cat /tmp/tc04_capture_5229.log (총 22개 메시지, 앞 2개/뒤 2개만 발췌, 각 줄 250자로 절단)
+    1786495230 emsp/device_manager/energy_link/noti/device_cycle_data [{"metricPath":"qcells_mcu/read/Meter_IC_Info_01/Instantaneous_Ext_Consumption_L2_RMS_Current","periodMs":1000,"value":6},{"metricPath":"qcells_mcu/read/Meter_IC_Info_01/Instantane
+    1786495232 emsp/device_manager/energy_link/noti/device_cycle_data [{"metricPath":"qcells_mcu/read/Meter_IC_Info_01/Instantaneous_Ext_Consumption_L2_RMS_Current","periodMs":1000,"value":5},{"metricPath":"qcells_mcu/read/Meter_IC_Info_01/Instantane
+    ... (18개 메시지 생략) ...
+    1786495257 emsp/device_manager/energy_link/noti/device_cycle_data [{"metricPath":"qcells_mcu/read/Meter_IC_Info_01/Instantaneous_Ext_Consumption_L2_RMS_Current","periodMs":1000,"value":5},{"metricPath":"qcells_mcu/read/Meter_IC_Info_01/Instantane
+    1786495258 emsp/device_manager/energy_link/noti/device_cycle_data [{"metricPath":"qcells_mcu/read/Meter_IC_Info_01/Instantaneous_Ext_Consumption_L2_RMS_Current","periodMs":1000,"value":6},{"metricPath":"qcells_mcu/read/Meter_IC_Info_01/Instantane
+    exit_code:0
+  msg_count=22 avg_interval_ms=1333
+[PASS] TC04-1: device_cycle_data 알림 2회 이상 수신
+[FAIL] TC04-2: 평균 수신 간격이 periodMs ±20% 이내
+  $ journalctl -u docker-loader --since 2026-08-12 09:40:29  (총 570줄, WatchDog/텔레메트리 반복 로그 다수 → 발췌)
+    Aug 12 09:40:29 qcells-emsplus docker-loader[4080]: [09:40:29:001][D][DM] TelemetryPublisher::publish_on_demand_read_group entry prefix=qcells_mcu/onDemandRead/MCU_Status/ target=device_log
+    Aug 12 09:40:29 qcells-emsplus docker-loader[4080]: [09:40:29:002][D][DM] DataCenter::snapshot_on_demand_read_group entry prefix=qcells_mcu/onDemandRead/MCU_Status/
+    Aug 12 09:40:29 qcells-emsplus docker-loader[4080]: [09:40:29:017][D][EL] [SPIConnection] Write register succeeded at 0x824a
+    Aug 12 09:40:29 qcells-emsplus docker-loader[4080]: [09:40:29:047][D][DM] SpiManager::append_mcu_text_chunk entry chunk_size=0
+    ... (560여 줄 생략, 정상 폴링/WatchDog 로그 반복) ...
+  $ (TC04-3 판정용) journalctl 결과 중 [EL] + "Failed to read" grep
+    (매치 없음 → Read 에러 로그 없음 확인)
+    exit_code:0
+[PASS] TC04-3: Read 에러 로그 없음
+
+============================================
+ 결과: PASS=2  FAIL=1
+============================================
+
+============================================
+ device_manager TC
+ Wed Aug 12 09:43:51 KST 2026
+============================================
+=== TC01: SKIP — 이 DUT에서 자동화 불가 (환경 제약) ===
+  사유: configuration.json이 있는 /edge/app/files/commonfile/은 호스트에
+  bind mount 안 됨 -> docker-loader.sh가 컨테이너를 --rm으로 재기동할 때마다
+  이미지의 pristine 상태로 되돌아감. 파일 수정 -> reboot 반영 검증 불가.
+  상세 근거: tc_device_manager.md TC01 절 참고. reboot 실행하지 않음.
+
+============================================
+ 결과: PASS=0  FAIL=0
+============================================
+---
+============================================
+ device_manager TC
+ Wed Aug 12 09:43:51 KST 2026
+============================================
+=== TC01-POST: SKIP (TC01-PRE가 자동화 불가라 실행 대상 없음) ===
+
+============================================
+ 결과: PASS=0  FAIL=0
+============================================
+---
+============================================
+ device_manager TC
+ Wed Aug 12 09:43:51 KST 2026
+============================================
+=== TC02: SKIP — 이 DUT에서 자동화 불가 (TC01과 동일 환경 제약) ===
+  상세 근거: tc_device_manager.md TC02 절 참고. reboot 실행하지 않음.
+
+============================================
+ 결과: PASS=0  FAIL=0
+============================================
+---
+============================================
+ device_manager TC
+ Wed Aug 12 09:43:51 KST 2026
+============================================
+=== TC02-POST: SKIP (TC02-PRE가 자동화 불가라 실행 대상 없음) ===
+
+============================================
+ 결과: PASS=0  FAIL=0
+============================================
+
+RUN_END: 09:43:52
+
+############################################################
+# FILE: device_manager_run2/tc03_post.log (TC03-pre/post, reboot 1사이클, 2026-08-12)
+# TC03_SAVE를 /tmp에서 /edge/log/로 옮긴 이유: --tc03-pre 저장 직후 reboot로
+# /tmp의 state 파일이 유실되는 걸 이번 실행에서 실측 확인 (아래 tc03-pre 로그의
+# T0=2026-08-12 09:46:39 와, reboot 후 재확인 시 /tmp/tc_device_manager_tc03_state
+# 파일 부재가 근거 — 수동으로 /edge/log/.tc_device_manager_tc03_state 에 같은 T0를
+# 복원해 --tc03-post 를 이어감. 스크립트는 이후 재실행부터 /edge/log/ 경로로 자동 저장)
+############################################################
+$ sh /tmp/tc_device_manager.sh --tc03-pre
+============================================
+ device_manager TC
+ Wed Aug 12 09:46:37 KST 2026
+============================================
+=== TC03-PRE: 정상 파일 상태로 reboot 준비 ===
+  사전조건: TC02 teardown으로 configuration.json/register_map.json 정상 복원 완료
+  $ docker exec ac_system_gen2 ls -la /edge/app/files/commonfile/configuration.json /edge/app/files/commonfile/register_map.json
+    -rw-r--r-- 1 root root  226169 Nov 15  2022 /edge/app/files/commonfile/configuration.json
+    -rw-r--r-- 1 root root 1271179 Nov 15  2022 /edge/app/files/commonfile/register_map.json
+    exit_code:0
+  $ docker exec ac_system_gen2 cat /edge/app/files/commonfile/configuration.json | jq empty (JSON 파싱 유효성만 확인, 무출력=OK)
+    exit_code:0
+  $ docker exec ac_system_gen2 cat /edge/app/files/commonfile/register_map.json | jq empty (JSON 파싱 유효성만 확인, 무출력=OK)
+    exit_code:0
+  T0=2026-08-12 09:46:39 저장 (/tmp/tc_device_manager_tc03_state)
+
+[TC03-PRE 완료] reboot 실행 중... 재접속 후 --tc03-post 실행
+Connection to 192.168.10.25 closed by remote host.
+(=> reboot 실행됨. /tmp/tc_device_manager_tc03_state 는 /tmp(ramdisk)에 저장돼
+    reboot로 유실 — 재접속 후 /edge/log/.tc_device_manager_tc03_state 에 같은
+    T0을 수동 복원한 뒤 --tc03-post 진행. 스크립트는 이 실행을 계기로
+    TC03_SAVE 경로를 /edge/log/ 로 수정함, 위 "재작업" 절 참고)
+
+$ sh /tmp/tc_device_manager.sh --tc03-post
+============================================
+ device_manager TC
+ Wed Aug 12 09:57:56 KST 2026
+============================================
+  $ journalctl -u docker-loader --since 2026-08-12 09:46:39 (총 14000+ 줄 → [DM]/[EL] Site data ready 매치 라인만 발췌)
+    Aug 12 09:47:17 qcells-emsplus docker-loader[587]: [09:47:17:829][I][EL] Site data ready, creating devices
+    Aug 12 09:47:24 qcells-emsplus docker-loader[587]: [09:47:23:651][I][DM] Site data ready, start connection threads
+    ... (나머지 생략, 정상 폴링/텔레메트리 반복 로그) ...
+[PASS] TC03-1: site data ready 로그 존재
+  $ echo $config_resp | jq -e '.payload | length > 0'  (get_configuration_json 응답, 226KB → 앞부분 300자만 발췌)
+  $ echo {"error_code":"NONE","payload":{"commonTelemetryVer":"1.1","deviceList":[{"connectionInfos":[{"protocols":[{"config":{"interface":"/dev/spidev2.0"},"protocol":"QcellsSPI","registerMapId":"qcells_mcu","rid":"bdeaca72-cffd-45ec-9d1b-bdab714c3673","timeoutMs":0},{"config":{"baudRate":500000,"c
+    exit_code:0
+[PASS] TC03-2: configuration 응답 비어있지 않음
+  $ echo $regmap_resp | jq -e '.payload | length > 0'  (get_register_map_json 응답, 1.27MB → 앞부분 300자만 발췌)
+  $ echo {"error_code":"NONE","payload":{"protocolVersion":{"can":"0.99","installDoc":"1.67","jf2":"2.8.4.8","spi":"1.02"},"registerMaps":[{"id":"qcells_mcu","protocol":"QcellsSPI","registerGroups":[{"id":"onDemandWrite","operation":["onDemandWrite"],"periodMs":0,"registers":[{"id":"MCU_Rebooting_CM
+    exit_code:0
+[PASS] TC03-3: register_map 응답 비어있지 않음
+
+============================================
+ TC03 결과: PASS=3  FAIL=0
+============================================
+
+============================================
+ 결과: PASS=3  FAIL=0
+============================================

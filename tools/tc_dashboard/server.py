@@ -292,29 +292,32 @@ CUSTOM_TC_TIMEOUTS_DB_MANAGER = {
 }  # TC06은 reboot로 세션이 끊겨 미포함 (--tc06-pre/-post 전용 버튼만 사용)
 
 CATALOG_DEVICE_MANAGER = [
-    {"id": "default", "label": "전체 실행 (TC01~TC05, 재부팅/스텁 TC 제외)", "flag": None,
+    {"id": "default", "label": "전체 실행 (TC04~TC05만, TC01~TC03은 환경 제약/재부팅으로 제외)", "flag": None,
      "timeout": 600, "reboot": False,
-     "note": "각 TC 개별 버튼은 아래 참고 — 재부팅을 수반하는 TC는 default에 포함되지 않고 개별 -pre/-post 버튼으로 실행"},
-    {"id": "tc01-pre", "label": "TC01-pre configuration.json 신규 Protocol 추가 → 코드 수정 없이 연결 시도 확인", "flag": "--tc01-pre",
-     "timeout": 180, "reboot": True, "note": None},
-    {"id": "tc01-post", "label": "TC01-post configuration.json 신규 Protocol 추가 → 코드 수정 없이 연결 시도 확인", "flag": "--tc01-post",
-     "timeout": 180, "reboot": False, "note": None},
-    {"id": "tc02-pre", "label": "TC02-pre configuration.json / register_map.json 부재 시 부팅 동작", "flag": "--tc02-pre",
-     "timeout": 180, "reboot": True, "note": "검토 필요 — 원본 로그 태그 불일치"},
-    {"id": "tc02-post", "label": "TC02-post configuration.json / register_map.json 부재 시 부팅 동작", "flag": "--tc02-post",
-     "timeout": 180, "reboot": False, "note": "검토 필요 — 원본 로그 태그 불일치"},
+     "note": "TC01/TC02는 환경 제약으로 SKIP 전용, TC03은 reboot 수반이라 default에 포함 안 됨 — 각각 아래 개별 -pre/-post 버튼으로 실행"},
+    {"id": "tc01-pre", "label": "TC01-pre [SKIP] configuration.json 신규 Protocol 추가 → 코드 수정 없이 연결 시도 확인", "flag": "--tc01-pre",
+     "timeout": 60, "reboot": False,
+     "note": "이 DUT에서 자동화 불가(환경 제약, 2026-08-12 확정) — /edge/app이 호스트에 bind mount 안 돼 파일 수정이 컨테이너 재기동(reboot 포함)을 못 버팀. 버튼을 눌러도 SKIP 안내만 출력하고 reboot는 실행하지 않음. tc_device_manager.md 참고"},
+    {"id": "tc01-post", "label": "TC01-post [SKIP] configuration.json 신규 Protocol 추가 → 코드 수정 없이 연결 시도 확인", "flag": "--tc01-post",
+     "timeout": 60, "reboot": False, "note": "TC01-pre가 SKIP이므로 실행 대상 없음 — 안내만 출력"},
+    {"id": "tc02-pre", "label": "TC02-pre [SKIP] configuration.json / register_map.json 부재 시 부팅 동작", "flag": "--tc02-pre",
+     "timeout": 60, "reboot": False,
+     "note": "TC01과 동일한 환경 제약으로 SKIP — 버튼을 눌러도 SKIP 안내만 출력하고 reboot는 실행하지 않음. 원본 로그 태그 불일치 검토도 별도 필요"},
+    {"id": "tc02-post", "label": "TC02-post [SKIP] configuration.json / register_map.json 부재 시 부팅 동작", "flag": "--tc02-post",
+     "timeout": 60, "reboot": False, "note": "TC02-pre가 SKIP이므로 실행 대상 없음 — 안내만 출력"},
     {"id": "tc03-pre", "label": "TC03-pre configuration.json / register_map.json 정상 로드 확인", "flag": "--tc03-pre",
      "timeout": 180, "reboot": True, "note": None},
     {"id": "tc03-post", "label": "TC03-post configuration.json / register_map.json 정상 로드 확인", "flag": "--tc03-post",
      "timeout": 180, "reboot": False, "note": None},
     {"id": "tc04", "label": "TC04 주기적 Read Data 처리", "flag": "--tc04",
-     "timeout": 180, "reboot": False, "note": "검토 필요 — 실제 폴링 루프는 energy_link 소관"},
+     "timeout": 180, "reboot": False, "note": "검토 필요 — 실제 폴링 루프는 energy_link 소관. 2026-08-12 실측: PASS=2/FAIL=1(TC04-2, periodMs=1000 대비 avg_interval_ms=1333)"},
     {"id": "tc05", "label": "TC05 자동화 불가 / 검토 필요 항목 목록", "flag": "--tc05",
      "timeout": 180, "reboot": False, "note": None},
 ]
 CUSTOM_TC_TIMEOUTS_DEVICE_MANAGER = {
     "TC04": 180, "TC05": 180,
-}  # TC01~03은 reboot로 세션이 끊겨 미포함 (--tcNN-pre/-post 전용 버튼만 사용)
+}  # TC01/TC02는 환경 제약(SKIP)이라 default 미포함, TC03은 reboot로 세션이 끊겨 미포함
+   # (각각 -pre/-post 전용 버튼만 사용)
 
 CATALOG_AZURE_CONNECTOR = [
     {"id": "default", "label": "전체 실행 (TC01~TC12, 재부팅/스텁 TC 제외)", "flag": None,
@@ -560,7 +563,7 @@ def _write_meta(run_dir: Path, meta: dict):
     (run_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2))
 
 
-ASSERT_RE = re.compile(r"^\[(PASS|FAIL)\]\s+TC(\d+)-(\d+):\s*(.*)$")
+ASSERT_RE = re.compile(r"^\[(PASS|FAIL|SKIP)\]\s+TC(\d+)-(\d+):\s*(.*)$")
 REASON_RE = re.compile(r"^\[REASON\]\s*(.*)$")
 
 
@@ -1312,10 +1315,14 @@ async def run_tc(run_id: str, app_cfg: dict, entry: dict, channel: str = "ssh"):
             meta["status"] = "timeout"
         elif fail_n > 0:
             meta["status"] = "fail"
-        elif pass_n == 0:
+        elif not cases:
             # exit_code가 0이어도(예: 시리얼 결과 dump가 노이즈로 깨진 경우) 파싱된 케이스가
             # 하나도 없으면 "결과 없음"이지 "pass"가 아니다.
             meta["status"] = "error"
+        elif pass_n == 0:
+            # cases는 있지만 전부 SKIP(자동화 불가/환경 제약)인 경우 — "결과 없음"과
+            # 달리 실제로 정상 실행되어 의도한 SKIP 판정이 난 것이므로 error가 아니다.
+            meta["status"] = "skip"
         else:
             meta["status"] = "pass"
         meta["finished_at"] = datetime.now().isoformat(timespec="seconds")
@@ -1368,7 +1375,14 @@ def _reconcile_stale_runs():
             meta["finished_at"] = finished_at
             if SUMMARY_RE.search(text):
                 meta["exit_code"] = 0 if fail_n == 0 else 1
-                meta["status"] = "rebooted" if entry.get("reboot") else ("fail" if fail_n > 0 else "pass")
+                if entry.get("reboot"):
+                    meta["status"] = "rebooted"
+                elif fail_n > 0:
+                    meta["status"] = "fail"
+                elif pass_n == 0 and cases:
+                    meta["status"] = "skip"
+                else:
+                    meta["status"] = "pass"
                 if cases:
                     _update_latest_status(app_cfg["status_file"], meta["run_id"], meta, cases)
             else:

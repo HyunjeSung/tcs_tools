@@ -63,9 +63,41 @@ IPC 응답/알림(`SERVICE_GET_CONFIGURATION_JSON`, `SERVICE_GET_REGISTER_MAP_JS
 > 초기화하고, TC02/TC03/TC04는 실제 `reboot`를 수행한다. 시리얼 콘솔(COM7) 사용을
 > 권장하며(SSH는 reboot 시 끊김), 시험 전 site JSON 파일을 반드시 백업할 것.
 
+> **환경 제약 — TC01/TC02 이 DUT에서 자동화 불가 (2026-08-12 확인):**
+> `configuration.json`/`register_map.json`은 `ac_system_gen2` 컨테이너 이미지에
+> baked-in된 파일이며(`docker exec` 로만 접근 가능, `jq`는 컨테이너 안에 없어 항상
+> `docker exec ac_system_gen2 cat <path> | jq ...`로 호스트 jq를 거쳐야 함), 이 경로
+> (`/edge/app`)는 `/edge/devapp`·`/edge/db`·`/edge/log`와 달리 **호스트에 bind mount
+> 되어 있지 않다**. `docker-loader.sh`(`ExecStart=/etc/edge/docker-loader.sh`)가
+> 컨테이너를 `docker run --rm`으로 기동하기 때문에, reboot든
+> `systemctl restart docker-loader`든 컨테이너가 재생성되는 순간 이 경로 밑 파일은
+> 항상 이미지의 pristine 상태로 되돌아간다.
+>
+> 실측(2026-08-12): `docker cp`로 `configuration.json`에 `__tc_marker` 필드를
+> 삽입 → 값 확인(`"before_reboot_test"`) → `systemctl restart docker-loader`
+> 실행 → `docker inspect ac_system_gen2 --format '{{.Created}}'` 타임스탬프가
+> `09:01:34` → `09:32:36`으로 변경(컨테이너 재생성 확인) → 같은 파일 재조회 시
+> `__tc_marker` 값이 `null`로 초기화됨을 확인.
+>
+> `db_manager` 소스(`edge_site_json_data.hpp` `kConfigurationFilePath`,
+> `db_manager.cpp` `init_configuration()`/`init_register_map()`)를 보면 이 파일이
+> boot/factory_reset마다 다시 읽히는 **진짜 source of truth**가 맞다 — 즉 TC01/TC02가
+> "파일 수정 → reboot → 반영 확인"으로 설계된 접근 자체는 타당하다. 문제는 순수히
+> 이 DUT의 컨테이너 기동 방식(bind mount 누락)이 파일 수정의 영속성을 깨뜨린다는
+> 점이다. 이게 이 테스트보드만의 프로비저닝 누락인지, 실제 양산 배포에서도
+> `/edge/app`이 bind mount 안 되는 게 정상(=제품이 사이트 설정을 애초에 이렇게
+> 매 재부팅마다 리셋하도록 설계됨, 잠재적 제품 버그일 수도 있음)인지는 **개발자
+> 확인 필요** — 아래 TC01/TC02는 이 DUT 기준으로는 SKIP 처리한다
+> (`tc_device_manager.sh`의 `tc01_pre`/`tc02_pre`도 SKIP 안내만 출력하고 reboot를
+> 실행하지 않도록 수정됨).
+
 ---
 
-## TC01 — configuration.json 신규 Protocol 추가 → 코드 수정 없이 연결 시도 확인
+## TC01 — configuration.json 신규 Protocol 추가 → 코드 수정 없이 연결 시도 확인 (이 DUT에서 SKIP — 환경 제약)
+
+> **SKIP (2026-08-12):** 위 "환경 제약" 절 참고. `/edge/app`이 호스트에 bind mount
+> 안 돼 있어 이 DUT에서는 파일 수정이 reboot를 못 버틴다 — 아래 절차/PASS-FAIL
+> Criteria는 설계 의도 기록용으로 남기며, 실제 실행 대상이 아니다.
 
 ### 목적
 
@@ -126,7 +158,10 @@ IPC 응답/알림(`SERVICE_GET_CONFIGURATION_JSON`, `SERVICE_GET_REGISTER_MAP_JS
 
 ---
 
-## TC02 — configuration.json / register_map.json 부재 시 부팅 동작 (검토 필요 — 원본 로그 태그 불일치)
+## TC02 — configuration.json / register_map.json 부재 시 부팅 동작 (이 DUT에서 SKIP — 환경 제약, 원본 로그 태그 불일치도 별도 검토 필요)
+
+> **SKIP (2026-08-12):** 위 "환경 제약" 절 참고. TC01과 동일 사유 — 아래 절차/
+> PASS-FAIL Criteria는 설계 의도 기록용으로 남기며, 실제 실행 대상이 아니다.
 
 > 원본 요구사항은 "[EL] message"와 "Web HMI Energy Link 로그 레벨"을 근거로 들지만,
 > 소스 코드 확인 결과 site JSON **파일 자체를 읽어 부재를 감지·로깅**하는 주체는
@@ -327,9 +362,9 @@ IPC 응답/알림(`SERVICE_GET_CONFIGURATION_JSON`, `SERVICE_GET_REGISTER_MAP_JS
 
 | TC | 등급 | 비고 |
 |----|------|------|
-| TC01 | A (자동) | configuration.json 수정 + reboot + 로그/IPC 응답 검증, 물리 디바이스 불필요 |
-| TC02 | A (자동, 파괴적) | factory_reset + 파일 은닉 + reboot, 테어다운으로 원복 |
-| TC03 | A (자동) | TC02의 대조군, 정상 파일 상태 검증 |
+| TC01 | 이 DUT에서 자동화 불가 (환경 제약) | 설계 자체는 A급(물리 디바이스 불필요)이었으나 `/edge/app` bind mount 누락으로 파일 수정이 reboot를 못 버팀 — 위 "환경 제약" 절 참고 |
+| TC02 | 이 DUT에서 자동화 불가 (환경 제약) | TC01과 동일 사유 |
+| TC03 | A (자동) | TC02의 대조군, 정상 파일 상태 검증 (파일을 수정하지 않으므로 위 환경 제약과 무관 — 재부팅해도 항상 pristine 상태로 정상 로드됨을 확인하는 셈) |
 | TC04 | B (하드웨어 의존) | 실제 Modbus/CAN/SPI 디바이스 연결 필요, 판정 주체가 energy_link일 가능성 — 개발자 확인 후 재배치 검토 |
 | TC05 | 자동화 불가 | 목록만 제공, 실행은 QA 수동 또는 개발자 확인 |
 

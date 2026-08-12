@@ -119,6 +119,7 @@
   .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
   .badge.PASS, .badge.pass { background: rgba(46,204,113,.15); color: var(--pass); }
   .badge.FAIL, .badge.fail { background: rgba(231,76,60,.15); color: var(--fail); }
+  .badge.SKIP, .badge.skip { background: rgba(243,156,18,.15); color: var(--warn); }
   .badge.running { background: rgba(77,141,255,.15); color: var(--accent); }
   .badge.timeout, .badge.error { background: rgba(243,156,18,.15); color: var(--warn); }
   .badge.rebooted { background: rgba(243,156,18,.15); color: var(--warn); }
@@ -529,7 +530,9 @@ async function refreshStatus() {
   const entries = Object.entries(status).sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }));
   let pass = 0, fail = 0, lastAt = null;
   const rows = entries.map(([caseId, v]) => {
-    if (v.status === 'PASS') pass++; else fail++;
+    // SKIP(자동화 불가/환경 제약)은 PASS도 FAIL도 아니므로 카드 집계에서 제외 —
+    // 현황판 표에는 그대로 노출되지만 요약 카운트는 실제 판정된 case만 반영한다.
+    if (v.status === 'PASS') pass++; else if (v.status === 'FAIL') fail++;
     if (!lastAt || v.at > lastAt) lastAt = v.at;
     return { ...v, case: caseId };
   });
