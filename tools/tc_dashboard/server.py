@@ -194,7 +194,7 @@ CATALOG_UPDATE_MONITOR = [
      "timeout": 180, "reboot": False, "note": None},
     {"id": "tc04", "label": "TC04 Firmware Download 세션 영속화 및 프로세스 재시작 후 Resume", "flag": "--tc04",
      "timeout": 180, "reboot": False, "note": None},
-    {"id": "tc05", "label": "TC05 리소스 사전 점검 설정", "flag": "--tc05",
+    {"id": "tc05", "label": "TC05 [SKIP] 리소스 사전 점검 설정", "flag": "--tc05",
      "timeout": 180, "reboot": False, "note": "검토 필요 — 소스 내 미확인"},
     {"id": "tc06", "label": "TC06 다운로드 중 네트워크 단절 시 재시도", "flag": "--tc06",
      "timeout": 180, "reboot": False, "note": None},
@@ -248,7 +248,7 @@ CATALOG_SYS_MANAGER = [
      "timeout": 180, "reboot": False, "note": "request_system_reboot → sys_manager → host_agent"},
     {"id": "tc13", "label": "TC13 LED 밝기 경계값 제어", "flag": "--tc13",
      "timeout": 180, "reboot": False, "note": "sysfs 직접"},
-    {"id": "tc14", "label": "TC14 LED 상태 시나리오 (부팅/업데이트/네트워크/클라우드/운영 모드) —", "flag": "--tc14",
+    {"id": "tc14", "label": "TC14 [SKIP] LED 상태 시나리오 (부팅/업데이트/네트워크/클라우드/운영 모드)", "flag": "--tc14",
      "timeout": 180, "reboot": False, "note": "검토 필요 — 소스 내 일부만 확인"},
     {"id": "tc15", "label": "TC15 LED 제어", "flag": "--tc15",
      "timeout": 180, "reboot": False, "note": "밝기 0~255 + RGB 색상, IPC 경유"},
@@ -271,7 +271,7 @@ CATALOG_DB_MANAGER = [
      "timeout": 180, "reboot": False, "note": "update_records 즉시 반영"},
     {"id": "tc04", "label": "TC04 System Setting 변경 정보 즉시 반영", "flag": "--tc04",
      "timeout": 180, "reboot": False, "note": "Log Level"},
-    {"id": "tc05", "label": "TC05 Persistent State 부팅 시점 정보 전달", "flag": "--tc05",
+    {"id": "tc05", "label": "TC05 [SKIP] Persistent State 부팅 시점 정보 전달", "flag": "--tc05",
      "timeout": 180, "reboot": False, "note": "검토 필요 — 로그 태그 불일치"},
     {"id": "tc06-pre", "label": "TC06-pre System Setting 부팅 시점 정보 전달", "flag": "--tc06-pre",
      "timeout": 180, "reboot": True, "note": "Log Level 재부팅 후 유지"},
@@ -323,7 +323,7 @@ CATALOG_AZURE_CONNECTOR = [
     {"id": "default", "label": "전체 실행 (TC01~TC12, 재부팅/스텁 TC 제외)", "flag": None,
      "timeout": 600, "reboot": False,
      "note": "각 TC 개별 버튼은 아래 참고 — 재부팅을 수반하는 TC는 default에 포함되지 않고 개별 -pre/-post 버튼으로 실행"},
-    {"id": "tc01", "label": "TC01 TLS 1.2 이상 지원", "flag": "--tc01",
+    {"id": "tc01", "label": "TC01 [SKIP] TLS 1.2 이상 지원", "flag": "--tc01",
      "timeout": 180, "reboot": False, "note": "검토 필요 — 런타임 negotiated 버전 로그 없음"},
     {"id": "tc02", "label": "TC02 Device Provisioning: edge_device_id 설정 및 DPS 등록 트리거", "flag": "--tc02",
      "timeout": 180, "reboot": False, "note": "로컬 프로토콜 레벨"},
@@ -331,7 +331,7 @@ CATALOG_AZURE_CONNECTOR = [
      "timeout": 180, "reboot": False, "note": None},
     {"id": "tc04", "label": "TC04 인증서 파일 삭제 시 재발급 동작 확인", "flag": "--tc04",
      "timeout": 180, "reboot": False, "note": None},
-    {"id": "tc05", "label": "TC05 인증서 만료 임박 시 Re-Enroll", "flag": "--tc05",
+    {"id": "tc05", "label": "TC05 [SKIP] 인증서 만료 임박 시 Re-Enroll", "flag": "--tc05",
      "timeout": 180, "reboot": False, "note": "검토 필요 — 24시간+ 실시간 대기 필요"},
     {"id": "tc06", "label": "TC06 Blob Storage 업로드", "flag": "--tc06",
      "timeout": 180, "reboot": False, "note": "로컬 프로토콜/로그 레벨"},
@@ -379,7 +379,7 @@ CATALOG_EDGE_RUNTIME = [
      "timeout": 180, "reboot": False, "note": "파괴적, conf 변경 + 컨테이너 재시작"},
     {"id": "tc12", "label": "TC12 실행 중인 필수 Application 프로세스 목록 확인", "flag": "--tc12",
      "timeout": 180, "reboot": False, "note": "비파괴적"},
-    {"id": "tc13", "label": "TC13 Configuration 기반 Project(non-uniep) Application 실행", "flag": "--tc13",
+    {"id": "tc13", "label": "TC13 [SKIP] Configuration 기반 Project(non-uniep) Application 실행", "flag": "--tc13",
      "timeout": 180, "reboot": False, "note": "검토 필요 — 대상 conf 사전 확인"},
     {"id": "tc14", "label": "TC14 자동화 불가 항목 목록", "flag": "--tc14",
      "timeout": 180, "reboot": False, "note": None},
@@ -396,11 +396,11 @@ CATALOG_WEB_INTERFACE = [
      "note": "각 TC 개별 버튼은 아래 참고 — 재부팅을 수반하는 TC는 default에 포함되지 않고 개별 -pre/-post 버튼으로 실행"},
     {"id": "tc01", "label": "TC01 API 문서 제공", "flag": "--tc01",
      "timeout": 180, "reboot": False, "note": "Swagger/OpenAPI 문서 서버"},
-    {"id": "tc02", "label": "TC02 MQTT Disconnect 시 Error Response 처리", "flag": "--tc02",
+    {"id": "tc02", "label": "TC02 [SKIP] MQTT Disconnect 시 Error Response 처리", "flag": "--tc02",
      "timeout": 180, "reboot": False, "note": "검토 필요 — 원본 Action 미기재"},
     {"id": "tc03", "label": "TC03 MQTT-HTTP Bridge 지원", "flag": "--tc03",
      "timeout": 180, "reboot": False, "note": None},
-    {"id": "tc04", "label": "TC04 로깅 보안 (민감 정보 마스킹)", "flag": "--tc04",
+    {"id": "tc04", "label": "TC04 [SKIP] 로깅 보안 (민감 정보 마스킹)", "flag": "--tc04",
      "timeout": 180, "reboot": False, "note": "검토 필요 — 마스킹 로직 위치 미확인"},
     {"id": "tc05", "label": "TC05 JWT 토큰 검증", "flag": "--tc05",
      "timeout": 180, "reboot": False, "note": None},
@@ -449,7 +449,7 @@ CATALOG_ENERGY_MONITOR = [
      "timeout": 180, "reboot": False, "note": None},
     {"id": "tc07", "label": "TC07 Telemetry 수신", "flag": "--tc07",
      "timeout": 180, "reboot": False, "note": "IPC 프로토콜 레벨"},
-    {"id": "tc08", "label": "TC08 자동화 불가 항목 목록", "flag": "--tc08",
+    {"id": "tc08", "label": "TC08 [SKIP] 자동화 불가 항목 목록", "flag": "--tc08",
      "timeout": 180, "reboot": False, "note": "Azure IoT Hub Explorer 클라우드 포털 확인"},
 ]
 CUSTOM_TC_TIMEOUTS_ENERGY_MONITOR = {
@@ -545,7 +545,7 @@ app = FastAPI(title="AC Gen2 EMS TC Dashboard")
 
 # 물리적으로 DUT가 하나뿐이라 앱이 달라도 SSH/시리얼 채널을 동시에 쓸 수 없다 —
 # run 동시성 제한은 앱별이 아니라 전역으로 건다.
-current_run = {"run_id": None}
+current_run = {"run_id": None, "proc": None, "cancelled": False}
 
 
 class RunRequest(BaseModel):
@@ -567,7 +567,44 @@ ASSERT_RE = re.compile(r"^\[(PASS|FAIL|SKIP)\]\s+TC(\d+)-(\d+):\s*(.*)$")
 REASON_RE = re.compile(r"^\[REASON\]\s*(.*)$")
 
 
-def _parse_results(text: str):
+EXPECTED_CASE_RE = re.compile(r'assert\s+"(TC\d+-\d+):\s*([^"]*)"')
+TC_BANNER_RE = re.compile(r"^===\s*(TC\d+)")
+
+
+def _expected_cases(app_cfg: dict) -> dict:
+    """스크립트가 만들어낼 수 있는 모든 sub-case id -> desc (분기 조건 무시하고 전체 스캔).
+
+    사전조건 미충족으로 이번 run에서 assert()가 한 번도 안 불린 sub-case를 찾아내기
+    위한 "기대 집합". PASS/FAIL 양쪽 분기에 보통 같은 desc 리터럴이 쓰이므로 어느
+    쪽에서 스캔되든 상관없다. `assert "TCxx-${var}: ..."`처럼 sub-id를 쉘 변수로
+    동적 생성하는 스크립트(update_monitor TC02, system_log TC04)는 리터럴 매칭이
+    안 되어 자동으로 이 집합에서 빠진다 — 오탐(false SKIP)은 없고 그 TC들만
+    조용히 이 기능의 적용 대상에서 제외될 뿐이다.
+    """
+    try:
+        text = app_cfg["tc_script"].read_text()
+    except Exception:
+        return {}
+    return dict(EXPECTED_CASE_RE.findall(text))
+
+
+def _attempted_tc_numbers(text: str) -> set:
+    """output.log에서 실행된(배너가 찍힌) TC 번호 집합.
+
+    사전조건이 실패해도 각 TC 함수 맨 앞의 `echo "=== TCxx: ..."` 배너는 무조건
+    먼저 실행되므로, 이 집합이 "이번 run의 실행 범위"를 신뢰성 있게 말해준다 —
+    `_split_log_by_tc()`가 같은 배너를 다른 목적(journal 필터링)으로 이미
+    파싱하는 것과 동일한 신호(TC_SECTION_RE 참고).
+    """
+    numbers = set()
+    for line in text.splitlines():
+        m = TC_BANNER_RE.match(line.strip())
+        if m:
+            numbers.add(m.group(1))
+    return numbers
+
+
+def _parse_results(text: str, app_cfg: Optional[dict] = None):
     # case_id로 dedup — 시리얼 채널은 tee로 살린 라이브 스트림과 최종 base64 디코딩본에
     # 같은 [PASS]/[FAIL] 블록이 두 번 나타날 수 있어(_tail_serial_log 참고), 같은 case가
     # 중복 매칭되면 나중 것(더 뒤에 오는 최종 디코딩본, 항상 깨끗함)으로 덮어써 한 번만 센다.
@@ -589,6 +626,27 @@ def _parse_results(text: str):
         rm = REASON_RE.match(stripped)
         if rm and order:
             cases_map[order[-1]]["reason"] = rm.group(1)
+
+    # 사전조건 미충족으로 assert() 자체가 안 불린 sub-case를 SKIP으로 보충한다.
+    # 이 TC 번호의 배너가 이번 run에 등장했는데(=실행 범위에 포함) 기대 sub-case
+    # 중 실제로 판정되지 않은 게 있으면 SKIP — PASS/FAIL 카운트에는 안 들어간다.
+    #
+    # 반드시 "완료된" run에만 적용한다 — SUMMARY_RE(최종 "결과: PASS=X FAIL=Y" 줄)가
+    # 없으면 아직 실행 중이거나 중간에 끊긴 로그라, 그저 "아직 안 온" sub-case까지
+    # "영원히 판정 안 될 SKIP"으로 오판하게 된다(2026-08-13 실측: system_log 진행 중인
+    # run의 TC02-1/2가 서비스 재시작 대기 단계에서 SKIP으로 잘못 표시됨).
+    if app_cfg is not None and SUMMARY_RE.search(text):
+        attempted = _attempted_tc_numbers(text)
+        for sub_id, desc in _expected_cases(app_cfg).items():
+            tc_no = sub_id.split("-", 1)[0]
+            if tc_no in attempted and sub_id not in cases_map:
+                order.append(sub_id)
+                cases_map[sub_id] = {
+                    "tc": tc_no, "case": sub_id, "status": "SKIP",
+                    "desc": desc,
+                    "reason": "사전조건 미충족 — 로그의 해당 TC 블록 [SKIP] 안내 참고",
+                }
+
     cases = [cases_map[cid] for cid in order]
     pass_n = sum(1 for c in cases if c["status"] == "PASS")
     fail_n = sum(1 for c in cases if c["status"] == "FAIL")
@@ -657,7 +715,7 @@ def _generate_result_md(app_cfg: dict, run_id: str, meta: dict, cases: list,
         f"**DUT:** {DUT_HOST} (qcells-emsplus, AC Gen2, aarch64)",
         f"**스크립트:** {app_cfg['tc_script'].name}",
         "",
-        f"**총 결과: PASS={meta.get('pass', 0)} / FAIL={meta.get('fail', 0)} / {len(cases)}기준**",
+        f"**총 결과: PASS={meta.get('pass', 0)} / FAIL={meta.get('fail', 0)} / SKIP={meta.get('skip', 0)} / {len(cases)}기준**",
         "",
         "| TC | 결과 |",
         "|----|------|",
@@ -808,7 +866,7 @@ def _rebuild_latest_status(app_cfg: dict):
         log_path = run_dir / "output.log"
         if not log_path.exists():
             continue
-        _, _, cases = _parse_results(log_path.read_text(errors="replace"))
+        _, _, cases = _parse_results(log_path.read_text(errors="replace"), app_cfg)
         if cases:
             _merge_case_status(status_map, run_dir.name, meta, cases)
 
@@ -956,6 +1014,7 @@ async def _run_ssh(app_cfg: dict, entry: dict, log_path: Path, run_dir: Path) ->
         run_proc = await asyncio.create_subprocess_exec(
             *ssh_argv(remote_cmd), stdout=logf, stderr=logf,
         )
+        current_run["proc"] = run_proc
         try:
             exit_code = await asyncio.wait_for(run_proc.wait(), timeout=entry["timeout"])
         except asyncio.TimeoutError:
@@ -1065,6 +1124,7 @@ async def _run_ssh_full_with_tc10(app_cfg: dict, entry: dict, log_path: Path, ru
             run_proc = await asyncio.create_subprocess_exec(
                 *ssh_argv(remote_cmd), stdout=logf, stderr=logf,
             )
+            current_run["proc"] = run_proc
             try:
                 exit_code = await asyncio.wait_for(run_proc.wait(), timeout=step_entry["timeout"])
             except asyncio.TimeoutError:
@@ -1254,6 +1314,7 @@ async def _run_serial(app_cfg: dict, entry: dict, log_path: Path) -> "int | None
         logf.write(f"$ powershell.exe serial_run.ps1 -ComPort {SERIAL_COM_PORT} -Flag '{flag}' (SSH 미사용)\n\n".encode())
         logf.flush()
         proc = await asyncio.create_subprocess_exec(*argv, stdout=logf, stderr=logf)
+        current_run["proc"] = proc
         try:
             await asyncio.wait_for(proc.wait(), timeout=entry["timeout"] + 90)
         except asyncio.TimeoutError:
@@ -1292,6 +1353,7 @@ async def run_tc(run_id: str, app_cfg: dict, entry: dict, channel: str = "ssh"):
         "status": "running",
         "pass": 0,
         "fail": 0,
+        "skip": 0,
         "exit_code": None,
     }
     _write_meta(run_dir, meta)
@@ -1306,10 +1368,14 @@ async def run_tc(run_id: str, app_cfg: dict, entry: dict, channel: str = "ssh"):
 
         meta["exit_code"] = exit_code
         text = log_path.read_text(errors="replace")
-        pass_n, fail_n, cases = _parse_results(text)
+        pass_n, fail_n, cases = _parse_results(text, app_cfg)
         meta["pass"] = pass_n
         meta["fail"] = fail_n
-        if entry["reboot"]:
+        meta["skip"] = sum(1 for c in cases if c["status"] == "SKIP")
+        if current_run.get("cancelled"):
+            # 사용자가 중지 버튼을 눌러 강제 종료한 경우 — reboot/timeout/fail 판정보다 우선.
+            meta["status"] = "cancelled"
+        elif entry["reboot"]:
             meta["status"] = "rebooted"
         elif exit_code is None:
             meta["status"] = "timeout"
@@ -1337,6 +1403,8 @@ async def run_tc(run_id: str, app_cfg: dict, entry: dict, channel: str = "ssh"):
             logf.write(f"\n[DASHBOARD ERROR] {e}\n".encode())
     finally:
         current_run["run_id"] = None
+        current_run["proc"] = None
+        current_run["cancelled"] = False
         _prune_old_runs(app_cfg["runs_dir"])
         _rebuild_latest_status(app_cfg)
 
@@ -1365,13 +1433,14 @@ def _reconcile_stale_runs():
                 continue
             log_path = run_dir / "output.log"
             text = log_path.read_text(errors="replace") if log_path.exists() else ""
-            pass_n, fail_n, cases = _parse_results(text)
+            pass_n, fail_n, cases = _parse_results(text, app_cfg)
             finished_at = (
                 datetime.fromtimestamp(log_path.stat().st_mtime).isoformat(timespec="seconds")
                 if log_path.exists() else datetime.now().isoformat(timespec="seconds")
             )
             entry = app_cfg["catalog_map"].get(meta["tc_id"], {})
             meta["pass"], meta["fail"] = pass_n, fail_n
+            meta["skip"] = sum(1 for c in cases if c["status"] == "SKIP")
             meta["finished_at"] = finished_at
             if SUMMARY_RE.search(text):
                 meta["exit_code"] = 0 if fail_n == 0 else 1
@@ -1476,14 +1545,15 @@ def _read_clean_log(log_path: Path) -> str:
 
 @app.get("/api/runs/{run_id}")
 def api_run_detail(run_id: str, app_id: str = DEFAULT_APP_ID):
-    run_dir = _get_app(app_id)["runs_dir"] / run_id
+    app_cfg = _get_app(app_id)
+    run_dir = app_cfg["runs_dir"] / run_id
     meta_path = run_dir / "meta.json"
     if not meta_path.exists():
         raise HTTPException(404, "run not found")
     meta = json.loads(meta_path.read_text())
     log_path = run_dir / "output.log"
     log_text = _read_clean_log(log_path)
-    _, _, cases = _parse_results(log_text)
+    _, _, cases = _parse_results(log_text, app_cfg)
     return {"meta": meta, "log": log_text, "cases": cases}
 
 
@@ -1497,7 +1567,7 @@ def _load_finished_run(app_cfg: dict, run_id: str):
         raise HTTPException(409, "run이 아직 진행 중")
     log_path = run_dir / "output.log"
     log_text = _read_clean_log(log_path)
-    _, _, cases = _parse_results(log_text)
+    _, _, cases = _parse_results(log_text, app_cfg)
     sl_journal_path = run_dir / "sl_journal.log"
     sl_journal_text = sl_journal_path.read_text(errors="replace") if sl_journal_path.exists() else ""
     return meta, cases, log_text, sl_journal_text
@@ -1553,6 +1623,25 @@ async def api_run(req: RunRequest):
     current_run["run_id"] = run_id
     asyncio.create_task(run_tc(run_id, app_cfg, entry, req.channel))
     return {"run_id": run_id, "app_id": req.app_id}
+
+
+@app.post("/api/runs/{run_id}/stop")
+def api_stop_run(run_id: str):
+    """실행 중인 run을 강제 종료한다.
+
+    로컬 ssh/powershell 클라이언트 프로세스만 kill한다 — DUT의 원격 셸이 그 즉시
+    같이 죽는지는 세션 종료 방식에 달려있어 보장되지 않지만(기존 타임아웃 처리와
+    동일한 한계), 로컬 채널이 끊기면 run_tc()의 대기가 곧바로 풀려 dashboard는
+    항상 정상적으로 "cancelled"로 마무리된다.
+    """
+    if current_run["run_id"] != run_id:
+        raise HTTPException(409, f"'{run_id}'는 현재 실행 중인 run이 아님 (현재: {current_run['run_id']})")
+    proc = current_run.get("proc")
+    if proc is None:
+        raise HTTPException(409, "아직 프로세스가 시작되지 않음 — 잠시 후 다시 시도")
+    current_run["cancelled"] = True
+    proc.kill()
+    return {"run_id": run_id, "status": "stopping"}
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

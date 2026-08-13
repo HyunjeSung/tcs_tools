@@ -73,6 +73,8 @@
   .card .num { font-size: 24px; font-weight: 700; }
   .card .lbl { font-size: 12px; color: var(--muted); }
   .card.pass .num { color: var(--pass); } .card.fail .num { color: var(--fail); }
+  .card.skip .num { color: var(--warn); }
+  .last-run-line { grid-column: 1 / -1; font-size: 12px; color: var(--muted); margin: -6px 0 4px; }
   section { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
   section h2 { font-size: 13px; margin: 0 0 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
   .tc-btn { display: block; width: 100%; text-align: left; background: var(--btn-bg); border: 1px solid var(--border);
@@ -124,6 +126,13 @@
   .badge.timeout, .badge.error { background: rgba(243,156,18,.15); color: var(--warn); }
   .badge.rebooted { background: rgba(243,156,18,.15); color: var(--warn); }
   .badge.interrupted { background: rgba(231,76,60,.12); color: var(--warn); }
+  .badge.cancelled { background: rgba(231,76,60,.12); color: var(--warn); }
+  .stop-btn { margin-left: 8px; width: 22px; height: 22px; padding: 0; border-radius: 5px;
+    border: 1px solid var(--muted); color: var(--muted); background: var(--btn-bg); cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center; vertical-align: middle; }
+  .stop-btn::before { content: ""; width: 8px; height: 8px; background: currentColor; }
+  .stop-btn:hover { background: var(--hover-bg); }
+  .stop-btn:disabled { opacity: .4; cursor: default; }
   .badge.channel-ssh { background: rgba(77,141,255,.15); color: var(--accent); }
   .badge.channel-serial { background: rgba(46,204,113,.15); color: var(--pass); }
   .run-row { cursor: pointer; }
@@ -184,8 +193,9 @@
         <div class="card"><div class="num" id="cardTotal">-</div><div class="lbl">전체 케이스</div></div>
         <div class="card pass"><div class="num" id="cardPass">-</div><div class="lbl">PASS</div></div>
         <div class="card fail"><div class="num" id="cardFail">-</div><div class="lbl">FAIL</div></div>
-        <div class="card"><div class="num" id="cardLast">-</div><div class="lbl">최근 실행</div></div>
+        <div class="card skip"><div class="num" id="cardSkip">-</div><div class="lbl">SKIP</div></div>
       </div>
+      <div class="last-run-line">최근 실행: <span id="cardLast">-</span></div>
 
       <section>
         <h2>TC 실행</h2>
@@ -227,7 +237,7 @@
         <section>
           <h2>실행 이력</h2>
           <table id="historyTable">
-            <thead><tr><th>Run ID</th><th>대상</th><th>채널</th><th>상태</th><th>PASS/FAIL</th><th>시작</th><th>종료</th><th>소요시간</th><th>결과</th></tr></thead>
+            <thead><tr><th>Run ID</th><th>대상</th><th>채널</th><th>상태</th><th>PASS/FAIL/SKIP</th><th>시작</th><th>종료</th><th>소요시간</th><th>결과</th></tr></thead>
             <tbody></tbody>
           </table>
           <div id="historyPager" class="pager"></div>
@@ -473,6 +483,27 @@ function applyConnectionState(runId, meta) {
     : `${runId} 연결 실패 (SSH/시리얼 확인 필요)`;
 }
 
+// 히스토리 표의 상태 배지 옆 "중지" 버튼(row.status === 'running'일 때만 렌더링됨)에서 호출.
+// 버튼은 refreshHistory()가 매번 다시 그리므로 여기선 진행 중 표시만 하면 되고,
+// 성공하면 다음 refreshHistory()/poll tick에서 status가 바뀌어 버튼이 자연히 사라진다.
+async function stopRun(runId, btnEl) {
+  btnEl.disabled = true;
+  btnEl.title = '중지 중...';
+  try {
+    const res = await fetch(`/api/runs/${runId}/stop`, { method: 'POST' });
+    if (!res.ok) {
+      const err = await res.json();
+      alert(`중지 실패: ${err.detail}`);
+      btnEl.disabled = false;
+      btnEl.title = '중지';
+    }
+  } catch (e) {
+    alert(`중지 요청 오류: ${e}`);
+    btnEl.disabled = false;
+    btnEl.title = '중지';
+  }
+}
+
 async function pollRun(runId) {
   if (pollTimer) clearInterval(pollTimer);
   const appIdAtStart = currentAppId;
@@ -528,17 +559,16 @@ function renderRunView(runId, data) {
 async function refreshStatus() {
   const status = await fetch(`/api/status?app_id=${encodeURIComponent(currentAppId)}`).then(r => r.json());
   const entries = Object.entries(status).sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }));
-  let pass = 0, fail = 0, lastAt = null;
+  let pass = 0, fail = 0, skip = 0, lastAt = null;
   const rows = entries.map(([caseId, v]) => {
-    // SKIP(자동화 불가/환경 제약)은 PASS도 FAIL도 아니므로 카드 집계에서 제외 —
-    // 현황판 표에는 그대로 노출되지만 요약 카운트는 실제 판정된 case만 반영한다.
-    if (v.status === 'PASS') pass++; else if (v.status === 'FAIL') fail++;
+    if (v.status === 'PASS') pass++; else if (v.status === 'FAIL') fail++; else if (v.status === 'SKIP') skip++;
     if (!lastAt || v.at > lastAt) lastAt = v.at;
     return { ...v, case: caseId };
   });
   $('#cardTotal').textContent = rows.length;
   $('#cardPass').textContent = pass;
   $('#cardFail').textContent = fail;
+  $('#cardSkip').textContent = skip;
   $('#cardLast').textContent = lastAt ? lastAt.replace('T', ' ') : '-';
   if (!selectedRunId) renderStatusRows(rows);   // 특정 run 선택 중이면 그 표를 덮어쓰지 않음
 }
@@ -583,10 +613,13 @@ async function refreshHistory() {
       ? `<a href="/api/runs/${r.run_id}/result.pdf?app_id=${encodeURIComponent(appIdAtCall)}" download class="muted" style="text-decoration:underline;" onclick="event.stopPropagation()">다운로드</a>`
       : '-';
     const channel = r.channel || 'ssh';
+    const stopCell = r.status === 'running'
+      ? `<button class="stop-btn" type="button" title="중지" data-run-id="${r.run_id}" onclick="event.stopPropagation(); stopRun('${r.run_id}', this)"></button>`
+      : '';
     tr.innerHTML = `<td>${r.run_id}</td><td>${r.label || r.tc_id}</td>
       <td><span class="badge channel-${channel}">${channel.toUpperCase()}</span></td>
-      <td><span class="badge ${r.status}">${r.status}</span></td>
-      <td>${r.pass}/${r.fail}</td><td class="muted">${(r.started_at || '').replace('T', ' ')}</td>
+      <td><span class="badge ${r.status}">${r.status}</span>${stopCell}</td>
+      <td>${r.pass}/${r.fail}/${r.skip || 0}</td><td class="muted">${(r.started_at || '').replace('T', ' ')}</td>
       <td class="muted">${r.finished_at ? r.finished_at.replace('T', ' ') : '진행중'}</td>
       <td class="muted">${r.finished_at ? formatDuration(r.started_at, r.finished_at) : '-'}</td>
       <td>${dlCell}</td>`;
@@ -614,6 +647,12 @@ async function initDutState() {
   } else if (runs.length === 0) {
     $('#dutDot').className = 'dot unknown';
     $('#dutDot').title = '연결 상태 미확인 — 아직 실행 이력 없음';
+  } else if (runs[0].status === 'running') {
+    // 새로고침 시점에 이미 진행 중인 run이 있으면(이 탭에서 시작했든 아니든)
+    // 실행 로그/중지 버튼을 그 run 기준으로 다시 붙인다.
+    selectedRunId = runs[0].run_id;
+    setButtonsDisabled(true);
+    pollRun(runs[0].run_id);
   }
 }
 
