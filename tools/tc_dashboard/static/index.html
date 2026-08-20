@@ -117,17 +117,25 @@
   table { width: 100%; border-collapse: collapse; font-size: 12.5px; table-layout: fixed; }
   th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border);
            overflow-wrap: anywhere; }
+  th.action-col, td.action-col { width: 44px; padding-left: 0; padding-right: 14px; text-align: center; }
   th { color: var(--muted); font-weight: 500; }
   .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
   .badge.PASS, .badge.pass { background: rgba(46,204,113,.15); color: var(--pass); }
   .badge.FAIL, .badge.fail { background: rgba(231,76,60,.15); color: var(--fail); }
   .badge.SKIP, .badge.skip { background: rgba(243,156,18,.15); color: var(--warn); }
   .badge.running { background: rgba(77,141,255,.15); color: var(--accent); }
+  .badge.pending-case { position: relative; overflow: hidden; min-width: 56px; text-align: center;
+    background: rgba(77,141,255,.12); color: var(--accent); }
+  .badge.pending-case .stripes { position: absolute; inset: 0; background-size: 28px 28px;
+    background-image: repeating-linear-gradient(45deg, rgba(77,141,255,.3) 0 7px, rgba(77,141,255,.08) 7px 14px);
+    animation: stripe-move 900ms linear infinite; z-index: 0; }
+  .badge.pending-case .label-text { position: relative; z-index: 1; }
+  @keyframes stripe-move { from { background-position: 0 0; } to { background-position: 28px 0; } }
   .badge.timeout, .badge.error { background: rgba(243,156,18,.15); color: var(--warn); }
   .badge.rebooted { background: rgba(243,156,18,.15); color: var(--warn); }
   .badge.interrupted { background: rgba(231,76,60,.12); color: var(--warn); }
   .badge.cancelled { background: rgba(231,76,60,.12); color: var(--warn); }
-  .stop-btn { margin-left: 8px; width: 22px; height: 22px; padding: 0; border-radius: 5px;
+  .stop-btn { width: 22px; height: 22px; padding: 0; border-radius: 5px;
     border: 1px solid var(--muted); color: var(--muted); background: var(--btn-bg); cursor: pointer;
     display: inline-flex; align-items: center; justify-content: center; vertical-align: middle; }
   .stop-btn::before { content: ""; width: 8px; height: 8px; background: currentColor; }
@@ -237,7 +245,7 @@
         <section>
           <h2>실행 이력</h2>
           <table id="historyTable">
-            <thead><tr><th>Run ID</th><th>대상</th><th>채널</th><th>상태</th><th>PASS/FAIL/SKIP</th><th>시작</th><th>종료</th><th>소요시간</th><th>결과</th></tr></thead>
+            <thead><tr><th>Run ID</th><th>대상</th><th>채널</th><th>상태</th><th>PASS/FAIL/SKIP</th><th>시작</th><th>종료</th><th>소요시간</th><th>결과</th><th class="action-col">실행</th></tr></thead>
             <tbody></tbody>
           </table>
           <div id="historyPager" class="pager"></div>
@@ -483,7 +491,7 @@ function applyConnectionState(runId, meta) {
     : `${runId} 연결 실패 (SSH/시리얼 확인 필요)`;
 }
 
-// 히스토리 표의 상태 배지 옆 "중지" 버튼(row.status === 'running'일 때만 렌더링됨)에서 호출.
+// 히스토리 표의 "결과" 옆 전용 칸에 있는 "중지" 버튼(row.status === 'running'일 때만 렌더링됨)에서 호출.
 // 버튼은 refreshHistory()가 매번 다시 그리므로 여기선 진행 중 표시만 하면 되고,
 // 성공하면 다음 refreshHistory()/poll tick에서 status가 바뀌어 버튼이 자연히 사라진다.
 async function stopRun(runId, btnEl) {
@@ -530,8 +538,11 @@ function renderStatusRows(rows) {
   tbody.innerHTML = '';
   rows.forEach(v => {
     const tr = document.createElement('tr');
+    const resultCell = v.status === 'RUNNING'
+      ? `<span class="badge pending-case"><span class="stripes"></span><span class="label-text">진행중</span></span>`
+      : `<span class="badge ${v.status}">${v.status}</span>`;
     tr.innerHTML = `<td>${v.tc}</td><td>${v.case}</td><td>${escapeHtml(v.desc)}</td>
-      <td><span class="badge ${v.status}">${v.status}</span></td>
+      <td>${resultCell}</td>
       <td class="muted">${v.run_id || ''}</td><td class="muted">${(v.at || '').replace('T', ' ')}</td>`;
     tbody.appendChild(tr);
   });
@@ -618,11 +629,11 @@ async function refreshHistory() {
       : '';
     tr.innerHTML = `<td>${r.run_id}</td><td>${r.label || r.tc_id}</td>
       <td><span class="badge channel-${channel}">${channel.toUpperCase()}</span></td>
-      <td><span class="badge ${r.status}">${r.status}</span>${stopCell}</td>
+      <td><span class="badge ${r.status}">${r.status}</span></td>
       <td>${r.pass}/${r.fail}/${r.skip || 0}</td><td class="muted">${(r.started_at || '').replace('T', ' ')}</td>
       <td class="muted">${r.finished_at ? r.finished_at.replace('T', ' ') : '진행중'}</td>
       <td class="muted">${r.finished_at ? formatDuration(r.started_at, r.finished_at) : '-'}</td>
-      <td>${dlCell}</td>`;
+      <td>${dlCell}</td><td class="action-col">${stopCell}</td>`;
     tr.onclick = () => showRunLog(r.run_id);
     tbody.appendChild(tr);
   });

@@ -120,7 +120,7 @@ CATALOG_SYSTEM_LOG = [
     {"id": "tc02", "label": "TC02 24시간 타이머", "flag": "--tc02",
      "timeout": 180, "reboot": False, "note": "system_log 프로세스 kill 수반 (내부 타이머 상태 초기화)"},
     {"id": "tc04", "label": "TC04 대용량 journal timeout", "flag": "--tc04",
-     "timeout": 300, "reboot": False, "note": None},
+     "timeout": 450, "reboot": False, "note": None},
     {"id": "tc05", "label": "TC05 압축 (TC05-4 단독)", "flag": "--tc05",
      "timeout": 120, "reboot": False, "note": "TC05-1~3 은 setup 필요 — 기본 실행에서만 확인됨"},
     {"id": "tc10-pre", "label": "TC10-pre (reboot 발생)", "flag": "--tc10-pre",
@@ -569,6 +569,8 @@ REASON_RE = re.compile(r"^\[REASON\]\s*(.*)$")
 
 EXPECTED_CASE_RE = re.compile(r'assert\s+"(TC\d+-\d+):\s*([^"]*)"')
 TC_BANNER_RE = re.compile(r"^===\s*(TC\d+)")
+TC_BANNER_DESC_RE = re.compile(r"^===\s*(TC\d+):\s*(.*?)\s*===\s*$")
+TC_SUBBANNER_RE = re.compile(r"^-{3}\s*(TC\d+-\d+):\s*(.*?)\s*-{3}$")
 
 
 def _expected_cases(app_cfg: dict) -> dict:
@@ -602,6 +604,82 @@ def _attempted_tc_numbers(text: str) -> set:
         if m:
             numbers.add(m.group(1))
     return numbers
+
+
+def _pending_case_rows(app_cfg: dict, log_text: str, existing_cases: list) -> list:
+    """진행 중인 run에서 배너는 찍혔지만(=시작됨) 아직 assert가 안 불린(=대기중인) sub-case를
+    'RUNNING' placeholder row로 만든다 — 결과 현황판에 완료된 case 옆에 '진행중' 애니메이션
+    행이 같이 보이다가, 실제 assert가 찍히면 다음 폴링에서 PASS/FAIL/SKIP 행으로 자연히
+    대체된다(같은 case id로 재조회되므로 존재 여부만 바뀜).
+
+    아직 배너도 안 찍힌(=시작도 안 한) TC의 case는 만들지 않는다 — 실제 실행 순서/범위와
+    다르게 미리 나열되는 것을 피하기 위함.
+
+    각 placeholder에는 그 TC 하나만 기준으로 한 진행률(progress_percent)을 같이 담는다
+    (다른 TC의 진행 상황이 섞여 엉뚱한 숫자로 보이지 않도록 TC 단위로 분리). pending
+    row가 존재한다는 것 자체가 그 TC의 case가 아직 남아있다는 뜻이라 done < total이
+    보장되어 100%로 보이는 일은 없다.
+    sub-id를 쉘 변수로 동적 생성하는 TC(예: system_log TC04)는 expected 집합에 안 잡혀
+    tc_totals에 그 TC 번호 자체가 없다. 이 경우 위 루프는 그 TC에 대해 아무 row도
+    만들지 않아, 배너는 찍혔는데(=실행 중) 결과 현황판에는 전혀 안 보이는 상태가
+    된다 — TC04의 journal 주입처럼 첫 sub-case 판정까지 수 분이 걸리는 TC에서
+    실제로 관찰됨(2026-08-20). 아래 fallback으로, "배너만 찍히고 아직 그 TC의
+    어떤 case도 안 온" 마지막 TC 하나에 한해 진행률 없는 제네릭 RUNNING row를
+    하나 만들어준다.
+    """
+    attempted = _attempted_tc_numbers(log_text)
+    if not attempted:
+        return []
+    existing_ids = {c["case"] for c in existing_cases}
+    existing_tc_nos = {c["tc"] for c in existing_cases}
+    expected = _expected_cases(app_cfg)
+    tc_totals: dict = {}
+    tc_done: dict = {}
+    for sub_id in expected:
+        tc_no = sub_id.split("-", 1)[0]
+        tc_totals[tc_no] = tc_totals.get(tc_no, 0) + 1
+    for c in existing_cases:
+        tc_done[c["tc"]] = tc_done.get(c["tc"], 0) + 1
+
+    pending = []
+    for sub_id, desc in expected.items():
+        tc_no = sub_id.split("-", 1)[0]
+        if tc_no in attempted and sub_id not in existing_ids:
+            total_tc = tc_totals.get(tc_no, 0)
+            done_tc = tc_done.get(tc_no, 0)
+            pct = round(done_tc / total_tc * 100) if total_tc > 0 else None
+            pending.append({"tc": tc_no, "case": sub_id, "status": "RUNNING", "desc": desc,
+                             "reason": "", "progress_percent": pct})
+
+    last_tc, last_desc = None, ""
+    last_sub_case, last_sub_desc = None, ""
+    for line in log_text.splitlines():
+        stripped = line.strip()
+        m = TC_BANNER_DESC_RE.match(stripped)
+        if m:
+            last_tc, last_desc = m.group(1), m.group(2)
+            continue
+        m = TC_SUBBANNER_RE.match(stripped)
+        if m:
+            last_sub_case, last_sub_desc = m.group(1), m.group(2)
+    if last_tc and last_tc not in tc_totals and last_tc not in existing_tc_nos:
+        # 스크립트가 "--- TC04-1: ... ---" 식으로 자기 sub-case 배너를 직접 찍어주면
+        # 그 실제 sub-case id를 그대로 쓴다(예: TC04-1) — placeholder를 위해 지어낸
+        # 이름(예: TC04-live)을 Case 칸에 넣지 않기 위함. TC 칸은 항상 last_tc(TC04)로 고정.
+        if last_sub_case and last_sub_case.startswith(f"{last_tc}-") and last_sub_case not in existing_ids:
+            case_id, desc = last_sub_case, last_sub_desc
+        else:
+            case_id, desc = last_tc, last_desc or "진행중"
+        pending.append({"tc": last_tc, "case": case_id, "status": "RUNNING",
+                         "desc": desc or "진행중", "reason": "", "progress_percent": None})
+    return pending
+
+
+def _case_sort_key(c: dict):
+    tc_num = int(re.sub(r"\D", "", c["tc"]) or 0)
+    sub_part = c["case"].split("-", 1)[1] if "-" in c["case"] else ""
+    sub_num = int(re.sub(r"\D", "", sub_part) or 0)
+    return (tc_num, sub_num)
 
 
 def _parse_results(text: str, app_cfg: Optional[dict] = None):
@@ -1554,6 +1632,8 @@ def api_run_detail(run_id: str, app_id: str = DEFAULT_APP_ID):
     log_path = run_dir / "output.log"
     log_text = _read_clean_log(log_path)
     _, _, cases = _parse_results(log_text, app_cfg)
+    if meta.get("status") == "running":
+        cases = sorted(cases + _pending_case_rows(app_cfg, log_text, cases), key=_case_sort_key)
     return {"meta": meta, "log": log_text, "cases": cases}
 
 
