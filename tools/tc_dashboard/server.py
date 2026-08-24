@@ -14,7 +14,7 @@ import subprocess
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 import markdown as md_lib
 from fastapi import FastAPI, HTTPException, Response
@@ -168,7 +168,7 @@ app = FastAPI(title="AC Gen2 EMS TC Dashboard")
 
 # 물리적으로 DUT가 하나뿐이라 앱이 달라도 SSH/시리얼 채널을 동시에 쓸 수 없다 —
 # run 동시성 제한은 앱별이 아니라 전역으로 건다.
-current_run = {"run_id": None, "proc": None, "cancelled": False}
+current_run = {"run_id": None, "proc": None, "cancelled": False, "case_times": None}
 
 
 class RunRequest(BaseModel):
@@ -494,7 +494,45 @@ pre {{ font-size: 8px; white-space: pre-wrap; background: #f2f2f2; border: 1px s
     return buf.getvalue()
 
 
+def _record_case_times(log_path: Path, app_cfg: dict, case_times: dict) -> None:
+    """log_path를 다시 파싱해, 아직 시각을 못 남긴 case_id에 한해 "지금 처음 목격했다"는
+    시각을 기록한다. _wait_run_proc()의 on_progress 콜백으로 폴링 주기(2초)마다 호출되며,
+    이미 기록된 case는 건드리지 않는다(setdefault) — 여러 번 호출돼도 안전.
+    """
+    try:
+        text = log_path.read_text(errors="replace")
+    except Exception:
+        return
+    _, _, cases = _parse_results(text, app_cfg)
+    now = datetime.now()
+    for c in cases:
+        case_times.setdefault(c["case"], now)
+
+
+def _compute_case_durations(started_at_iso: str, cases: list, case_times: dict) -> dict:
+    """"결과 현황판"에 표시할 case별 소요시간(초) 근사치.
+
+    case_times는 폴링(2초 간격)으로 채운 "이 case를 처음 목격한 시각"이라 실제 완료
+    시각보다 최대 폴링 주기만큼 늦을 수 있다 — 정확한 계측이 아니라 "어느 TC가 오래
+    걸렸는지" 파악용 근사치다. cases는 _parse_results()가 반환하는 실행(출현) 순서를
+    그대로 따르므로, "직전 case가 기록된 시각부터 이 case가 기록된 시각까지"를 그
+    case의 소요시간으로 근사한다(첫 case는 run 시작 시각 기준).
+    """
+    prev = datetime.fromisoformat(started_at_iso)
+    durations: dict = {}
+    for c in cases:
+        t = case_times.get(c["case"])
+        if t is None:
+            continue
+        durations[c["case"]] = max(0.0, (t - prev).total_seconds())
+        prev = t
+    return durations
+
+
 def _merge_case_status(status_map: dict, run_id: str, meta: dict, cases: list):
+    # "at"(run 종료 시각)은 카드 요약("최근 실행 시각")이 여전히 참조하므로 남겨두고,
+    # 결과현황판 표의 "소요 시간" 칸은 새로 추가된 duration_sec을 쓴다.
+    case_durations = meta.get("case_durations") or {}
     for c in cases:
         status_map[c["case"]] = {
             "status": c["status"],
@@ -503,6 +541,7 @@ def _merge_case_status(status_map: dict, run_id: str, meta: dict, cases: list):
             "tc": c["tc"],
             "run_id": run_id,
             "at": meta["finished_at"],
+            "duration_sec": case_durations.get(c["case"]),
         }
 
 
@@ -686,7 +725,66 @@ async def _ensure_fresh_ssh_master():
             pass  # 소켓이 아예 없으면 여기로 옴 — best-effort
 
 
-async def _run_ssh(app_cfg: dict, entry: dict, log_path: Path, run_dir: Path) -> "int | None":
+# SSH ControlMaster 멀티플렉스 채널이 세션 도중 좀비가 되는 사례가 실측으로 확인됨
+# (2026-08-04, _ensure_fresh_ssh_master 참고) — 마스터 프로세스 자체는 keepalive에
+# 계속 응답해 ServerAliveCountMax(최대 20분)로는 못 잡고, run_proc이 아무 출력 없이
+# 타임아웃(entry["timeout"], 길게는 8.5시간)까지 그냥 멈춰있게 된다. log 파일 크기가
+# 일정 시간 전혀 늘지 않으면 좀비로 보고 강제 종료한다. 기본값(900s)은 이 코드베이스의
+# 모든 TC 스크립트에서 가장 긴 "출력 없는 단일 sleep" 구간(device_log TC21(구 TC24) ~330s 등)보다
+# 넉넉히 크게 잡았다 — device_log TC05처럼 6시간+ 동안 중간 출력이 전혀 없는 TC가
+# 포함된 entry는 반드시 entry["stall_timeout"]으로 이 기본값을 오버라이드해야 한다.
+STALL_TIMEOUT = 900
+
+
+async def _wait_run_proc(run_proc, log_path: Path, timeout: float, stall_timeout: float = STALL_TIMEOUT,
+                          on_progress: Optional[Callable[[], None]] = None) -> "tuple[int | None, str]":
+    """run_proc.wait()을 기다리되 두 조건 중 하나라도 걸리면 강제 종료한다.
+
+    - timeout(entry 전체 허용 시간) 초과 → 기존 동작과 동일
+    - stall_timeout 동안 log_path 크기가 전혀 늘지 않음 → SSH 멀티플렉스 채널이
+      세션 도중 좀비가 된 것으로 보고 강제 종료
+    - on_progress: log_path 크기가 늘 때마다(=새 출력이 있을 때마다) 호출되는 콜백.
+      결과현황판의 "소요 시간" 계산용 case별 목격 시각 기록(_record_case_times)에 쓰인다
+      — 폴링 주기(2초)를 그대로 재사용해 별도 타이머 없이 근사 시각을 얻는다.
+
+    반환: (exit_code, reason) — reason은 "ok" | "timeout" | "stalled"
+    """
+    loop = asyncio.get_event_loop()
+    start = loop.time()
+    last_size = log_path.stat().st_size if log_path.exists() else 0
+    last_change = start
+    wait_task = asyncio.ensure_future(run_proc.wait())
+    try:
+        while True:
+            # case별 소요시간 근사 정확도를 위해 기존 10초 폴링을 2초로 단축했다 —
+            # stall 감지 임계값(stall_timeout) 자체는 그대로라 판정 로직에 영향 없음.
+            done, _ = await asyncio.wait({wait_task}, timeout=2)
+            if wait_task in done:
+                return wait_task.result(), "ok"
+
+            now = loop.time()
+            if now - start > timeout:
+                run_proc.kill()
+                await run_proc.wait()
+                return None, "timeout"
+
+            size = log_path.stat().st_size if log_path.exists() else last_size
+            if size > last_size:
+                last_size = size
+                last_change = now
+                if on_progress:
+                    on_progress()
+            elif now - last_change > stall_timeout:
+                run_proc.kill()
+                await run_proc.wait()
+                return None, "stalled"
+    finally:
+        if not wait_task.done():
+            wait_task.cancel()
+
+
+async def _run_ssh(app_cfg: dict, entry: dict, log_path: Path, run_dir: Path,
+                    case_times: Optional[dict] = None) -> "int | None":
     await _ensure_fresh_ssh_master()
     tc_script = app_cfg["tc_script"]
     remote_script = app_cfg["remote_script"]
@@ -716,13 +814,21 @@ async def _run_ssh(app_cfg: dict, entry: dict, log_path: Path, run_dir: Path) ->
             *ssh_argv(remote_cmd), stdout=logf, stderr=logf,
         )
         current_run["proc"] = run_proc
-        try:
-            exit_code = await asyncio.wait_for(run_proc.wait(), timeout=entry["timeout"])
-        except asyncio.TimeoutError:
-            run_proc.kill()
-            await run_proc.wait()
+        on_progress = (
+            (lambda: _record_case_times(log_path, app_cfg, case_times))
+            if case_times is not None else None
+        )
+        exit_code, reason = await _wait_run_proc(
+            run_proc, log_path, entry["timeout"], entry.get("stall_timeout", STALL_TIMEOUT),
+            on_progress=on_progress,
+        )
+        if reason == "timeout":
             logf.write(b"\n[DASHBOARD] TIMEOUT - \xed\x94\x84\xeb\xa1\x9c\xec\x84\xb8\xec\x8a\xa4 \xea\xb0\x95\xec\xa0\x9c \xec\xa2\x85\xeb\xa3\x8c\n")
-            exit_code = None
+        elif reason == "stalled":
+            logf.write(
+                f"\n[DASHBOARD] STALL - {entry.get('stall_timeout', STALL_TIMEOUT)}초간 출력 없음"
+                "(SSH 멀티플렉스 채널 좀비 의심) - 프로세스 강제 종료\n".encode()
+            )
 
         await _stop_journal_capture(journal_proc, journal_lines, collector_task, run_dir)
     return exit_code
@@ -782,12 +888,13 @@ async def _wait_for_dut_reboot(logf, max_wait_s: int = 180) -> bool:
     return True
 
 
-async def _run_ssh_full_with_reboots(app_cfg: dict, entry: dict, log_path: Path, run_dir: Path) -> "int | None":
+async def _run_ssh_full_with_reboots(app_cfg: dict, entry: dict, log_path: Path, run_dir: Path,
+                                      case_times: Optional[dict] = None) -> "int | None":
     """entry["flag"](있으면, 예: --full)를 먼저 실행한 뒤 entry["chain_reboot_pairs"]에 담긴
     (pre_id, post_id) 목록을 순서대로 pre → 재부팅 대기 → post 로 이어 붙인다.
 
     reboot를 수반하는 TC는 SSH 세션이 끊겨 단일 ssh 호출 안에 넣을 수 없다 — 이 함수가
-    직접 오케스트레이션한다(system_log는 TC10 한 쌍, device_log는 TC07/08·18·23·29
+    직접 오케스트레이션한다(system_log는 TC10 한 쌍, device_log는 TC06/07·15·20·26
     네 쌍). entry["flag"]가 없으면(단일 reboot TC "선택 실행") 앞 단계 없이 pair
     체이닝부터 바로 시작한다. 모든 단계가 같은 output.log에 이어 쓰인다 — run_tc()의
     _parse_results가 output.log 전체를 한 번에 스캔해 [PASS]/[FAIL]을 case_id로
@@ -830,13 +937,21 @@ async def _run_ssh_full_with_reboots(app_cfg: dict, entry: dict, log_path: Path,
                 *ssh_argv(remote_cmd), stdout=logf, stderr=logf,
             )
             current_run["proc"] = run_proc
-            try:
-                exit_code = await asyncio.wait_for(run_proc.wait(), timeout=step_entry["timeout"])
-            except asyncio.TimeoutError:
-                run_proc.kill()
-                await run_proc.wait()
+            on_progress = (
+                (lambda: _record_case_times(log_path, app_cfg, case_times))
+                if case_times is not None else None
+            )
+            exit_code, reason = await _wait_run_proc(
+                run_proc, log_path, step_entry["timeout"], step_entry.get("stall_timeout", STALL_TIMEOUT),
+                on_progress=on_progress,
+            )
+            if reason == "timeout":
                 logf.write(b"\n[DASHBOARD] TIMEOUT - \xed\x94\x84\xeb\xa1\x9c\xec\x84\xb8\xec\x8a\xa4 \xea\xb0\x95\xec\xa0\x9c \xec\xa2\x85\xeb\xa3\x8c\n")
-                exit_code = None
+            elif reason == "stalled":
+                logf.write(
+                    f"\n[DASHBOARD] STALL - {step_entry.get('stall_timeout', STALL_TIMEOUT)}초간 출력 없음"
+                    "(SSH 멀티플렉스 채널 좀비 의심) - 프로세스 강제 종료\n".encode()
+                )
 
             # -pre 단계는 reboot로 세션이 끊기며 journalctl -f 프로세스도 같이 죽는다 —
             # best-effort로 그때까지 모인 lines만 수거한다 (_stop_journal_capture와 달리
@@ -860,6 +975,13 @@ async def _run_ssh_full_with_reboots(app_cfg: dict, entry: dict, log_path: Path,
     exit_code = None
     if entry.get("flag"):
         exit_code = await _run_step(entry)
+        if exit_code != 0:
+            reason = "사용자가 중지함" if current_run.get("cancelled") else f"비정상 종료(exit_code={exit_code}) — 타임아웃/좀비 감지 등"
+            with open(log_path, "ab") as logf:
+                logf.write(f"\n[DASHBOARD ERROR] 메인 단계가 정상 종료되지 않음({reason}) - 재부팅 체인 스킵, 이후 단계 중단\n".encode())
+            if accumulated_sl_lines:
+                (run_dir / "sl_journal.log").write_text("".join(accumulated_sl_lines))
+            return exit_code
 
     for pre_id, post_id in entry.get("chain_reboot_pairs", []):
         tc_label = pre_id.split("-", 1)[0].upper()
@@ -1066,17 +1188,28 @@ async def run_tc(run_id: str, app_cfg: dict, entry: dict, channel: str = "ssh"):
     }
     _write_meta(run_dir, meta)
 
+    # case_id별 "처음 목격한 시각" — _wait_run_proc()의 on_progress 콜백(_record_case_times)이
+    # 폴링 주기(2초)마다 채운다. serial 채널은 아직 미지원(그래도 duration_sec=None으로
+    # 안전하게 표시됨 — _compute_case_durations가 case_times에 없는 case는 건너뜀).
+    # current_run["case_times"]에도 같이 얹어둬서, 이 run이 아직 "running"인 동안에도
+    # api_run_detail()이 실시간으로 진행중 소요시간을 계산할 수 있게 한다(동시에 하나의
+    # run만 진행되는 이 대시보드의 싱글턴 실행 모델을 그대로 재사용).
+    case_times: dict = {}
+    current_run["case_times"] = case_times
+
     try:
         if channel == "serial":
             exit_code = await _run_serial(app_cfg, entry, log_path)
         elif entry.get("chain_reboot_pairs"):
-            exit_code = await _run_ssh_full_with_reboots(app_cfg, entry, log_path, run_dir)
+            exit_code = await _run_ssh_full_with_reboots(app_cfg, entry, log_path, run_dir, case_times)
         else:
-            exit_code = await _run_ssh(app_cfg, entry, log_path, run_dir)
+            exit_code = await _run_ssh(app_cfg, entry, log_path, run_dir, case_times)
 
         meta["exit_code"] = exit_code
         text = log_path.read_text(errors="replace")
         pass_n, fail_n, cases = _parse_results(text, app_cfg)
+        _record_case_times(log_path, app_cfg, case_times)  # 마지막 순간에 찍힌 case까지 마저 기록
+        meta["case_durations"] = _compute_case_durations(meta["started_at"], cases, case_times)
         meta["pass"] = pass_n
         meta["fail"] = fail_n
         meta["skip"] = sum(1 for c in cases if c["status"] == "SKIP")
@@ -1113,6 +1246,7 @@ async def run_tc(run_id: str, app_cfg: dict, entry: dict, channel: str = "ssh"):
         current_run["run_id"] = None
         current_run["proc"] = None
         current_run["cancelled"] = False
+        current_run["case_times"] = None
         _prune_old_runs(app_cfg["runs_dir"])
         _rebuild_latest_status(app_cfg)
 
@@ -1264,6 +1398,17 @@ def api_run_detail(run_id: str, app_id: str = DEFAULT_APP_ID):
     _, _, cases = _parse_results(log_text, app_cfg)
     if meta.get("status") == "running":
         cases = sorted(cases + _pending_case_rows(app_cfg, log_text, cases), key=_case_sort_key)
+        # 아직 진행 중인 run이면 current_run의 실시간 case_times로 소요시간을 계산한다
+        # (완료 전까지는 meta.json에 case_durations가 없음) — 다른 run이 이미 시작돼
+        # current_run이 이 run_id를 더 이상 가리키지 않으면 계산하지 않는다(빈 값 유지).
+        if current_run.get("run_id") == run_id and current_run.get("case_times") is not None:
+            case_durations = _compute_case_durations(meta["started_at"], cases, current_run["case_times"])
+        else:
+            case_durations = {}
+    else:
+        case_durations = meta.get("case_durations") or {}
+    for c in cases:
+        c["duration_sec"] = case_durations.get(c["case"])
     return {"meta": meta, "log": log_text, "cases": cases}
 
 
@@ -1318,7 +1463,7 @@ async def api_run(req: RunRequest):
         reboot_tc_map = app_cfg.get("reboot_tc_map", {})
         reboot_selected = [t for t in ordered if t in reboot_tc_map]
         if reboot_selected:
-            # 재부팅을 수반하는 TC(device_log의 TC07/08,18,23,29)는 세션이 끊겨 다른 TC와
+            # 재부팅을 수반하는 TC(device_log의 TC06/07,15,20,26)는 세션이 끊겨 다른 TC와
             # --only로 한 번에 묶을 수 없다 — 단독 선택만 허용하고, "전체 실행"과 같은
             # -pre/-post 체이닝(_run_ssh_full_with_reboots)으로 실행한다.
             if len(ordered) > 1:
@@ -1342,11 +1487,16 @@ async def api_run(req: RunRequest):
         else:
             # verify_timer_loop_started + (필요시) setup_rotate 오버헤드 여유분.
             timeout = 90 + sum(custom_timeouts[t] for t in ordered)
+            # stall_timeout(무출력 정지 판정)은 STALL_TIMEOUT 기본값이 아니라 선택된 TC 중
+            # "출력 없는 단일 대기"가 가장 긴 것 기준으로 잡는다 — device_log TC05(6시간+)처럼
+            # 중간 출력이 전혀 없는 TC가 섞여 있으면 기본값(900s)으로는 오탐(false stall)한다.
+            stall_timeout = max(custom_timeouts[t] for t in ordered) + 300
             entry = {
                 "id": "custom",
                 "label": f"선택 실행 ({', '.join(ordered)})",
                 "flag": f"--only {','.join(ordered)}",
                 "timeout": timeout,
+                "stall_timeout": stall_timeout,
                 "reboot": False,
                 "note": None,
             }
@@ -1376,7 +1526,12 @@ def api_stop_run(run_id: str):
     if proc is None:
         raise HTTPException(409, "아직 프로세스가 시작되지 않음 — 잠시 후 다시 시도")
     current_run["cancelled"] = True
-    proc.kill()
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        # 로컬 프로세스가 이미 종료되어 있음(결과 후처리 중일 수 있음) — run_tc()가
+        # 곧 정상적으로 마무리하므로 별도 처리 없이 stopping으로 응답한다.
+        pass
     return {"run_id": run_id, "status": "stopping"}
 
 
