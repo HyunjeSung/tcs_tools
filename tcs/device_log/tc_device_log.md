@@ -25,6 +25,27 @@ validation_level: full
 `application/device_log/rules/{logpolicy,logcount,eolpolicy}.json`을 2차 검증 자료로
 사용해 작성되었다.
 
+## 변경 이력 (Changelog)
+
+- **2026-08-26**: 구 TC24("EOL 로그 압축 형식, zip vs xz", §AGSRS-491 AC) **삭제**.
+  DUT 실측 결과 `eol_logger.cpp` 전체에 `compressToXz()`/`pushToFileCompressQueue()`
+  호출이 단 한 곳도 없음을 확인 — EOL 로그 rotation은 헤더만 복사해 새 `.csv`를
+  만들 뿐, zip은 물론 xz 압축 경로 자체가 코드에 없다(요구사항 AC와 무관하게
+  압축 기능이 통째로 미구현). 검증할 대상 자체가 없다고 판단해 요구사항 삭제.
+  이에 따라 뒤 번호를 당겨 연번 유지: 구 TC25(Factory EOL Mode field logging
+  중단)→TC24, 구 TC26(Factory Reset)→TC25, 구 TC27(EOL 로그 추출 IPC)→TC26.
+- **2026-08-26 (사용자 제보로 정정 + DUT 실측 완료)**: TC26("EOL 로그 추출")
+  메커니즘이 완전히 틀려 있었음 — device_log MQTT IPC로 잘못 가정해 "코드에
+  핸들러 없음 → 미구현"으로 결론 냈었는데, 실제로는 uniep web_interface(포트
+  9112, HTTPS)의 `POST /auth/token` + `GET /api/factory/logs/{eol|device_log}`
+  HTTP 엔드포인트로 이미 구현되어 있다(디렉토리 전체를 tar로 다운로드, 원본은 안
+  건드림). §AGSRS-549는 사실상 구현 완료 상태 — Jira의 "개발 중" 문구가 stale한
+  것으로 보임. 사용자가 제공한 사내 가이드(`EMSP_EOL_Log_Export_API_20260513`)의
+  자격증명으로 실제 DUT에서 토큰 발급→tar 다운로드→원본 유지까지 end-to-end
+  전부 실측 확인(TC26-0/1/2 PASS). 자격증명(`auth_secret`)은 대외비라
+  `tc_device_log.sh`에 하드코딩하지 않고 `FACTORY_AUTH_KEY`/`FACTORY_AUTH_SECRET`
+  환경변수로 실행 시점에 주입한다.
+
 ## 공통 전제 조건 (Common Preconditions)
 
 - DUT 전원 ON, 네트워크 연결, SSH 또는 시리얼 콘솔(COM7, 115200 8N1) 접속 가능
@@ -46,6 +67,18 @@ validation_level: full
 - 외부 디바이스(PCS/BMS/BPU/PMU 등) 실물 연결이 없는 랩 환경에서는 MQTT로 텔레메트리
   notification을 직접 publish하여 대체 (`emsp/+/+/noti/...` 형식, 실제 topic은
   DUT의 `journalctl`에서 device_manager notification 경로를 참고)
+- `restart_docker_loader()`(TC09/TC10/TC14/TC16/TC17/TC21이 공유하는 헬퍼)로
+  재기동시킨 직후 바로 root/archive 큐 상태를 확인하지 말 것 — `pgrep -f
+  /edge/app/bin/device_log`로 프로세스 존재를 확인해도 `CloudUploadManager::init()`
+  (root/archive 파일을 in-memory 큐에 등록하는 `enumerateExistingFilesInDirectory()`
+  포함)이 끝났다는 보장은 아니다. `device_log::start()`는 broker 연결(재연결) 시점에
+  실행되는데(`device_log.cpp:60-66`), 컨테이너 전체(`ac_system_gen2`, edge_runtime 등
+  형제 앱 포함)가 함께 재기동되므로 프로세스가 뜬 뒤에도 broker 연결까지 수십 초가 더
+  걸릴 수 있다(2026-08-25 TC21 실측으로 발견). `restart_docker_loader()`는 이제 pgrep
+  이후 `journalctl`에서 `"Total files found in root"` 로그(`cloud_upload_manager.cpp:
+  1272` 근처, `enumerateRootFilesInDirectory()`)가 이번 재시작 이후 찍힐 때까지 최대
+  60초를 추가로 대기한다 — 이 헬퍼를 호출하는 TC들의 예상 소요시간에는 호출 횟수 ×
+  최대 60초가 더 들어간다고 보고 타임아웃을 잡을 것.
 
 ---
 
@@ -189,6 +222,17 @@ CSV의 연속된 두 데이터 행 사이 시간 간격이 `logpolicy.json`의 `
 > 텔레메트리를 직접 publish해야 실행 가능. 디렉토리/빈 CSV 자체는 부팅 시 이미
 > 만들어져 있으므로 이 SKIP 판단도 디렉토리가 아니라 데이터 행 존재로 내려야 한다.
 
+> **Flag (2026-08-25, 미확정 — 재검증 필요):** `20260825_160658_device_log_full`에서
+> TC03-3(MI 그룹)이 FAIL했다(MI_Monitoring 헤더만, 데이터 행 없음). `logpolicy.json`
+> 확인 결과 `MI_Monitoring`의 `logRowInterval`은 900초(15분)로, 다른 대부분 log_item
+> (초~수십 초 단위)보다 훨씬 길다. TC03은 `--full`에서 세 번째로 실행돼 docker-loader
+> 재시작 직후 몇 분 안에 체크가 이뤄지므로, 첫 데이터 행이 아직 안 쓰인 시점에 우연히
+> 걸렸을 가능성이 높다(재시작 후 5.5분 시점에도 여전히 0바이트인 것을 별도 확인 —
+> 가설과 일치). 다만 직전 재시작 정확한 시각을 journal에서 못 구해(그 사이 TC26
+> factory_reset이 journal을 리셋함) 100% 확정하지는 못했다 — device_log 결함이라기
+> 보다 "체크 타이밍이 이르다" 쪽에 무게가 실리지만, MI_Monitoring만 별도로 900초+여유
+> 대기 후 재확인하는 검증이 필요하다.
+
 ---
 
 ## SID0202 — File creation & naming
@@ -237,17 +281,29 @@ CSV의 연속된 두 데이터 행 사이 시간 간격이 `logpolicy.json`의 `
 ### 사전 조건
 
 - 공통 전제 조건 충족
-- `logCreationTime`이 짧은 **주기적(non-fault)** log_item 선정 — 본 벤치 기준 non-fault
-  logItem 중 최솟값은 21600초(6시간, 예: `PMU_Monitoring`). fault류(180초)는 이벤트
-  기반이라 본 TC 대상에서 제외
+- **주기적(non-fault)** log_item 선정(`PMU_Monitoring`, logCreationTime=21600초/6시간).
+  fault류(180초)는 이벤트 기반이라 본 TC 대상에서 제외 — [2026-08-25] 시간 점프
+  방식으로 바뀌며 더 이상 실시간 대기 단축을 위해 짧은 주기를 고를 필요는 없어졌으나,
+  기존 대상을 그대로 유지
 - 대상 log_item에 텔레메트리가 도착 중인 상태
 
 ### 절차
 
 1. 대상 log_item의 현재 활성 파일명에서 `<startTime>` 기록
-2. `logCreationTime`(21600초) + 여유시간(예: 5분)만큼 실시간 대기 — device_log 재시작이나
-   시스템 시각 조작(`date -s`) 없이 자연 경과만으로 진행 (짧은 주기 log_item을 고른 이유)
-3. rotation으로 생성된 신규 파일명에서 `<startTime>`/`<endTime>` 추출, 차이(초) 계산
+2. `timedatectl set-ntp no` + `timedatectl set-time`으로 시스템 시각을
+   `logCreationTime`(21600초) + 여유시간(5분)만큼 앞으로 점프시킨 뒤, idle thread
+   사이클(15초) 정도만 대기 — rotation이 "시간이 실제로 바뀌었을 때" 트리거되는지를
+   검증하는 것이 목적이므로, 자연 경과 대기가 아니라 시각 자체를 바꿔 확인한다
+   ([2026-08-25] 재설계 — 기존엔 6시간+5분을 실시간 sleep으로 흘려보냈는데, 이는
+   "대기했다"는 것만 증명할 뿐 시간 변경에 대한 반응을 검증하지 못했다는 지적으로 수정)
+3. rotation으로 생성된 신규 파일명에서 `<startTime>`/`<endTime>` 추출, 차이(초) 계산 —
+   [2026-08-25 DUT 실측 후 추가] 회전되어 닫힌 파일은 일반 idle thread 라운드로빈
+   (`rootToArchiveOrToUpload()`, 5초 주기)이 곧바로 채가 toupload가 비어있으면
+   `ARCHIVE_ROOT`도 안 거치고 `TOUPLOAD_ROOT`까지 가버릴 수 있다(TC18/TC21과 동일
+   게이트). 원래 활성 파일의 시작시각을 접두사로 root/archive/toupload 세 곳을 모두
+   찾아야 한다 — root만 보면 파일이 이미 옮겨져 항상 FAIL 처리되는 버그가 있었다
+4. 검증 종료 후 시스템 시각을 절차 2 이전 값으로 복원(`date -s`, NTP는 TC18/TC19와
+   동일하게 재활성화하지 않음)
 
 ### 기대 결과
 
@@ -437,6 +493,21 @@ CAN 등 외부 디바이스 연결이 끊겼다가 재연결될 때 로깅 파�
 | TC09-2 | 가장 오래된 파일 삭제됨 | boolean | true | `[ ! -f "$oldest_file" ]` |
 | TC09-3 | fileCount 원복 확인 | boolean | true | `grep -A2 "\"logItem\": \"$log_item\"" logpolicy.json \| grep '"fileCount"' \| grep -q ": *$original_count"` |
 
+> **정정 (2026-08-25, 소스 확인 후 원인 확정):** 더미 archive 파일을 만들 때 시리얼로
+> `"TC09_1"`~`"TC09_8"`(밑줄 포함)을 썼던 것이 원인으로, `cur_count=21`(수정된
+> fileCount=5를 넘는 값)로 항상 FAIL했다. `getLogTypeFromFileName()`
+> (`cloud_upload_manager.cpp:1830-1854`)은 파일명을 `_`로 split해 4번째~마지막
+> 토큰 사이를 log_item으로 합치는데, 시리얼에 밑줄이 있으면
+> `20260825_..._Meter_TC09_1.csv.xz` → log_item이 `"Meter_TC09"`로 잘못 합쳐진다.
+> `isKnownLogType("Meter_TC09")`가 false라서 `enumerateArchiveFilesInDirectory()`가
+> 이 더미들을 추적 큐(`arch_dir_files_`, `deleteArchFileBasedOnCount()`가 유일하게
+> 참조하는 in-memory 큐)에서 아예 빼먹는다 — 재시작을 몇 번 해도 큐에 없는 파일은
+> 절대 삭제 대상이 될 수 없다. **device_log 결함이 아니라 테스트 더미 시리얼 명명
+> 규칙 위반**(TC18/TC21 더미 생성 때 이미 같은 종류의 버그를 발견해 밑줄 금지 규칙을
+> `create_dummy_archive_file()` 주석에 남겨뒀는데, TC09는 그 규칙이 적용되기 전에
+> 작성된 코드라 반영이 안 돼 있었다). 시리얼을 `"TC09$i"`(밑줄 제거)로 수정 후
+> 재검증: PASS 3/3.
+
 ---
 
 ## TC10 — Archive 파일 보관기간(retentionTime) 초과 삭제
@@ -452,13 +523,14 @@ CAN 등 외부 디바이스 연결이 끊겼다가 재연결될 때 로깅 파�
 
 ### 절차
 
-1. `archive/<logItem>/`에 파일명 규칙에 맞는 더미 `.csv.xz`+`.meta` 파일 1개 생성
+1. `retentionTime` 초과 시점을 먼저 계산하고, `archive/<logItem>/`에 **그 시점을
+   파일명(startTime)으로 직접 인코딩한** 더미 `.csv.xz`+`.meta` 파일 1개 생성
+   (touch로 mtime만 나중에 되돌리는 방식 금지 — 아래 Flag 참고)
 2. `docker-loader` 재시작 — 재시작 시점의 `enumerateExistingFilesInDirectory()`가
    archive 디렉토리를 다시 스캔하므로, 이 시점에 존재하는 더미 파일도 앱의
    `arch_dir_files_` 추적 큐에 정식 등록된다
-3. 그 더미 파일에 `touch -d`로 mtime을 `retentionTime` 초과 시점으로 강제 설정
-4. `archiveToUpload()` 사이클 대기
-5. 해당 더미 파일의 삭제 여부 확인
+3. `archiveToUpload()` 사이클 대기
+4. 해당 더미 파일의 삭제 여부 확인
 
 ### 기대 결과
 
@@ -476,12 +548,22 @@ CAN 등 외부 디바이스 연결이 끊겼다가 재연결될 때 로깅 파�
 > `CloudUploadManager::arch_dir_files_` 인메모리 큐에 등록되지 않아(부팅 시 1회만
 > 채워짐, `enumerateExistingFilesInDirectory()` — `cloud_upload_manager.cpp:107`)
 > `deleteArchFileBasedOnTime()`(`:1701-1705`)이 더미 파일의 존재 자체를 몰라 삭제되지
-> 않는 문제가 있어, 앱이 정식 경로(`get_log_data`)로 옮긴 실제 파일을 쓰도록 정정한
-> 바 있다. 이후 "더미 파일 생성 후 docker-loader를 재시작"하는 방식으로 다시
-> 정정했다 — TC09이 이미 이 방식(더미 파일 생성 → 재시작 → FIFO 삭제 검증 성공)을
-> 쓰고 있으므로, "부팅 시 1회"는 프로세스 최초 기동이 아니라 **재시작 시점마다**를
-> 의미한다는 것이 확인됐다. 재시작을 매개로 하면 디스크에 직접 만든 더미 파일도
-> 정식으로 큐에 등록되므로, 네트워크 차단 없이 더미 파일 생성만으로 재현 가능하다.
+> 않는 문제가 있어, "더미 파일 생성 후 docker-loader를 재시작"하는 방식(TC09이 이미
+> 성공적으로 쓰던 방식)으로 정정했다.
+>
+> **주의 (Flag, 재정정 — 2026-08-24 DUT 실측):** 위 방식대로 고쳐도 여전히 삭제되지
+> 않는 것을 실측으로 확인했다 — 진짜 원인은 등록 여부가 아니라 **스캔 순서**였다.
+> `deleteArchFileBasedOnTime()`은 `arch_dir_files_[log_type]`(파일명=startTime 오름차순
+> 정렬된 `std::set`)을 앞에서부터 순회하다가 **만료 안 된 파일을 처음 만나는 순간
+> 즉시 break**한다(`cloud_upload_manager.cpp:1701-1705`, "파일명이 startTime 순이라
+> 오래된 순 정렬이고 첫 미만료 파일에서 스캔을 끝낸다"는 주석 그대로). 더미를
+> `end_epoch=now`로 만들면 파일명이 "지금"으로 찍혀, 이 벤치처럼 `archive/Meter/`에
+> 최근 며칠간 쌓인 진짜 파일이 많은 상태에서는 그 진짜 파일들 사이/뒤에 정렬된다 —
+> `touch -d`로 mtime만 되돌려도 스캔이 더미보다 먼저 정렬된(=아직 만료 안 된) 진짜
+> 파일에서 멈춰버려 더미까지 도달을 못 한다. 그래서 **만료 시점을 파일명(startTime)
+> 자체에 인코딩**해 더미가 set에서 가장 앞(가장 오래된 것)으로 정렬되게 만들어야
+> 한다 — 이러면 스캔이 더미를 가장 먼저 만나 정상 삭제하고, 그 다음(진짜, 안
+> 만료된) 파일에서 break해 나머지는 보존된다.
 
 ---
 
@@ -499,12 +581,17 @@ CAN 등 외부 디바이스 연결이 끊겼다가 재연결될 때 로깅 파�
 ### 사전 조건
 
 - 공통 전제 조건 충족, `journalctl` 접근 가능
+- 가능하면 `--tc11` 단독 실행 권장(아래 Flag 참고) — TC09/TC10/TC14/TC16/TC17처럼
+  `restart_docker_loader()`를 호출하는 다른 TC와 같은 세션에서 묶어 실행하면
+  cloud_broker의 300초 스캔 타이머가 그 재시작마다 리셋되어 본 TC의 310초 관측
+  창 안에 스캔이 한 번도 안 들어올 수 있다
 
 ### 절차
 
 1. 임의 log_item 파일을 toupload로 이동시키는 대신, `toupload/<logItem>/` 폴더 자체에
-   파일명 규칙에 맞는 dummy `.csv.xz`+`.meta` 파일 1개를 직접 생성 — 실제 로그
-   데이터가 아닌 최소한의 트리거만으로 BlobUploadDirector의 스캔 대상이 되도록 함
+   파일명 규칙에 맞는 dummy `.csv.xz`+`.meta` 파일 1개를 직접 생성 — **`.meta`는
+   반드시 `upload_name`/`upload_path`/`from` 필드를 채운 유효한 형식이어야 한다**
+   (아래 Flag 참고, 빈 `.meta`는 cloud_broker가 무효로 판정해 조용히 스킵함)
 2. `journalctl -u docker-loader --no-pager | grep -iE "Upload success for log item|Upload fail for log item"`
    로 성공/실패 로그 중 하나가 기록되는지 확인
 
@@ -519,6 +606,29 @@ CAN 등 외부 디바이스 연결이 끊겼다가 재연결될 때 로깅 파�
 | 기준 ID | 설명 | 타입 | 기준값 | 셸 검증 |
 |---------|------|------|--------|---------|
 | TC11-1 | 성공/실패 로그 중 하나 기록 | boolean | true | `journalctl -u docker-loader --no-pager \| grep -qE "Upload success for log item|Upload fail for log item"` |
+
+> **주의 (Flag, 정정 — 2026-08-24 DUT 실측):** 최초 `create_dummy_toupload_file()`은
+> `.meta`를 빈 파일로 만들었는데, cloud_broker의 `BlobUploadDirector::parse_meta()`
+> (`blob_upload_director.cpp:143-186`)는 `upload_name`/`upload_path`/`from` 중 하나라도
+> 비면 `meta.valid=false`로 판정하고 `scan_loop_task()`(`:99-103`)가
+> `"[Director] Invalid meta file: ..."` 로그만 남긴 채 업로드 자체를 시도하지 않고
+> 조용히 건너뛴다. 실제 업로드 시도가 없으니 cloud_broker가 device_log로
+> `NOTI_FILE_UPLOAD_RESULT`를 돌려보낼 일도 없고, `handleFileUploadResult()`
+> (`cloud_upload_manager.cpp:241`)의 "Upload success/fail for log item" 로그도 영원히
+> 안 찍힌다 — 100% FAIL이 확정적이었다(스크립트 버그, cloud_broker/device_log 결함
+> 아님). `create_dummy_toupload_file()`이 device_log의 `recreateMetaFile()`과 동일한
+> key=value 형식으로 최소 요구 필드를 채우도록 정정했다.
+
+> **주의 (Flag, 미해결 — 2026-08-24 DUT 실측):** 위 정정 후에도 `--only TC10,TC11,
+> TC12,...`처럼 여러 TC를 묶어 실행하면 여전히 FAIL이 관측됐다. journal 확인 결과
+> `[Director] Scanning directory` 로그는 docker-loader 재시작 시점으로부터 정확히
+> ~300초 뒤 딱 한 번씩만 나타났고, TC11/TC12가 실행되는 구간(예: 14:00~14:16)에는
+> 스캔이 전혀 없었다 — TC10/TC14/TC16/TC17이 각자 `restart_docker_loader()`를
+> 호출하는데, 이게 연달아 일어나면 cloud_broker의 300초 스캔 타이머가 매번 리셋되어
+> 앞쪽 TC의 관측 창은 스캔을 못 잡고 맨 마지막 재시작 이후에야 스캔이 한 번 찍히는
+> 것으로 보인다(단, 정확히 몇 번째 재시작이 어떻게 겹쳤는지는 SSH 재시도 제한으로
+> 끝까지 확정하지 못함). 재현되면 TC11/TC12를 단독(`--tc11`/`--tc12`)으로 실행해
+> 다른 재시작의 영향을 배제한 뒤 재확인할 것.
 
 ---
 
@@ -540,6 +650,14 @@ Azure Blob 전송 자체는 `azure_connector`(별도 앱, IPC로 위임)가 수�
 > (`blob_upload_director.cpp:66-76`). 즉 파일이 toupload에 막 도착해도 다음 스캔까지
 > 최대 300초를 기다려야 `[Director]` 로그에 등장한다 — TC11/TC12 셸 검증 시
 > 이 300초를 반드시 감안해 폴링 대기해야 한다(짧은 고정 sleep으로는 100% FAIL).
+>
+> **주의 (Flag, 정정 — 2026-08-24 DUT 실측):** TC12-1의 `grep '\[Director\]' | grep
+> "$f"` 판정은 dummy `.meta`가 빈 파일이면 `"[Director] Invalid meta file: <f 포함
+> 경로>"` 에러 로그에도 매칭돼 **실제로는 업로드 시도가 전혀 없었는데도 위양성
+> PASS가 날 수 있다**(TC11 Flag 참고 — `parse_meta()`가 `upload_name`/`upload_path`/
+> `from` 중 하나라도 비면 무효 처리하고 스캔을 건너뜀). `create_dummy_toupload_file()`
+> 이 유효한 `.meta`를 쓰도록 정정된 뒤에는 이 grep이 진짜 업로드 시도/완료 로그와
+> 매칭되므로 이 문제는 해소된다.
 
 ### 사전 조건
 
@@ -596,7 +714,8 @@ Azure Blob 전송 자체는 `azure_connector`(별도 앱, IPC로 위임)가 수�
    확인)
 2. 현재 네트워크 상태 확인 (온라인이면 위 사전조건대로 차단, 오프라인이면 skip)
 3. 로그 생성 → `forced_log_upload` IPC로 root에 `.csv.xz` 생성
-4. idle thread 사이클(5초) 대기
+4. idle thread 사이클(5초, `rootToArchiveOrToUpload()`) 반복 폴링(최대 60초) — 아래
+   Flag 참고, 한 번만 확인하지 말 것
 5. `toupload/`, `archive/` 두 디렉토리를 모두 조회해 신규 파일이 실제로 어느 쪽으로
    이동했는지 확인
 
@@ -611,6 +730,19 @@ Azure Blob 전송 자체는 `azure_connector`(별도 앱, IPC로 위임)가 수�
 | 기준 ID | 설명 | 타입 | 기준값 | 셸 검증 |
 |---------|------|------|--------|---------|
 | TC13-1 | 신규 파일 이동 위치 확인 | boolean | archive | `if [ -f "$toupload_dir/$fname" ]; then echo toupload; elif [ -f "$archive_dir/$fname" ]; then echo archive; else echo none; fi` |
+
+> **주의 (Flag, 정정 — 2026-08-24 DUT 실측):** `forced_log_upload`(`get_log_data`,
+> `handleForcedLogUploadRequest()`)는 오프라인이면 파일을 archive로 옮기지 않고
+> **root 큐에 그냥 재등록만 한다**(`cloud_upload_manager.cpp:404-414`, "Internet not
+> available. Skipping upload" — root에는 retention sweep이 없어 재시작 전까진 이
+> 파일을 되찾을 방법이 없다는 주석까지 있음). 실제 root→archive 이동은 완전히
+> 별개의 idle thread 사이클인 `rootToArchiveOrToUpload()`(5초 주기,
+> `selectNextRootLogType()` round-robin)가 나중에 그 파일을 집어야 일어난다
+> (`:816-840`, 오프라인이면 else 분기로 archive行). 이전 절차는 `get_log_data` 호출
+> 후 10초 고정 대기 후 단 한 번만 확인해, round-robin이 다른 log_type을 먼저
+> 처리하느라 Meter 차례가 10초를 넘기면 FAIL이었다 — 과거 관찰된 "TC 순서
+> 의존성"(1·2차 실행은 PASS, 3차는 FAIL)이 정확히 이 레이스로 설명된다(앱 결함이
+> 아니라 대기시간 부족). idle thread 사이클 반복 폴링(최대 60초)으로 정정했다.
 
 > **주의 (Flag, 정정, 병합분 인계):** device_log(`cloud_upload_manager.cpp`)
 > 자체에는 고정 횟수(10회) 재시도 카운터가 없다 — `isInternetAvailable()`이 false면
@@ -653,11 +785,11 @@ Azure Blob 전송 자체는 `azure_connector`(별도 앱, IPC로 위임)가 수�
 ### 절차
 
 1. archive에 파일이 1개 이상 누적된 상태 확인
-2. 네트워크 복구
-3. `mosquitto_pub`으로 `internet_status` notification을 `{"connected":true}` 페이로드로
-   강제 발행 — 실제 네트워크 폴링 주기를 수동적으로 기다리는 대신 `cloud_connected_
-   action()`을 직접 트리거해 결정론적으로 재현
-4. `archive/` → `toupload/` 이동 확인
+2. 네트워크 복구 — `network_restore()`가 iptables 규칙 해제와 함께 `internet_status`
+   notification(`{"data":{"is_connected":true}}`)을 직접 발행해 `cloud_connected_
+   action()`을 결정론적으로 트리거한다(아래 Flag 참고 — device_log는 실제 네트워크를
+   스스로 확인하지 않으므로 이 알림 없이는 iptables만으로 온라인 복귀를 인지 못함)
+3. `archive/` → `toupload/` 이동 확인
 
 ### 기대 결과
 
@@ -671,10 +803,19 @@ Azure Blob 전송 자체는 `azure_connector`(별도 앱, IPC로 위임)가 수�
 |---------|------|------|--------|---------|
 | TC14-1 | archive→toupload 이동 확인 | boolean | true | `[ ! -f "$archive_dir/$fname" ] && [ -f "$toupload_dir/$fname" ]` |
 
-> **주의 (Flag):** `internet_status` notification의 정확한 payload 필드명/스키마는
-> 코드에서 아직 확인되지 않았다(device_connection의 `{"protocol":..,"connected":..}`
-> 패턴을 참고해 `{"connected":true}`로 잠정 구현) — 최초 실행 시 journal에서 실제
-> 수신/반응 여부를 확인하고 다르면 정정할 것.
+> **주의 (Flag, 정정 — 2026-08-24 DUT 실측/소스 확인):** device_log는 실제 네트워크
+> 상태를 스스로 확인하지 않는다 — `CloudUploadManager::is_internet_available_`
+> (`cloud_upload_manager.hpp:215`)은 오직 `NOTI_INTERNET_STATUS` 알림
+> (`device_log.cpp:673 handle_noti_internet_status()`, sys_manager가 보내는 것으로
+> 추정)으로만 갱신된다. 즉 iptables로 실제 트래픽을 막거나 복구해도 그 자체로는
+> 앱의 인지 상태가 안 바뀐다 — 이 알림을 직접 발행해야 한다. 정확한 페이로드
+> 스키마도 `{"data":{"is_connected": true|false}}`로 확인됐다(device_connection의
+> `{"protocol":..,"connected":..}` 패턴과 다름 — 예전에 `{"connected":true}`로
+> 잘못 발행했던 시도는 `handle_noti_internet_status()`의 `data.is_connected`
+> 필드 검증에 실패해 조용히 무시되고 있었다). `network_block()`/`network_restore()`
+> 공통 헬퍼가 이 알림을 자동으로 함께 발행하도록 정정했다 — TC13/TC16/TC17/TC21처럼
+> `network_block()`만으로 오프라인 분기를 유도하던 다른 TC들도 이 정정의 혜택을
+> 받는다.
 
 ---
 
@@ -708,6 +849,18 @@ toupload에 파일이 남아있는 상태로 재부팅해도, 재기동 후 자�
 | 기준 ID | 설명 | 타입 | 기준값 | 셸 검증 |
 |---------|------|------|--------|---------|
 | TC15-1 | 재부팅 후 toupload 파일 처리됨 | boolean | true | `journalctl -b 0 -u docker-loader \| grep -q "Upload success"` |
+
+> **정정 (2026-08-25, 실측 후 원인 확정):** `20260825_160658_device_log_full` run에서
+> TC15-1이 FAIL했다 — 대상 파일로 고른 게 다른 TC(09/18/21)가 남긴 0바이트 좀비
+> 더미(`..._Meter_TC212.csv.xz`, 실제 DUT 시리얼이 아니라 "TC숫자" 시리얼)였다.
+> `get_log_data`가 이번엔 새로 옮길 실파일이 없어(root가 이미 비어있음) toupload에
+> 남아있던 좀비 더미가 `ls -t | head -1`에 "가장 최근 파일"로 잡힌 것 — 재부팅 후
+> 업로드 재개 로직 자체의 결함이 아니라 대상 파일 선정이 오염된 것이었다. 대상 파일
+> 후보에서 실제 DUT 시리얼이 아닌 "TC숫자로 시작하는 시리얼" 더미를 제외하도록
+> `tc_device_log.sh`(`tc15_pre()`)를 수정 후 재검증: PASS. (참고: PASS/FAIL 판정
+> 자체는 `journalctl`에 "Upload success"가 하나라도 있는지로 보는 일반적인 검사라,
+> 대상 파일이 실제로 업로드됐는지와 무관하게도 통과할 수 있다 — "대상 파일" 정보는
+> 근거 표시용이므로 좀비 더미가 아닌 실파일을 가리키도록 고친 것이 이 수정의 핵심.)
 
 ---
 
@@ -800,42 +953,168 @@ toupload로 이동하지 않고 archive로만 이동하는지 확인한다 (`isU
 
 ---
 
-## TC18 — 자정 루틴: perDayRoot 초기화 및 잔여 quota archive 이월
+## TC18 — 자정 루틴: perDayRoot 초기화 및 잔여 quota archive 이월 + root/archive→toupload 이동
 
 ### 목적
 
 매일 `midNightCheckHrs:midNightCheckMins`(기본 23:50)에 `updateLogUploadLimitsDaily()`가
 실행되어, 남은 `perDayRoot`가 `perDayArchive`로 이월되고 `perDayRoot`는
-`defaultPerDay`로 초기화되는지 확인한다 (`cloud_upload_manager.cpp:1409`).
+`defaultPerDay`로 초기화되는지 확인한다 (`cloud_upload_manager.cpp:1409`). 이어서 곧바로
+호출되는 `midNightRootToUpload()`/`midNightArchiveToUpload()`(`:666-667, 673-750`)가
+실제로 root/archive의 파일을 그날 리셋된 quota만큼 toupload로 옮기는지도 함께
+검증한다(§AGSRS-544).
+
+> **주의 (Flag, 정정 이력 — 2026-08-25):** 원래 절차 5번에 "root/archive→toupload
+> 이동도 확인"이라고 적혀 있었지만, 실제 구현(TC18-1/TC18-2)은 quota 숫자만 확인하고
+> 파일 이동 여부는 전혀 검증하지 않는 간극이 있었다 — 사용자 지적으로 발견해
+> TC18-3/TC18-4로 추가했다.
+
+> **주의 (Flag, 정정 — 2026-08-25 DUT 실측):** TC18을 이 DUT에서 실제로 처음
+> 실행해보니 TC18-1~4 전부 FAIL했다. 처음엔 "`ac_system_gen2` 컨테이너가 호스트와
+> 분리된 시간 네임스페이스에 있다"고 오판했으나(호스트 `date -s` 직후 호스트 자체
+> 재확인엔 반영되는데 `docker exec ac_system_gen2 date`로는 안 바뀐 것처럼 보였음),
+> 실제 원인은 **NTP 데몬이 `date -s`로 바꾼 시각을 거의 즉시(1초 이내) 되돌리는
+> 레이스**였다 — 호스트 확인은 되돌려지기 전에, 컨테이너 확인은 `docker exec` 왕복
+> 지연 때문에 되돌려진 후에 값을 읽어서 마치 컨테이너만 격리된 것처럼 보인 것.
+> `timedatectl set-ntp no`로 NTP를 먼저 확실히 끄고 `timedatectl set-time`으로
+> 설정하니 컨테이너 쪽에도 정상 반영됨을 확인했다 — `mount -o remount,rw /`나
+> `CAP_SYS_TIME` capability 추가 같은 컨테이너 권한 관련 시도는 전부 불필요했다.
+> `tc_device_log.sh`를 이 방식(`timedatectl set-ntp no` + `timedatectl set-time`)으로
+> 재수정했다. **참고**: 컨테이너 안에서 직접 `date -s`를 시도하면 여전히
+> `Operation not permitted`로 막힌다(컨테이너에 `CAP_SYS_TIME`이 없음) — 다만 호스트
+> `timedatectl`을 쓰면 이 제약과 무관하게 정상 동작하므로 문제 되지 않는다.
+>
+> **부수 발견 (RTC 플레이):** `timedatectl set-time`은 `date -s`와 달리 하드웨어
+> RTC에도 값을 쓴다 — 검증 중 RTC가 실제로 2023년으로 틀어진 걸 확인하고
+> `hwclock --systohc`로 복구를 시도했으나, 이 DUT는 `/etc/adjtime`이 없고
+> `/dev/rtc0` ioctl 자체가 간헐적으로 실패해(`Invalid argument`/`No such device or
+> address`가 번갈아 발생) RTC 읽기/쓰기가 근본적으로 불안정하다. `system_log`의
+> `tc_system_log.sh` TC02가 시간 원복에 `hwclock -s`를 우선 쓰는데, 이 DUT에서는
+> 이 방식도 신뢰할 수 없을 가능성이 있다 — 별도 확인 필요. device_log의 TC18/TC19는
+> RTC에 의존하지 않고 애초에 `orig_epoch`를 셸 변수로 저장해뒀다가 `date -s
+> "@${orig_epoch}"`로 복원하는 방식이라 이 RTC 불안정성과 무관하게 안전하다.
+>
+> **동일한 `date -s` 패턴을 쓰는 `system_log`의 TC02/TC07(+25h 시프트)은 이미
+> `timedatectl set-ntp false`를 먼저 거는 걸 확인했다** — 즉 이 NTP 레이스를 이미
+> 피하고 있었을 가능성이 높다(device_log의 TC18/TC19에만 이 단계가 빠져 있었음).
+
+> **주의 (Flag, 확인 완료 — 2026-08-25 DUT 재실측):** 위에서 "별도 확인 필요"로 남겨둔
+> `system_log` TC02의 `hwclock -s` 복원 단계를 직접 재현해본 결과, **실제로 안전하지
+> 않음을 확인했다.** 이 DUT는 `/`가 `ro,relatime`로 마운트돼 있어(`mount | grep " / "`)
+> `/etc/adjtime` 자체가 존재할 수 없고, `hwclock --systohc`(RTC에 쓰기)는 항상
+> `cannot open /etc/adjtime: Read-only file system`으로 실패한다 — `timedatectl
+> set-ntp yes`가 실패하는 것과 동일한 근본 원인(읽기전용 rootfs)이다. 반면 `hwclock -s`
+> (RTC→시스템, TC02가 실제로 쓰는 명령)는 **에러 없이 성공(`exit_code=0`)하면서
+> RTC에 남아있던 오염된 값을 시스템 시계에 그대로 덮어썼다** — 재현 시나리오: 우리가
+> 앞서 TC18 검증차 `timedatectl set-time`으로 RTC를 건드려놓은 뒤(위 항목), 그 상태에서
+> `hwclock -s`를 실행하니 시스템 시계가 실제 시각(10:38)이 아니라 오염된 RTC 값
+> (23:52, 13시간 이상 차이)으로 조용히 세팅됐다. 즉 **TC02/TC07 뒤에 TC18/TC19 같은
+> `timedatectl` 기반 시간 조작 TC가 하나라도 끼어들면, `hwclock -s`가 그 오염을 그대로
+> 시스템 시계에 옮겨버려 복원이 "성공"으로 보고되면서 실제로는 시계가 틀어진 채
+> 남는다.** 이걸 RTC 쓰기로 고치려는 시도(`hwclock --systohc --noadjfile --localtime`)도
+> 해봤으나 UTC/localtime 해석 불일치로 오히려 9시간 어긋난 새 오염값을 만들어냈다 —
+> 이 하드웨어의 RTC 쓰기 경로 자체가 신뢰할 수 없다고 결론. **권장 조치**:
+> `system_log`의 TC02/TC07도 device_log의 TC18/TC19와 동일하게 `hwclock`/NTP에
+> 의존하지 말고 `orig_epoch` 셸 변수 + `date -s "@${orig_epoch}"` 방식으로 바꿀 것 —
+> 별도 확인/작업 필요(이 문서는 device_log 담당이라 시스템 로그 스크립트는 직접
+> 수정하지 않음).
 
 ### 사전 조건
 
 - 공통 전제 조건 충족, 시스템 시간 변경 권한
+- (TC18-3/4) `toupload/Meter/`가 비어있음 — 비어있지 않으면 TC18-3/4는 SKIP(TC21과
+  동일 이유: 이 DUT는 실제 클라우드 업로드 backlog가 상존, 아래 Flag 참고). TC18-1/2는
+  더미 파일과 무관해 이 사전조건과 별개로 항상 진행됨
 
 ### 절차
 
-1. 대상 log_item의 `perDayRoot`, `perDayArchive` 초기값 기록
-2. 시스템 시각을 23:49로 설정
-3. 23:50 도달 대기(또는 시각 전진)하여 자정 루틴 실행 확인
-4. `logcount.json`에서 `perDayArchive_after == perDayArchive_before + perDayRoot_before`,
-   `perDayRoot_after == defaultPerDay` 확인
-5. 동시에 `midNightRootToUpload()`/`midNightArchiveToUpload()`로 root/archive에서
-   toupload로의 이동(각 폴더 일일 한도 내)도 확인 (§AGSRS-544)
-6. 시스템 시각 원복
+1. 대상 log_item의 `perDayRoot`, `perDayArchive` 원래값 기록
+2. `perDayArchive`가 0이면(평소 정상값) 5로 임시 상향하고 즉시 `docker-loader` 재시작
+   — `midNightArchiveToUpload()`는 `move_limit`을 그 시점의 **리셋 전** `perDayArchive`로
+   잡으므로(`:722`), 0인 채로 두면 TC18-4가 무엇을 심어도 항상 못 옮긴다(device_log
+   결함 아님, TC14가 이미 쓰는 방식과 동일). `CloudUploadManager::init()`이
+   logcount.json을 부팅 시 1회만 읽어(TC14와 동일 제약) 재시작이 필요
+3. 재시작 후(있었다면) 값을 다시 읽어 TC18-1 계산의 기준값으로 삼는다 —
+   `toupload/Meter/`가 비어있는지 확인, 안 비어있으면 TC18-3/4용 더미 생성을 건너뛴다
+4. (비어있을 때만) `midNightRootToUpload()`/`midNightArchiveToUpload()` 검증용으로
+   root에 더미 `.csv.xz`+`.meta` 1개, archive에 더미 `.csv.xz`+`.meta` 1개를 각각
+   생성 — 두 함수 모두 실행 시 자체적으로 디렉토리를 재스캔하므로 이 더미 등록
+   자체에는 재시작이 불필요하다(2번의 quota 재시작과는 별개 이유). **더미 생성 직후
+   곧바로 시각을 점프시켜야 한다** — 자정 루틴과 무관하게 5초마다 도는 일반
+   `rootToArchiveOrToUpload()`/`archiveToUpload()` 라운드로빈이 그 사이에 먼저 채가면
+   (toupload가 안 비었을 때와 동일 게이트로 archive로 새어) 자정 루틴 특유의 동작을
+   구분 못 하게 된다(아래 Flag 참고)
+5. 시스템 시각을 23:50:00으로 설정(`isMidNightRoutineTime()`의 관측 창이
+   `[23:50, 23:55)`이므로 창 시작점으로 직행 — 23:49로 옮겨 90초를 기다리는 것보다
+   빠름) — `timedatectl set-ntp no`로 NTP를 먼저 끈 뒤 `timedatectl set-time`으로
+   설정(아래 Flag 참고, plain `date -s`는 NTP 레이스로 무효화됨)
+6. idle thread 사이클(5초) 몇 번만큼(15초) 대기하여 자정 루틴 실행 확인
+7. `logcount.json`에서 `perDayArchive_after`가 `[0, perDayArchive_before+perDayRoot_before]`
+   범위 안인지(동시에 흐르는 실 트래픽이 같은 사이클에서 quota를 같이 소비할 수 있어
+   정확한 등식은 예측 불가 — 아래 Flag 참고), `perDayRoot_after == defaultPerDay`인지
+   확인
+8. (더미를 만들었을 때만) root/archive에 심어둔 더미 파일이 각각 toupload로
+   이동했는지 확인
+9. 시스템 시각 원복, `perDayArchive`를 **이 TC 시작 시점 값(archive_before0)으로
+   항상** 되돌리고 재시작(`perDayRoot`는 자정 루틴이 만든 `defaultPerDay`가 정상
+   결과라 원복하지 않음; `perDayArchive`는 부스트 여부와 무관하게 자정 루틴 자체가
+   매번 값을 불리므로 항상 되돌려야 함 — 아래 Flag 참고)
 
 ### 기대 결과
 
 | 항목 | 기준 |
 |------|------|
-| perDayArchive | 이전 perDayArchive + 이전 perDayRoot |
+| perDayArchive | `[0, 이전 perDayArchive + 이전 perDayRoot]` 범위 내 |
 | perDayRoot | defaultPerDay로 초기화 |
+| root 더미 파일 | toupload로 이동(사전조건 충족 시) |
+| archive 더미 파일 | toupload로 이동(사전조건 충족 시) |
 
 ### PASS/FAIL Criteria
 
 | 기준 ID | 설명 | 타입 | 기준값 | 셸 검증 |
 |---------|------|------|--------|---------|
-| TC18-1 | perDayArchive 이월 계산 일치 | boolean | true | `[ "$archive_after" -eq "$((archive_before + root_before))" ]` |
+| TC18-1 | perDayArchive 이월 계산 범위 확인(동시 소비 반영) | boolean | true | `[ "$archive_after" -ge 0 ] && [ "$archive_after" -le "$((archive_before + root_before))" ]` |
 | TC18-2 | perDayRoot 초기화 | boolean | true | `[ "$root_after" -eq "$default_per_day" ]` |
+| TC18-3 | midNightRootToUpload()로 root→toupload 이동 | boolean | true (사전조건 미충족 시 SKIP) | `[ -f "$TOUPLOAD_ROOT/Meter/$root_fname" ]` |
+| TC18-4 | midNightArchiveToUpload()로 archive→toupload 이동 | boolean | true (사전조건 미충족 시 SKIP) | `[ -f "$TOUPLOAD_ROOT/Meter/$archive_fname" ]` |
+
+> **주의 (Flag, 정정 — 2026-08-25 DUT 실측):** `updateLogUploadLimitsDaily()`의
+> `perDayArchive = perDayArchive + perDayRoot`(`cloud_upload_manager.cpp:1416`)는
+> `midNightRootToUpload()`/`midNightArchiveToUpload()`가 **이미 몇 개를 옮겨 소비한
+> 뒤의** 값으로 계산된다(자정 루틴 순서: 이동 먼저, 리셋 나중). 이 DUT는 실 트래픽이
+> 흐르는 환경이라 우리 더미 1개 외에 자연 발생한 root 파일도 같은 사이클에서 같이
+> 소비될 수 있어(실측: `perDayRoot=8`인데 실제로는 2개가 소비돼 `perDayArchive_after`가
+> 순진한 등식(`archive_before+root_before`=8)이 아니라 6으로 나옴) 정확한 값을 사전에
+> 예측할 수 없다. TC18-1을 등식이 아니라 범위 검사로 완화했다 — 산식이 완전히
+> 고장나면(음수거나 상한 초과) 여전히 잡아낸다.
+
+> **주의 (Flag, 정정 — 2026-08-25 DUT 재실측):** TC18-3/4용 더미를 만든 뒤
+> `perDayArchive` 부스트용 `restart_docker_loader()`를 나중에 걸었더니, 더미가
+> root/archive에 앉아있는 동안 그 재시작 대기(최대 120초대)만큼 노출되면서, 자정
+> 루틴과 무관하게 항상 5초마다 도는 일반 라운드로빈이 그 사이에 우리 더미를 먼저
+> 채갔다(journal 실측: 자정 점프 **전에** 이미 `[rootToArchiveOrToUpload] Moved files
+> to: archive/Meter, file: ...TC18ROOT...`가 찍힘). 원인은 TC21과 동일한
+> `isToUploadDirEmpty()` 게이트 — 이 DUT는 `toupload/Meter`에 실제 클라우드 업로드가
+> 밀린 실 데이터가 상존해 거의 항상 안 비어있고, 그래서 일반 라운드로빈이든 자정
+> 루틴이든 어느 쪽이 먼저 집든 결과가 똑같이 "archive로 감"이 돼 TC18-3/4로는 자정
+> 루틴 특유의 동작을 구분해낼 수 없었다. **재시작을 더미 생성 "전"으로 옮기고(quota
+> 부스트만을 위해), `toupload/Meter` 사전조건 확인 후 더미를 만들자마자 곧바로 시각을
+> 점프시키는 순서로 재수정**해 노출 창을 최소화했다. 그래도 toupload가 이미 안
+> 비어있으면 근본적으로 결정적 관측이 불가능하므로, TC21과 동일하게 그 경우
+> TC18-3/4를 SKIP 처리한다(FAIL로 오판하지 않도록).
+
+> **주의 (Flag, 회귀 버그 정정 — 2026-08-25 DUT 실측):** `perDayArchive` 원복을
+> "이 TC가 5로 부스트했을 때만"(`archive_before0 == 0`)으로 조건부로 걸었더니, 자정
+> 루틴 자체가 부스트 여부와 무관하게 `perDayArchive = perDayArchive + perDayRoot`로
+> 매 실행마다 값을 불려놓는 바람에, 한 번이라도 원복을 건너뛰면(시작값이 이미 0이
+> 아니면) 다음 실행에서도 계속 조건을 못 만족해 원복이 영영 안 걸리고 실행할 때마다
+> 값이 눈덩이처럼 쌓였다(DUT 실측: TC18을 반복 실행하며 6→9→18로 누적). 이 부풀려진
+> `perDayArchive`가 남아있으면 **TC18과 무관한 `archiveToUpload()`의 일반 5초
+> 라운드로빈**이 Meter의 archive 파일들을 계속 toupload로 실어나르게 되고, 이 상태로
+> TC16이 실행되면 "root→toupload가 막혀야 하는데 toupload에 새 파일이 생김"(TC16-1)과
+> "archive에 남아있어야 하는데 없음"(TC16-2)이 연쇄로 FAIL한다 — device_log 결함이
+> 아니라 TC18의 원복 로직 결함이 TC16을 오염시킨 것. 부스트 여부와 무관하게 항상
+> `archive_before0`으로 원복하도록 고쳤다.
 
 ---
 
@@ -853,9 +1132,10 @@ toupload로 이동하지 않고 archive로만 이동하는지 확인한다 (`isU
 
 ### 절차
 
-1. 시스템 시각을 월말 23:49(예: `2027-03-31 23:49:00`)로 설정
-2. 23:50 자정 루틴 도달 대기 (월 전환 조건: `isMonthTransition()` — 현재 시각 ±60분 내
-   월이 바뀌는지 확인)
+1. 시스템 시각을 월말 23:50:00(예: `2027-03-31 23:50:00`)로 설정 — `isMidNightRoutineTime()`
+   관측 창(`[23:50, 23:55)`) 시작점으로 직행(TC18과 동일한 이유로 2026-08-25 수정)
+2. idle thread 사이클(5초) 몇 번만큼(15초) 대기하여 자정 루틴(월 전환) 실행 확인
+   (월 전환 조건: `isMonthTransition()` — 현재 시각 ±60분 내 월이 바뀌는지 확인)
 3. `logcount.json`에서 `perDayRoot == defaultPerDay(10)`, `perDayArchive == 0` 확인
 4. 시스템 시각 원복
 
@@ -908,68 +1188,81 @@ toupload로 이동하지 않고 archive로만 이동하는지 확인한다 (`isU
 
 ---
 
-## TC21 — 라운드로빈 기반 균등 업로드 선택 확인
+## TC21 — toupload 상태에 따른 root→toupload/archive 라우팅 확인
 
-### 목적 (요구사항 §AGSRS-498 AC1 관련)
+### 목적 (§AGSRS-498 AC1 관련)
 
-`selectNextRootLogType()`가 여러 log_item에 pending 파일이 있을 때 특정 log_item에
-편중되지 않고 골고루(라운드로빈) 선택하는지 확인한다. 요구사항 AC1은 "high-priority
-logs first"를 명시하지만, `logpolicy.json`/`logcount.json`에 우선순위 필드가 없어
-실제 구현은 우선순위가 아닌 라운드로빈이다(아래 Flag 참고). 본 TC는 우선순위 대신
-**라운드로빈의 균등성(공정성, 특정 log_item 편중/기아 없음)**을 검증 대상으로 삼는다.
+`rootToArchiveOrToUpload()`가 root에 쌓인 파일을 toupload로 보낼지 archive로 보낼지
+가르는 실제 조건은 `isToUploadDirEmpty(log_type)` 게이트 하나다
+(`cloud_upload_manager.cpp:826-827`): 그 log_type의 `toupload/` 디렉토리가 비어있으면
+toupload로, 비어있지 않으면 archive로 이동한다. 본 TC는 이 게이트를 log_item 1개
+(Meter)로 직접 검증한다.
+
+> **주의 (재설계 이력, 2026-08-25):** 원래는 여러 log_item이 라운드로빈으로 골고루
+> 선택되는지(공정성)를 봤으나, 이는 대상 log_item **전원**의 toupload가 동시에
+> 비어있어야만 관측 가능한 조건이라 실전에서 앞선 TC(TC12 등)의 backlog나 실제
+> 클라우드 업로드 지연만으로도 거의 항상 SKIP/FAIL로 이어졌다. 검증 대상을 라운드로빈
+> 선택 순서 자체가 아니라, 이 TC가 실제로 막히던 원인인 `isToUploadDirEmpty()` 게이트
+> 자체로 재설정했다("high-priority logs first"는 여전히 코드에 미구현 — 이 갭은
+> 별도로 사용자/Jira에 보고할 사항).
 
 ### 사전 조건
 
 - 공통 전제 조건 충족
-- 텔레메트리가 도착 중인 log_item 3개 이상 (본 벤치 기준: EMSP_Maintenance,
-  EMSP_Installation, PMU_Monitoring, MI_Monitoring, MI_Device_Info, Meter,
-  C_Box_Monitoring 중 선택)
+- (TC21-1) `toupload/Meter/`가 비어있음 — 비어있지 않으면 SKIP(사전조건 미충족,
+  이전 TC의 backlog나 실제 업로드 지연으로 발생 가능)
 
 ### 절차
 
-1. `forced_log_upload` IPC를 짧은 간격으로 3회 반복 발행해 대상 log_item들 각각에
-   root 대기 파일을 여러 개 쌓아둠
-2. idle thread 사이클(5초 주기)마다 각 log_item의 `toupload/<logItem>/` 파일 수를
-   능동적으로 폴링해, 어느 사이클에 어느 log_item이 선택됐는지 시퀀스로 기록한다.
-   고정된 긴 대기(예: 전체 log_type 수 × 2바퀴) 없이, 대상 log_item 전원이 최소
-   1회 이상 시퀀스에 등장하는 즉시 조기 종료해 수행시간을 단축한다
-3. 기록된 선택 시퀀스로 (a) 대상 log_item 전원이 관측 창에서 최소 1회 이상
-   선택됐는지, (b) 동일 item이 연속 사이클에서 뭉쳐 선택되다 다른 item으로
-   전환되는 패턴을 보이는지(수동 확인) 판정
+1. **TC21-1 (toupload 비어있음 → toupload로 이동)**: `toupload/Meter/`가 비어있는지
+   확인. 비어있으면 root(`$LOGGER_ROOT/Meter/`, archive/toupload와 같은 계층)에
+   더미 `.csv.xz`+`.meta`를 직접 생성하고 `docker-loader`를 재시작해
+   `root_dir_files_` 추적 큐에 등록시킨 뒤, `rootToArchiveOrToUpload()` idle thread
+   사이클(5초 주기, 최대 60초)을 대기해 그 더미가 toupload로 이동하는지 확인
+2. **TC21-2 (toupload 비어있지 않음 → archive로 이동)**: TC21-1의 결과나 사전
+   backlog 여부와 무관하게 이 sub-case 혼자서도 결정적으로 돌도록, toupload에
+   오염용 더미 파일을 별도로 1개 만들어 "비어있지 않음" 전제를 강제한다. 이어서
+   root에 새 더미 파일을 또 하나 생성하고 동일하게 재시작 + idle thread 대기로
+   archive로 이동하는지 확인
 
-> **주의 (Flag, 정정 이력):** `selectNextRootLogType()`은 대상으로 고른 5개
-> log_item만 도는 게 아니라 `log_type_keys_`(logpolicy.json 전체 loggingRules, 이
-> DUT에서 32개) 전체를 라운드로빈한다(cloud_upload_manager.cpp:1310-1322). 과거에는
-> 이 때문에 "전체 log_type 수 × 2바퀴"만큼 고정 sleep으로 기다렸으나(32×2×5+30=350초),
-> 능동 폴링 방식으로 바꾸면서 대상 log_item 전원이 관측되는 즉시 종료하도록 해
-> 수행시간을 단축했다(사이클마다 즉시 확인하므로 전체 바퀴를 다 돌 때까지 기다릴
-> 필요가 없어짐). 또한 archive/root→toupload 이동은 `isToUploadDirEmpty(log_type)`도
-> 함께 요구하므로(cloud_upload_manager.cpp:826,860), 앞선 TC가 특정 log_item의
-> toupload에 미처리 파일을 남겨둔 채 이 TC를 이어서 실행하면 라운드로빈 선택 자체는
-> 일어나도 toupload 카운트에는 반영되지 않을 수 있다 — 가능하면 `--tc21` 단독 실행
-> 권장.
+> **주의 (Flag, 정정 이력):** 처음엔 `get_log_data`(forced_log_upload IPC)로 root
+> 파일을 큐잉하는 방식으로 짰으나, 이 IPC가 타는 `handleForcedLogUploadRequest()`
+> (`cloud_upload_manager.cpp:314-428`)는 `rootToArchiveOrToUpload()`와 완전히 별개
+> 경로라 `isUploadAllowed()`/`isToUploadDirEmpty()` 게이트를 아예 거치지 않고
+> 온라인이면 무조건 toupload로 옮긴다는 것을 DUT 실측으로 확인했다 — TC21-2가
+> toupload를 일부러 오염시켰는데도 archive가 아니라 toupload로 가서 FAIL, 검증하려던
+> 게이트 자체를 안 타는 경로를 찌르고 있었던 것. TC10의 archive 더미 방식(더미 파일
+> 직접 배치 + `restart_docker_loader()`로 큐 등록)을 root에도 동일하게 적용해
+> 재수정했다 — root 디렉토리에 직접 생성한 더미는 `root_dir_files_`가 부팅 시 1회만
+> (`enumerateRootFilesInDirectory()`) 채워지므로 재시작이 필요하다.
+
+> **주의 (Flag, 재정정 — 2026-08-25 DUT 실측):** 위 방식대로 고치고
+> `restart_docker_loader()`에 초기화 완료 대기까지 넣은 뒤에도(공통 전제 조건 참고)
+> TC21-1/2 둘 다 여전히 FAIL했다 — journal에 `Total files found in root: 1`(등록
+> 성공)까지는 찍히는데, 그 이후 `rootToArchiveOrToUpload()`가 Meter를 처리하는 로그가
+> 전혀 없었다. 원인은 더미 파일명의 serial 파트에 넣은 `TC21_1`/`TC21_2`처럼 밑줄이
+> 섞인 값이었다: `getLogTypeFromFileName()`(`:1830-1854`)이 파일명을 밑줄로 split해
+> log_item을 재조립하는데, serial의 밑줄이 log_item에 흡수되어 `Meter_TC21`같은
+> 존재하지 않는 log_item으로 오인식되고, `pushRootFileInfo()`가 `isKnownLogType()`
+> 실패로 조용히(ERROR 로그만 남기고) 등록을 거부하고 있었다 — device_log 결함이
+> 아니라 테스트 스크립트가 파서 가정(serial에 밑줄 없음)을 어긴 것. serial을
+> `TC211`/`TC212`(밑줄 없음)로 바꿔 해결했다. `create_dummy_root_file()`(파일 448행
+> 부근 주석)에 이 제약을 명문화해뒀다 — root 더미를 만드는 다른 TC를 추가할 때도
+> serial에 밑줄을 넣지 말 것.
 
 ### 기대 결과
 
 | 항목 | 기준 |
 |------|------|
-| 선택 분포 | 특정 log_item에 편중되지 않고 관측 창 내에서 대상 log_item 전원이 최소 1회 이상 선택됨 (기아 없음) |
-| 선택 패턴(참고) | 동일 log_item이 연속 사이클에서 뭉쳐 선택되다 다른 item으로 전환되는 패턴(수동 확인) |
+| toupload 비어있을 때 | 신규 root 파일이 toupload로 이동 |
+| toupload 안 비어있을 때 | 신규 root 파일이 archive로 이동(toupload로 새지 않음) |
 
 ### PASS/FAIL Criteria
 
 | 기준 ID | 설명 | 타입 | 기준값 | 셸 검증 |
 |---------|------|------|--------|---------|
-| TC21-1 | 대상 log_item 전원이 관측 창에서 최소 1회 이상 선택됨(편중/기아 없음) | boolean | true | 사이클마다 `toupload/<item>/` 파일 수 증가를 기록한 시퀀스에 모든 대상 item이 등장하는지 확인 |
-| TC21-2 | 선택 전환 패턴(연속 뭉침 후 전환) 확인 | manual | — | 기록된 선택 시퀀스를 evidence로 남겨 수동 확인 |
-
-> **주의 (Flag, 정정):** `selectNextRootLogType()`/`selectNextArchLogType()`
-> (`cloud_upload_manager.cpp:1310` 부근)을 확인한 결과, `log_type_keys_` 배열을
-> `root_log_index_`로 순환하는 **라운드로빈** 방식이며 우선순위 필드나 정렬 로직은
-> 없다. `logpolicy.json`/`logcount.json`에도 priority 필드가 없다. "High-priority logs
-> first"는 현재 코드에 구현되어 있지 않지만, 사용자 확인 결과 본 TC의 검증 목표는
-> 우선순위 자체가 아니라 **라운드로빈이 특정 log_item을 굶기지 않고 골고루 도는지**로
-> 재설정되었다. AC1과의 격차(우선순위 미구현)는 별도로 사용자/Jira에 보고할 사항이다.
+| TC21-1 | toupload 비어있음 -> 신규 파일이 toupload로 이동 | boolean | true (사전조건 미충족 시 SKIP) | `[ -f "$TOUPLOAD_ROOT/Meter/$fname1" ]` |
+| TC21-2 | toupload 비어있지 않음 -> 신규 파일이 archive로 이동 | boolean | true | `[ -f "$ARCHIVE_ROOT/Meter/$fname2" ]` |
 
 ---
 
@@ -1033,11 +1326,17 @@ Factory EOL Mode ON 시 `/edge/log/eol/`에 `eol_1sec.csv`, `eol_1min.csv`가 �
    데이터를 담아 도착 중인지 확인**(`Meter`의 최신 CSV 행에서 non-empty 컬럼 수로
    판정) — EOL 로그가 안 늘어나는 원인이 "EOL 기능 문제"인지 "애초에 telemetry가
    안 옴"인지 구분하기 위함. TC24/28/30도 이 확인을 동일하게 선행한다
-2. `mosquitto_pub`으로 `SERVICE_SET_FACTORY_EOL_MODE`(`set_factory_eol_mode`)
+2. **[2026-08-25 추가] `eolpolicy.json`의 실제 대상 telemetry(BMS_Monitoring_P01,
+   `P01_B01_JF2_Normal_Back_BMS_*` 패턴) 도착 여부를 별도로 확인** — 아래 Flag 참고,
+   `Meter` telemetry가 있어도 EOL 행 생성과는 무관하다. 미도착 시 TC23-2/3은 SKIP하고
+   절차 3~5는 건너뛴다
+3. `mosquitto_pub`으로 `SERVICE_SET_FACTORY_EOL_MODE`(`set_factory_eol_mode`)
    `{"eol_mode": true}` 발행
-3. 2~5분 대기하며 텔레메트리 publish 지속
-4. `/edge/log/eol/eol_1sec.csv`, `eol_1min.csv` 각각의 행 수와 마지막 행 시각 확인
-5. `set_factory_eol_mode` `{"eol_mode": false}` 발행하여 종료
+4. 130초 대기하며 텔레메트리 publish 지속
+5. `/edge/log/eol/<start>_<end>_eol_1sec_<serial>.csv`,
+   `<start>_<end>_eol_1min_<serial>.csv`(고정 파일명이 아니라 다른 device_log 파일과
+   동일하게 타임스탬프가 붙음 — 아래 Flag 참고) 각각의 행 수와 마지막 행 시각 확인
+6. `set_factory_eol_mode` `{"eol_mode": false}` 발행하여 종료
 
 ### 기대 결과
 
@@ -1051,80 +1350,56 @@ Factory EOL Mode ON 시 `/edge/log/eol/`에 `eol_1sec.csv`, `eol_1min.csv`가 �
 | 기준 ID | 설명 | 타입 | 기준값 | 셸 검증 |
 |---------|------|------|--------|---------|
 | TC23-0 | telemetry notification column 데이터 도착 확인(사전 확인용) | boolean | true | `Meter` 최신 CSV 행의 non-empty 컬럼 수 > 3 |
-| TC23-1 | eol_1sec.csv 행 증가 | boolean | true | `[ "$(wc -l < eol_1sec.csv)" -gt "$rows_before" ]` |
-| TC23-2 | eol_1min.csv 행 증가 | boolean | true | `[ "$(wc -l < eol_1min.csv)" -gt "$rows_before" ]` |
+| TC23-1 | BMS telemetry column 데이터 도착 확인(사전 확인용) | boolean | true | `BMS_Monitoring_P01` 최신 CSV 행의 non-empty 컬럼 수 > 3 |
+| TC23-2 | eol_1sec.csv 행 증가 (TC23-1 FAIL 시 SKIP) | boolean | true | `[ "$(wc -l < <실제 eol_1sec 파일>)" -gt "$rows_before" ]` |
+| TC23-3 | eol_1min.csv 행 증가 (TC23-1 FAIL 시 SKIP) | boolean | true | `[ "$(wc -l < <실제 eol_1min 파일>)" -gt "$rows_before" ]` |
+
+> **[2026-08-25] sub-case 번호는 항상 순수 숫자만 사용할 것**(`TC23-0b`처럼 문자를
+> 섞으면 안 됨) — tc-dashboard의 `ASSERT_RE`/`EXPECTED_CASE_RE`(`server.py`)가
+> `TC\d+-\d+` 패턴만 매칭해, 문자가 섞이면 그 case가 결과 현황판에서 통째로
+> 빠지고 REASON 줄이 엉뚱하게 바로 이전 case에 붙어버린다(처음에 `TC23-0b`로
+> 넣었다가 실측으로 발견 — "진행중 TC 표시가 안 보인다"는 사용자 리포트의 원인).
 
 > **참고:** IPC 요청 메시지 필드명이 요구사항 문서(AGSRS-516)에는
 > `{"factory_eol_mode": true}`로 기재되어 있으나, 코드(`device_log.cpp:457`)는
 > `message.value("eol_mode", false)`로 `eol_mode` 필드를 읽는다. 실제 IPC 발행 시
 > `eol_mode` 필드명을 사용할 것 — 요구사항 문서의 필드명 표기 오탈자로 판단됨.
 
-> **주의 (Flag, 재검증 필요 — 2026-08-21 실측):** DUT(192.168.10.25)에서 `set_factory_
-> eol_mode {"eol_mode":true}` 발행 후 130초를 기다려도 `/edge/log/eol/` 디렉토리
-> 자체가 생성되지 않았다(`ls: cannot access '/edge/log/eol/': No such file or
-> directory`). `EolLogger::setEolLoggingEnabled(true)`는 동기적으로
-> `ensureEolFileHandlersCreated()`를 호출해 즉시 파일을 만들어야 하므로
-> (`eol_logger.cpp:68-78, 85-136`), 130초 뒤에도 디렉토리가 없다는 것은 이 경로가
-> 전혀 실행되지 않았다는 뜻이다. 유력한 원인 두 가지:
-> (1) 그 이전 단계인 `EolLogger::loadEolPolicy()`(`eol_logger.cpp:28-66`)가
-> `eolpolicy.json`을 못 읽어 `m_eol_policy_doc_.loggingRules`가 비어 있으면
-> `ensureEolFileHandlersCreated()`의 for 루프가 아무 것도 하지 않는다 —
-> `loadEolPolicy()`는 `log_policy_manager.cpp:69`에서 앱 부팅 시 1회만 호출된다.
-> (2) `set_factory_eol_mode` IPC 자체가 device_log에 전달되지 않았을 가능성 —
-> 이전 스크립트가 IPC 응답을 확인 없이 버려서(`> /dev/null`) 구분이 불가능했다
-> (2026-08-21 스크립트 수정으로 응답 캡처 + `journalctl` `[EOL]`/`[loadEolPolicy]`
-> 근거 수집 추가함). §AGSRS-491의 "AC 미구현"(TC24/TC25) 범위를 넘어서는, EOL
-> 로깅의 기본 파일 생성 메커니즘 자체가 이 빌드에서 동작하지 않는 것으로 보이는
-> 정황이라 **재실행하여 위 두 가지 중 어느 쪽인지 확정 필요** (이번 세션에서는
-> DUT 재접속 금지 지침에 따라 재실행하지 않음).
+> **정정 (2026-08-25, 소스 확인 후 원인 확정 — 2026-08-21 Flag의 "재검증 필요"
+> 해소):** 2026-08-21 관측된 "130초 뒤에도 `/edge/log/eol/` 자체가 안 생김"은
+> `EolLogger`/`device_log` 결함이 아니라 **테스트 하네스 `send_and_wait()`의 IPC
+> 페이로드 포맷 버그**였다. 실제 프로토콜(`base_app.cpp`)은 `tid`를 MQTT5
+> correlation-data 속성으로 별도 전달하고 JSON 본문은 payload 그 자체가 top-level
+> 이다(`handle_request_custom_log_upload()`가 `message["log_num"]`을 top-level에서
+> 바로 읽는 것과 동일 — `db_manager`도 `json_to_struct<...>(message)`로 동일 관례).
+> `send_and_wait()`는 `{"tid":"...","payload":{"eol_mode":true}}`처럼 한 겹 더
+> 감싸 보내고 있었고, `handle_request_set_factory_eol_mode()`의
+> `message.value("eol_mode", false)`는 top-level만 보니 항상 기본값 `false`만
+> 읽었다 — `set_factory_eol_mode`를 몇 번을 호출해도 매번 `EOL mode set to:
+> disabled`만 찍히던 원인. `send_and_wait()`를 flat 포맷으로 수정(`tc_device_log.sh`)
+> 하자 실제로 `EOL logging enabled` + 파일 생성이 확인됐다.
+>
+> 두 번째로, 파일이 생겨도 TC23-2/3(당시 번호로는 TC23-1/2)가 항상 FAIL했던 것은 **스크립트가
+> `eol_1sec.csv`/`eol_1min.csv`라는 존재하지 않는 고정 파일명을 찾고 있었기
+> 때문**(실제 파일명은 다른 device_log 파일과 동일하게
+> `<start>_<end>_eol_1sec_<serial>.csv` 형태) — `active_csv()`와 동일한 glob 방식으로
+> 수정.
+>
+> 세 번째, 위 두 버그를 다 고친 뒤에도 이 벤치에서는 여전히 행이 안 늘어났다 —
+> `eolpolicy.json`의 `eol_1sec`/`eol_1min` `patternGroups`는 `Meter`가 아니라
+> `P01_B01_JF2_Normal_Back_BMS_*`(BMS/배터리팩) 패턴만 매칭 대상으로 하는데
+> (`eol_logger.cpp` `processEolLogging()` — notification path가 pattern에 일치해야
+> `columnValues`가 채워지고 row가 써짐), 실측 결과 `BMS_Monitoring_P01`의 활성 CSV
+> 마지막 행이 완전히 비어있었다(non-empty 컬럼 0개) — **이 벤치에 실물/시뮬레이션
+> 배터리팩이 연결돼 있지 않아 EOL 행을 채울 데이터 자체가 없는 환경 제약**이며
+> device_log 결함이 아니다. 이를 사전 감지하도록 TC23-1을 추가해 BMS telemetry
+> 부재 시 TC23-2/3을 SKIP 처리한다(배터리팩 연결/시뮬레이션이 가능한 벤치에서
+> 재실행하면 실제 판정 가능). sub-case 번호를 순수 숫자로만 구성해야 하는 이유는
+> 위 표 아래 Flag 참고.
 
 ---
 
-## TC24 — EOL 로그 압축 형식 (zip vs xz, §AGSRS-491 AC 미구현 확인)
-
-### 목적 (요구사항 §AGSRS-491 AC: "EOL Log files are compressed into zip format")
-
-EOL 로그 파일이 zip으로 압축되는지 확인한다. **본 TC는 아래 코드 근거상 AC가 구현되어
-있지 않음을 확인하는 목적이며, DUT 실측 없이도 FAIL이 확정적이다** —
-`log_compress.cpp`/`log_compress.hpp` 전체에 `compressToXz()`(liblzma 기반 `.xz`) 하나의
-압축 경로만 존재하고, `zip` 관련 코드나 라이브러리 참조는 없다.
-
-### 사전 조건
-
-- TC23과 동일(telemetry notification column 데이터 도착 확인 포함), EOL 로그가
-  rotation/compress 되는 시점까지 대기 가능
-
-### 절차
-
-0. TC23과 동일한 telemetry column 데이터 도착 확인을 선행
-1. TC23 절차로 EOL 로그(`eol_1sec.csv`/`eol_1min.csv`)가 생성되도록 유도
-2. rotation/compress 시점까지 대기 (또는 `forced_log_upload`류 트리거가 EOL에도
-   적용되는지 확인 후 사용)
-3. `/edge/log/eol/` 하위에 생성된 압축 파일의 확장자 확인
-
-### 기대 결과
-
-| 항목 | 기준 |
-|------|------|
-| 압축 확장자 | (요구사항 AC 기준) `.zip` |
-| 실제 코드 동작 | `.xz`만 생성될 것으로 예상 (`compressToXz()` 단일 경로) |
-
-### PASS/FAIL Criteria
-
-| 기준 ID | 설명 | 타입 | 기준값 | 셸 검증 |
-|---------|------|------|--------|---------|
-| TC24-0 | telemetry notification column 데이터 도착 확인(TC23과 동일 사전 확인) | boolean | true | `Meter` 최신 CSV 행의 non-empty 컬럼 수 > 3 |
-| TC24-1 | zip 압축 파일 존재 확인 (요구사항 AC 기준, 예상 FAIL) | boolean | true | `[ "$(find /edge/log/eol -name '*.zip' \| wc -l)" -gt 0 ]` |
-| TC24-2 | 실제로는 xz만 생성됨(참고용) | boolean | true | `[ "$(find /edge/log/eol -name '*.xz' \| wc -l)" -gt 0 ]` |
-
-> **주의 (Flag, 미구현 확정):** `log_compress.cpp`/`log_compress.hpp` 검토 결과
-> device_log 전체가 `compressToXz()` 하나의 압축 경로만 사용하며, `zip` 관련 코드나
-> 라이브러리 참조는 코드 전체에 없다. AC의 "zip format"은 현재 구현되어 있지 않음 —
-> Jira 재확인/개발 이슈 등록 대상으로 보고할 것을 권장한다.
-
----
-
-## TC25 — Factory EOL Mode ON 시 Field logging 중단 여부 (§AGSRS-491 AC 미구현 확인)
+## TC24 — Factory EOL Mode ON 시 Field logging 중단 여부 (§AGSRS-491 AC 미구현 확인)
 
 ### 목적 (요구사항 §AGSRS-491 AC: "Field logging is disabled in EOL mode")
 
@@ -1159,9 +1434,9 @@ EOL 모드가 ON된 동안 일반 필드 로깅(SID0201의 정규 log_item)이 �
 
 | 기준 ID | 설명 | 타입 | 기준값 | 셸 검증 |
 |---------|------|------|--------|---------|
-| TC25-0 | telemetry notification column 데이터 도착 확인(TC23과 동일 사전 확인) | boolean | true | 대상 log_item 최신 CSV 행의 non-empty 컬럼 수 > 3 |
-| TC25-1 | EOL 모드 중 field 로깅 중단 확인 (요구사항 AC 기준, 예상 FAIL) | boolean | true | `[ "$(wc -l < "$csv")" -eq "$rows_before" ]` |
-| TC25-2 | 실제로는 필드 로깅 계속됨(참고용) | boolean | true | `[ "$(wc -l < "$csv")" -gt "$rows_before" ]` |
+| TC24-0 | telemetry notification column 데이터 도착 확인(TC23과 동일 사전 확인) | boolean | true | 대상 log_item 최신 CSV 행의 non-empty 컬럼 수 > 3 |
+| TC24-1 | EOL 모드 중 field 로깅 중단 확인 (요구사항 AC 기준, 예상 FAIL) | boolean | true | `[ "$(wc -l < "$csv")" -eq "$rows_before" ]` |
+| TC24-2 | 실제로는 필드 로깅 계속됨(참고용) | boolean | true | `[ "$(wc -l < "$csv")" -gt "$rows_before" ]` |
 
 > **주의 (Flag, 미구현 확정):** `handle_request_set_factory_eol_mode()`는
 > `EolLogger::setEolLoggingEnabled(eol_mode)`만 호출하며, 일반 필드 로깅을 멈추는
@@ -1174,7 +1449,7 @@ EOL 모드가 ON된 동안 일반 필드 로깅(SID0201의 정규 log_item)이 �
 
 ---
 
-## TC26 — Factory Reset 시 전체 로그 삭제 및 EOL 모드 해제
+## TC25 — Factory Reset 시 전체 로그 삭제 및 EOL 모드 해제
 
 ### 목적 (요구사항 §AGSRS-491 AC: 로그 전체 삭제, 리셋 후 EOL 모드 비활성·필드 로깅
 기본 활성)
@@ -1215,62 +1490,100 @@ EOL 모드가 ON된 동안 일반 필드 로깅(SID0201의 정규 log_item)이 �
 
 | 기준 ID | 설명 | 타입 | 기준값 | 셸 검증 |
 |---------|------|------|--------|---------|
-| TC26-1 | eol 디렉토리 삭제 | boolean | true | `[ ! -d /edge/log/eol ]` |
-| TC26-2 | device_log 디렉토리 삭제 | boolean | true | `[ ! -d /edge/log/device_log ]` |
-| TC26-3 | toupload/device_log 디렉토리 삭제 | boolean | true | `[ ! -d /edge/log/toupload/device_log ]` |
-| TC26-4 | IPC 응답 OK | boolean | true | `echo "$resp" \| grep -q '"error_code":0'` |
-| TC26-5 | 재부팅 후 필드 로깅 재개 확인 | boolean | true | `[ "$(wc -l < "$csv")" -gt "$rows_before_reboot" ]` |
-| TC26-6 | 재부팅 후 EOL 모드 기본 비활성 확인 | boolean | true | `[ ! -f /edge/log/eol/eol_1sec.csv ] || [ "$(wc -l < /edge/log/eol/eol_1sec.csv)" -eq "$eol_rows_before_reboot" ]` |
+| TC25-1 | eol 디렉토리 삭제 | boolean | true | `[ ! -d /edge/log/eol ]` |
+| TC25-2 | device_log 디렉토리 삭제 | boolean | true | `[ ! -d /edge/log/device_log ]` |
+| TC25-3 | toupload/device_log 디렉토리 삭제 | boolean | true | `[ ! -d /edge/log/toupload/device_log ]` |
+| TC25-4 | IPC 응답 OK | boolean | true | `echo "$resp" \| grep -q '"error_code":0'` |
+| TC25-5 | 재부팅 후 필드 로깅 재개 확인 | boolean | true | `[ "$(wc -l < "$csv")" -gt "$rows_before_reboot" ]` |
+| TC25-6 | 재부팅 후 EOL 모드 기본 비활성 확인 | boolean | true | `[ ! -f /edge/log/eol/eol_1sec.csv ] || [ "$(wc -l < /edge/log/eol/eol_1sec.csv)" -eq "$eol_rows_before_reboot" ]` |
 
 > **참고:** `stopLogging()`은 "재부팅 없이 리셋 직후 재활성화되지 않는다"는 설계
 > 주석(`logging_stopped_`은 "Never cleared once set")을 코드에서 확인했다. 즉 리셋
 > 직후 프로세스 재시작(재부팅) 없이는 필드 로깅이 재개되지 않는 것이 의도된 동작으로
-> 보인다(양산 라인에서 리셋 후 전원 차단을 가정). TC26-5(재부팅 후 필드 로깅 재개)는
-> 반드시 재부팅을 포함해서 판정할 것 — 재부팅 생략 시 오탐(false fail) 가능. TC26-6은
+> 보인다(양산 라인에서 리셋 후 전원 차단을 가정). TC25-5(재부팅 후 필드 로깅 재개)는
+> 반드시 재부팅을 포함해서 판정할 것 — 재부팅 생략 시 오탐(false fail) 가능. TC25-6은
 > `EolLogger`의 `m_eol_logging_enabled_` 멤버가 `{false}`로 기본 초기화되고(재부팅 시
 > 프로세스가 새로 뜨므로 메모리 상태도 초기화됨) 별도 영속 저장 로직이 없음을
 > 코드에서 확인했다 — Flag 없이 정상 동작 예상.
 
 ---
 
-## TC27 — EOL 로그 추출 IPC
+## TC26 — EOL 로그 추출 API
 
 ### 목적 (요구사항 §AGSRS-549)
 
-`/edge/log/eol/` 경로의 EOL 로그를 추출하는 IPC 요청이 처리되는지 확인한다.
+`/edge/log/eol/` 경로의 EOL 로그를 추출하는 요청이 처리되는지 확인한다.
+
+> **[2026-08-26 전면 정정 + DUT 실측 완료, 사용자 제보]** 기존 명세는 이 기능을
+> device_log의 MQTT IPC로 잘못 가정하고 "코드에 핸들러 없음 → 미구현"으로 결론
+> 내렸었다. **실제 메커니즘은 MQTT IPC가 아니라 uniep `web_interface`가 서비스하는
+> HTTP 엔드포인트**다:
+>
+> ```
+> POST https://localhost:9112/auth/token              (Bearer 토큰 발급)
+> GET  https://localhost:9112/api/factory/logs/{fileName}  (fileName ∈ {eol, device_log})
+> ```
+> (`web/api/src/routes/router.ts:93` → `downloadFactoryLogHandler` →
+> `factory-log.service.ts`의 `createTarArchive()`)
+>
+> 동작은 `LOG_DIR_MAP[fileName]`(`eol`→`/edge/log/eol`, `device_log`→
+> `/edge/log/device_log`) 디렉토리 전체를 `tar -cf`로 `/tmp/{fileName}_{ISO시각}.tar`에
+> 묶어 다운로드 응답으로 스트리밍하고, 전송 후 그 임시 tar를 삭제한다(**원본 디렉토리는
+> 건드리지 않음** — 기존 명세가 가정한 "지정 폴더로 이동"이 아니라 **제자리 tar
+> 다운로드**가 실제 동작, DUT 실측으로 원본 유지 재확인). 즉 §AGSRS-549는 **이미
+> 구현되어 있다** — Jira 설명의 "개발 중"은 최신 코드 상태와 어긋난 stale한 문구로
+> 보인다(Jira 재확인 권장).
+>
+> **포트/경로 주의**: uniep 프록시 포트(9113)로는 `/factory/logs/eol`이 401/404만
+> 응답한다 — 실제 정답은 **9112(HTTPS, 자체서명 인증서라 `curl -k` 필요) +
+> `/api` 접두사**였다. `/auth/token`은 9112에 접두사 없이 존재한다.
+>
+> 이 엔드포인트는 라우팅상 device_log/cloud_broker 컨테이너가 아니라 **uniep
+> `web_interface`가 서비스하는 별도 Node.js 프로세스**를 거치므로, device_log 앱
+> 자체와는 완전히 무관한 별도 검증 경로다.
 
 ### 사전 조건
 
 - 공통 전제 조건 충족, `/edge/log/eol/`에 로그 파일 존재
-- TC23과 동일한 telemetry notification column 데이터 도착 확인(참고용 — IPC 자체가
-  미구현이라 SKIP 판정에는 영향 없음)
+- **인증**: `openapi.yaml`(`/factory/logs/{fileName}`)이 `Permission:
+  factory:read:logs`를 요구한다. 실제로는 `Authorization: Bearer <JWT>` 헤더가
+  필요하며(`auth.security.ts` `validateBearerToken`/`hasPermission` — `ROLE.ADMIN`
+  토큰이면 개별 permission 없이도 통과), 토큰은 `POST /auth/token`
+  (`auth_key`/`auth_secret`/`subject` 바디)으로 발급받는다. **자격증명은 사내 가이드
+  문서(`EMSP_EOL_Log_Export_API_20260513`)에 있으며 `auth_secret`이 대외비로 명시돼
+  있다 — `tc_device_log.sh`에는 하드코딩하지 않고 `FACTORY_AUTH_KEY`/
+  `FACTORY_AUTH_SECRET` 환경변수로 실행 시점에만 주입한다**(tcs_tools는 GitHub
+  public 레포라 커밋 시 그대로 유출되기 때문). 미설정 시 SKIP, 토큰 없이 호출하면
+  `401 unauthorized`.
 
 ### 절차
 
 0. TC23과 동일한 telemetry column 데이터 도착 확인(참고용)
-1. `/edge/log/eol/`에 로그 파일 존재 확인
-2. EOL 로그 추출 IPC 발행 (요구사항 문서 자체가 "IPC 개발 중"으로 명시 — 정확한
-   topic/서비스명은 DUT의 `msg_ipc_ac_system_gen2.hpp` 최신 버전에서 재확인 필요)
-3. 추출 결과(특정 폴더로 이동) 확인
+1. `POST https://localhost:9112/auth/token`으로 Bearer 토큰 발급(`FACTORY_AUTH_KEY`/
+   `FACTORY_AUTH_SECRET` 필요 — 위 "사전 조건" 참고)
+2. `GET https://localhost:9112/api/factory/logs/eol` + `Authorization: Bearer <token>`
+3. 응답이 유효한 tar 아카이브인지 확인(`tar -tf`), `/edge/log/eol/` 원본은 그대로
+   남아있는지 확인(이동이 아니라 다운로드이므로 삭제/이동되면 안 됨)
 
 ### 기대 결과
 
 | 항목 | 기준 |
 |------|------|
-| 추출 결과 | EOL 로그가 지정 폴더로 이동 |
+| HTTP 응답 | 200, 유효한 tar 아카이브 |
+| 원본 디렉토리 | `/edge/log/eol/` 그대로 유지(이동/삭제 없음) |
 
 ### PASS/FAIL Criteria
 
 | 기준 ID | 설명 | 타입 | 기준값 | 셸 검증 |
 |---------|------|------|--------|---------|
-| TC27-0 | telemetry notification column 데이터 도착 확인(TC23과 동일 사전 확인, 참고용) | boolean | true | `Meter` 최신 CSV 행의 non-empty 컬럼 수 > 3 |
-| TC27-1 | 추출 후 폴더 이동 확인 | manual | — | 개발 완료 후 확정 (아래 Flag 참고) |
+| TC26-0 | telemetry notification column 데이터 도착 확인(TC23과 동일 사전 확인, 참고용) | boolean | true | `Meter` 최신 CSV 행의 non-empty 컬럼 수 > 3 |
+| TC26-1 | `GET /api/factory/logs/eol` 응답이 유효한 tar 아카이브 | boolean | true | 토큰 발급 후 `tar -tf <응답> >/dev/null 2>&1` 성공. 자격증명 미설정 시 SKIP |
+| TC26-2 | 다운로드 후 원본 `/edge/log/eol` 유지 확인(이동 아님) | boolean | true | `[ -d "$EOL_ROOT" ] && [ -n "$(ls -A "$EOL_ROOT")" ]` |
 
-> **주의 (Flag):** Jira AGSRS-549 설명 자체에 "EOL 로그 추출 IPC(개발 중)"이라고
-> 명시되어 있다. 소스 트리(`device_log.cpp`의 `register_request_handler` 목록,
-> `msg_ipc_ac_system_gen2.hpp`)를 검색한 결과 EOL 로그 추출 전용 IPC 핸들러를
-> 찾지 못했다 — 요구사항과 코드 모두 "미구현"으로 일치하므로 본 TC는 **구현 완료 후
-> 활성화** 대상으로 보류할 것을 권장한다.
+> **DUT 실측 완료(2026-08-26)**: `FACTORY_AUTH_KEY`/`FACTORY_AUTH_SECRET` 주입 후
+> `--tc26` 단독 실행 결과 TC26-0/1/2 전부 PASS(토큰 발급 성공, tar 응답에 실제
+> eol_1sec/eol_1min 파일 8개 포함 확인, 원본 디렉토리 그대로 유지). 더 이상
+> "미구현" 항목이 아니며, 자격증명만 주입되면 완전 무인 실행 가능.
 
 ---
 
@@ -1311,12 +1624,12 @@ EOL 모드가 ON된 동안 일반 필드 로깅(SID0201의 정규 log_item)이 �
 
 ## 자동화 등급 (Automation Grade)
 
-🟢 **A** (TC27만 IPC 미구현으로 실행 불가 — 나머지는 TC08/TC24/TC25 포함 boolean 스크립트로 무인 실행 가능. 단 TC08/TC24/TC25는 요구사항 미구현이 코드로 확정되어 실행 시 FAIL이 예상됨)
+🟢 **A** (전체 TC01~TC26 무인 실행 가능. TC08/TC24는 요구사항 미구현이 코드로 확정되어 실행 시 FAIL이 예상되는 Flag 항목이며, TC26은 `FACTORY_AUTH_KEY`/`FACTORY_AUTH_SECRET` 환경변수 주입이 필요)
 
 | TC | 등급 | 비고 |
 |----|------|------|
-| TC01~TC26 | A | 무인 실행 가능 (TC08/TC24/TC25는 Flag 항목 — boolean 스크립트로 실행은 가능하나 요구사항 미구현으로 FAIL 예상) |
-| TC27 | B | EOL 로그 추출 IPC 자체가 미구현(Jira도 "개발 중" 명시) — 트리거할 대상이 없어 실행 불가, 구현 완료 후 활성화 대상 |
+| TC01~TC25 | A | 무인 실행 가능 (TC08/TC24는 Flag 항목 — boolean 스크립트로 실행은 가능하나 요구사항 미구현으로 FAIL 예상) |
+| TC26 | A | **[2026-08-26 정정 + DUT 실측 완료]** `GET /api/factory/logs/eol` HTTP tar 다운로드로 이미 구현됨을 확인, `FACTORY_AUTH_KEY`/`FACTORY_AUTH_SECRET` 환경변수 주입 후 실측 결과 TC26-0/1/2 전부 PASS. 자격증명 미주입 시에만 SKIP |
 
 ---
 
@@ -1341,16 +1654,15 @@ EOL 모드가 ON된 동안 일반 필드 로깅(SID0201의 정규 log_item)이 �
 | TC15 | AGSRS-539 + `cloud_upload_manager.cpp:96`(init/enumerateExistingFilesInDirectory) | Medium (재기동 시나리오는 코드상 추정, 실측 필요) |
 | TC16 | AGSRS-514 + `cloud_upload_manager.cpp:1338`(isUploadAllowed), `logcount.json:perDayRoot` | High |
 | TC17 | AGSRS-543 + `cloud_upload_manager.cpp:1338`(isUploadAllowed archive 분기) | High |
-| TC18 | AGSRS-514(자정 부분) + AGSRS-544 + `cloud_upload_manager.cpp:1409`(updateLogUploadLimitsDaily) | High |
-| TC19 | AGSRS-542 + `cloud_upload_manager.cpp:1432`(updateLogUploadLimitsMonthly) — 코드 값(root=default,archive=0)이 Jira 기대결과와 완전 일치 | High |
+| TC18 | AGSRS-514(자정 부분) + AGSRS-544 + `cloud_upload_manager.cpp:1409`(updateLogUploadLimitsDaily), `:673-750`(midNightRootToUpload/midNightArchiveToUpload) | **Flag — DUT 실측 1차 시도 전부 FAIL(plain `date -s`가 NTP 레이스로 무효화됨), `timedatectl set-ntp no`+`set-time`으로 재수정 후 재검증 중(2026-08-25)** |
+| TC19 | AGSRS-542 + `cloud_upload_manager.cpp:1432`(updateLogUploadLimitsMonthly) — 코드 값(root=default,archive=0)이 Jira 기대결과와 완전 일치 | **Flag — TC18과 동일한 원인(NTP 레이스)으로 동일하게 수정, 미실측** |
 | TC20 | AGSRS-541 + `cloud_upload_manager.cpp`(loadUploadInfoMap/writeToLogCountJson 계열) | Medium (재부팅 유지 로직은 파일 영속성 기반 추정) |
-| TC21 | AGSRS-498 AC1(우선순위 업로드) + `cloud_upload_manager.cpp:1310`(selectNextRootLogType 라운드로빈) | **Flag — 요구사항은 우선순위, 코드는 라운드로빈. 검증 목표를 라운드로빈 균등성으로 재설정(사용자 확인)** |
+| TC21 | AGSRS-498 AC1(우선순위 업로드) + `cloud_upload_manager.cpp:826-827`(rootToArchiveOrToUpload의 isToUploadDirEmpty 게이트) | **Flag — 요구사항은 우선순위, 코드엔 우선순위 필드가 없어 라운드로빈+게이트로 대신 구현됨. 검증 목표를 라운드로빈 균등성에서 게이트(toupload 상태별 라우팅) 자체로 재설정(2026-08-25)** |
 | TC22 | AGSRS-515 + `device_log.cpp:463`(handle_request_forced_log_upload), `cloud_upload_manager.cpp:314`(handleForcedLogUploadRequest) | High |
 | TC23 | AGSRS-516 + `eol_logger.cpp:155`(processEolLogging), `eolpolicy.json`(eol_1min, eol_1sec — eol_10min은 정책에서 삭제됨) | High (단, IPC 필드명 `eol_mode` vs 요구사항 `factory_eol_mode` 표기 차이 있음) |
-| TC24 | AGSRS-491 AC("zip format") + `log_compress.cpp`(compressToXz만 존재, zip 미발견) | **Flag — 미구현 확정. DUT 실측 없이 FAIL 확정적** |
-| TC25 | AGSRS-491 AC("Field logging is disabled in EOL mode") + `device_log.cpp:455-461`(stopLogging 미호출), `device_log.cpp:425`(stopLogging 유일 호출부는 factory_reset뿐) | **Flag — 미구현 확정. DUT 실측 없이 FAIL 확정적** |
-| TC26 | AGSRS-491 AC(리셋 시 전체 삭제/EOL 해제) + `device_log.cpp:417-443`(handle_request_factory_reset) | High (단, 재부팅 필요 전제는 Medium) |
-| TC27 | AGSRS-549 + 코드 전역 검색(핸들러 미발견) | **Flag — 요구사항 자체가 미구현 명시, 코드도 미구현 확인** |
+| TC24 | AGSRS-491 AC("Field logging is disabled in EOL mode") + `device_log.cpp:455-461`(stopLogging 미호출), `device_log.cpp:425`(stopLogging 유일 호출부는 factory_reset뿐) | **Flag — 미구현 확정. DUT 실측 없이 FAIL 확정적** |
+| TC25 | AGSRS-491 AC(리셋 시 전체 삭제/EOL 해제) + `device_log.cpp:417-443`(handle_request_factory_reset) | High (단, 재부팅 필요 전제는 Medium) |
+| TC26 | AGSRS-549 + `web/api/src/routes/router.ts:93`(`GET /factory/logs/:fileName`), `factory-log.service.ts`(`createTarArchive`, tar 다운로드) | **정정 완료(2026-08-26) — device_log MQTT IPC가 아니라 uniep web_interface(포트 9112, `/api` 접두사)의 별도 HTTP API로 이미 구현됨을 DUT 실측으로 확인(High)** |
 
 ---
 

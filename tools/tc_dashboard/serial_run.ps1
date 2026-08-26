@@ -9,7 +9,13 @@ param(
     [Parameter(Mandatory=$true)] [string]$ScriptPath,
     [string]$Flag       = "",
     [int]$TimeoutMs     = 120000,
-    [string]$LogFile    = "C:\Users\hyunje.sung\AppData\Local\Temp\tc_dashboard_serial.log"
+    [string]$LogFile    = "C:\Users\hyunje.sung\AppData\Local\Temp\tc_dashboard_serial.log",
+    # server.py의 _env_prefix_for()가 만든 "VAR='value' " 형태 접두어(예: device_log의
+    # FACTORY_AUTH_KEY/SECRET). MakeQuiet()이 이미 stty -echo를 걸어둔 뒤에 SendLine으로
+    # 보내고(83행), SendLine 자체는 $LogFile에 아무것도 안 남기므로(Pump가 수신 바이트만
+    # 기록) 이 값이 로그 파일/output.log에 노출되지 않는다 — SSH 경로의 마스킹과 동등한
+    # 보안 수준.
+    [string]$EnvPrefix  = ""
 )
 $ErrorActionPreference = 'Continue'
 $REMOTE_SCRIPT = "/tmp/tc_system_log.sh"
@@ -136,7 +142,7 @@ try {
         # tee로 결과 파일 저장과 동시에 시리얼 콘솔에도 흘려서 대시보드 실시간 tail(_tail_serial_log)이
         # 실행 중 절차/PASS/FAIL을 바로 보여줄 수 있게 한다 — 최종 판정은 여전히 base64 dump(신뢰 가능한
         # 전체 캡처)로 하고, 콘솔 스트림은 진행상황 표시 용도(노이즈 섞일 수 있어 참고용).
-        $remoteCmd = "sh $REMOTE_SCRIPT $Flag 2>&1 | tee $REMOTE_OUT; echo M_DASH_RUN_END"
+        $remoteCmd = "$EnvPrefix" + "sh $REMOTE_SCRIPT $Flag 2>&1 | tee $REMOTE_OUT; echo M_DASH_RUN_END"
         SendLine $remoteCmd
         $ok = WaitFor 'M_DASH_RUN_END' $TimeoutMs
 

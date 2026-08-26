@@ -7,11 +7,13 @@
   :root {
     --bg: #0f1420; --panel: #171d2e; --border: #2a3348; --text: #e6e9f0;
     --muted: #8891a7; --pass: #2ecc71; --fail: #e74c3c; --warn: #f39c12; --accent: #4d8dff;
+    --accent-strong: #2f5fce;
     --btn-bg: #1e2740; --log-bg: #0a0e17; --hover-bg: #1c2438; --selected-bg: #22304f;
   }
   :root[data-theme="light"] {
     --bg: #f4f5f9; --panel: #ffffff; --border: #dde1eb; --text: #1a2033;
     --muted: #6b7280; --pass: #1a9850; --fail: #d63b2f; --warn: #c9770a; --accent: #2f6fed;
+    --accent-strong: #1c4bb8;
     --btn-bg: #eef1f8; --log-bg: #f7f8fb; --hover-bg: #eef1f8; --selected-bg: #e2e8f7;
   }
   * { box-sizing: border-box; }
@@ -101,9 +103,12 @@
                             padding: 6px; max-height: 260px; overflow-y: auto; z-index: 20;
                             box-shadow: 0 8px 24px rgba(0,0,0,.3); }
   .custom-dropdown.open .custom-dropdown-panel { display: block; }
-  .custom-item { padding: 7px 8px; border-radius: 5px; cursor: pointer; font-size: 13px; user-select: none; }
+  .custom-item { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 5px;
+                 cursor: pointer; font-size: 13px; user-select: none; }
   .custom-item:hover { background: var(--hover-bg); }
   .custom-item.selected { background: var(--selected-bg); color: var(--accent); font-weight: 600; }
+  .custom-item input[type="checkbox"] { flex-shrink: 0; width: 14px; height: 14px; accent-color: var(--accent);
+                                         pointer-events: none; }
   .custom-actions { display: flex; gap: 8px; align-items: center; }
   .custom-actions button.link { background: none; border: none; color: var(--accent); cursor: pointer;
                                  font-size: 12px; padding: 0; text-decoration: underline; }
@@ -123,6 +128,23 @@
   .badge.PASS, .badge.pass { background: rgba(46,204,113,.15); color: var(--pass); }
   .badge.FAIL, .badge.fail { background: rgba(231,76,60,.15); color: var(--fail); }
   .badge.SKIP, .badge.skip { background: rgba(243,156,18,.15); color: var(--warn); }
+  .badge.SKIP.has-reason { cursor: pointer; text-decoration: underline dotted; }
+
+  /* ---------- SKIP 사유 모달 ---------- */
+  .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.5);
+    display: flex; align-items: center; justify-content: center; z-index: 100; }
+  .modal-backdrop[hidden] { display: none; }
+  .modal-panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    max-width: 520px; width: calc(100% - 40px); max-height: calc(100% - 40px); overflow: auto;
+    padding: 18px 20px; box-shadow: 0 12px 40px rgba(0,0,0,.35); }
+  .modal-head { margin-bottom: 10px; }
+  .modal-head h3 { margin: 0; font-size: 15px; color: var(--warn); }
+  .modal-body { margin: 0 0 16px; white-space: pre-wrap; overflow-wrap: anywhere;
+    color: var(--text); font-size: 13px; line-height: 1.6; }
+  .modal-foot { display: flex; justify-content: center; margin-top: 18px; }
+  .modal-ok { background: rgba(77,141,255,.15); border: none; color: var(--accent); padding: 8px 20px;
+    border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; }
+  .modal-ok:hover { background: rgba(77,141,255,.25); }
   .badge.running { background: rgba(77,141,255,.15); color: var(--accent); }
   .badge.pending-case { position: relative; overflow: hidden; min-width: 56px; text-align: center;
     background: rgba(77,141,255,.12); color: var(--accent); }
@@ -131,6 +153,19 @@
     animation: stripe-move 900ms linear infinite; z-index: 0; }
   .badge.pending-case .label-text { position: relative; z-index: 1; }
   @keyframes stripe-move { from { background-position: 0 0; } to { background-position: 28px 0; } }
+  .progress-track { position: relative; display: inline-block; width: 72px; height: 16px;
+    border-radius: 8px; background: var(--btn-bg); border: 1px solid var(--border);
+    overflow: hidden; vertical-align: middle; }
+  .progress-fill { position: absolute; inset: 0 auto 0 0; height: 100%;
+    background: var(--accent-strong); transition: width 300ms ease; }
+  /* 숫자를 바 "안"에 고정 표시 — 채워진 부분과 안 채워진 부분의 배경색이 달라 텍스트
+     색 하나로는 둘 다에서 안 읽히므로, 글자 자체를 배경 그라디언트로 클리핑해 채워진
+     구간 위 글자는 흰색, 나머지는 var(--text)로 갈라 보이게 한다(--pct 위치 기준). */
+  .progress-label { position: absolute; inset: 0; display: flex; align-items: center;
+    justify-content: center; font-size: 10px; font-weight: 700;
+    background-image: linear-gradient(to right, #fff var(--pct), var(--text) var(--pct));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    -webkit-text-fill-color: transparent; }
   .badge.timeout, .badge.error { background: rgba(243,156,18,.15); color: var(--warn); }
   .badge.rebooted { background: rgba(243,156,18,.15); color: var(--warn); }
   .badge.interrupted { background: rgba(231,76,60,.12); color: var(--warn); }
@@ -245,13 +280,25 @@
         <section>
           <h2>실행 이력</h2>
           <table id="historyTable">
-            <thead><tr><th>Run ID</th><th>대상</th><th>채널</th><th>상태</th><th>PASS/FAIL/SKIP</th><th>시작</th><th>종료</th><th>소요시간</th><th>결과</th><th class="action-col">실행</th></tr></thead>
+            <thead><tr><th>Run ID</th><th>대상</th><th>채널</th><th>상태</th><th>PASS/FAIL/SKIP</th><th>시작</th><th>종료</th><th>소요시간</th><th>결과</th><th class="action-col">제어</th></tr></thead>
             <tbody></tbody>
           </table>
           <div id="historyPager" class="pager"></div>
         </section>
       </div>
     </main>
+  </div>
+</div>
+
+<div id="reasonModalBackdrop" class="modal-backdrop" hidden>
+  <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="reasonModalTitle">
+    <div class="modal-head">
+      <h3 id="reasonModalTitle"></h3>
+    </div>
+    <p id="reasonModalBody" class="modal-body"></p>
+    <div class="modal-foot">
+      <button type="button" id="reasonModalOk" class="modal-ok">확인</button>
+    </div>
   </div>
 </div>
 
@@ -310,7 +357,7 @@ async function switchApp(appId) {
   currentAppId = appId;
   localStorage.setItem('appId', appId);
   selectedRunId = null;
-  selectedCustom = null;
+  selectedCustoms = new Set();
   historyPage = 1;
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   renderAppList();
@@ -349,20 +396,24 @@ $('#channelBadge').onclick = () => {
 $('#channelBadge').style.cursor = 'pointer';
 applyChannelBadge();
 
-let selectedCustom = null;   // 단일 선택 — 선택된 TC id 하나 또는 null
+let selectedCustoms = new Set();   // 다중 선택 — 체크된 TC id들
 
 function updateCustomUi() {
   const labelEl = $('#customDropdownLabel');
-  if (selectedCustom) {
-    labelEl.textContent = selectedCustom;
+  const chosen = Array.from(selectedCustoms);
+  if (chosen.length) {
+    labelEl.textContent = chosen.length <= 3 ? chosen.join(', ') : `${chosen.slice(0, 3).join(', ')} 외 ${chosen.length - 3}개`;
     labelEl.classList.remove('placeholder');
   } else {
     labelEl.textContent = 'TC 선택...';
     labelEl.classList.add('placeholder');
   }
-  $('#customRunBtn').disabled = !selectedCustom;
+  $('#customRunBtn').disabled = chosen.length === 0;
   document.querySelectorAll('#customList .custom-item').forEach(el => {
-    el.classList.toggle('selected', el.dataset.id === selectedCustom);
+    const on = selectedCustoms.has(el.dataset.id);
+    el.classList.toggle('selected', on);
+    const cb = el.querySelector('input[type="checkbox"]');
+    if (cb) cb.checked = on;
   });
 }
 
@@ -373,18 +424,26 @@ function openCustomDropdown(open) {
 async function loadCustomOptions() {
   if (!currentAppHasCustom) { $('#customList').innerHTML = ''; return; }
   const tcs = await fetch(`/api/custom_tcs?app_id=${encodeURIComponent(currentAppId)}`).then(r => r.json());
-  $('#customLabel').textContent = `선택 실행 (${tcs.map(t => t.id).join(', ')} 중 1개 선택)`;
+  selectedCustoms = new Set();
+  $('#customLabel').textContent = `선택 실행 (${tcs.map(t => t.id).join(', ')} 중 여러 개 선택 가능)`;
   const list = $('#customList');
   list.innerHTML = '';
   tcs.forEach(tc => {
     const item = document.createElement('div');
     item.className = 'custom-item';
     item.dataset.id = tc.id;
-    item.textContent = tc.id;
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    const labelSpan = document.createElement('span');
+    labelSpan.textContent = tc.id;
+    item.appendChild(cb);
+    item.appendChild(labelSpan);
+    // 체크박스를 눌러도, 행 아무 데나 눌러도 토글 — 패널은 닫지 않아 여러 개를 이어서
+    // 고를 수 있다(닫는 건 바깥 클릭 또는 버튼으로).
     item.onclick = () => {
-      selectedCustom = tc.id;
+      if (selectedCustoms.has(tc.id)) selectedCustoms.delete(tc.id);
+      else selectedCustoms.add(tc.id);
       updateCustomUi();
-      openCustomDropdown(false);
     };
     list.appendChild(item);
   });
@@ -423,7 +482,7 @@ async function loadCatalogButtons() {
 function setButtonsDisabled(disabled) {
   document.querySelectorAll('#catalogButtons .tc-btn').forEach(b => b.disabled = disabled);
   $('#customDropdownBtn').disabled = disabled;
-  $('#customRunBtn').disabled = disabled || !selectedCustom;
+  $('#customRunBtn').disabled = disabled || selectedCustoms.size === 0;
   if (disabled) openCustomDropdown(false);
 }
 
@@ -454,13 +513,14 @@ async function runTc(tcId, btn) {
 }
 
 async function runCustomTc() {
-  if (!selectedCustom) return;
+  const chosen = Array.from(selectedCustoms);
+  if (!chosen.length) return;
   setButtonsDisabled(true);
-  $('#log').textContent = `[선택 실행: ${selectedCustom}] 시작 중...`;
+  $('#log').textContent = `[선택 실행: ${chosen.join(', ')}] 시작 중...`;
   try {
     const res = await fetch('/api/run', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ app_id: currentAppId, tc_id: 'custom', tc_ids: [selectedCustom], channel: selectedChannel }),
+      body: JSON.stringify({ app_id: currentAppId, tc_id: 'custom', tc_ids: chosen, channel: selectedChannel }),
     });
     if (!res.ok) {
       const err = await res.json();
@@ -538,22 +598,44 @@ function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+function openReasonModal(caseId, reason) {
+  $('#reasonModalTitle').textContent = `${caseId} — SKIP 사유`;
+  $('#reasonModalBody').textContent = reason;
+  $('#reasonModalBackdrop').hidden = false;
+}
+
+function closeReasonModal() {
+  $('#reasonModalBackdrop').hidden = true;
+}
+
 function renderStatusRows(rows) {
   const tbody = $('#statusTable tbody');
   tbody.innerHTML = '';
   rows.forEach(v => {
     const tr = document.createElement('tr');
+    const hasSkipReason = v.status === 'SKIP' && v.reason;
     const resultCell = v.status === 'RUNNING'
-      ? `<span class="badge pending-case"><span class="stripes"></span><span class="label-text">진행중</span></span>`
-      : `<span class="badge ${v.status}">${v.status}</span>`;
-    // 진행중인 case는 아직 끝나지 않아 소요시간을 알 수 없으므로 "진행중"으로 표시.
-    const durationCell = v.status === 'RUNNING' ? '진행중' : formatDurationSec(v.duration_sec);
+      ? `<span class="badge pending-case"><span class="stripes"></span><span class="label-text">RUNNING</span></span>`
+      : `<span class="badge ${v.status}${hasSkipReason ? ' has-reason' : ''}">${v.status}</span>`;
+    // 진행중인 case는 아직 끝나지 않아 소요시간을 알 수 없으므로 "-"로 표시.
+    const durationCell = v.status === 'RUNNING' ? '-' : formatDurationSec(v.duration_sec);
     tr.innerHTML = `<td>${v.tc}</td><td>${v.case}</td><td>${escapeHtml(v.desc)}</td>
       <td>${resultCell}</td>
       <td class="muted">${v.run_id || ''}</td><td class="muted">${durationCell}</td>`;
+    if (hasSkipReason) {
+      tr.querySelector('.badge').addEventListener('click', () => openReasonModal(v.case, v.reason));
+    }
     tbody.appendChild(tr);
   });
 }
+
+$('#reasonModalOk').addEventListener('click', closeReasonModal);
+$('#reasonModalBackdrop').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeReasonModal();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('#reasonModalBackdrop').hidden) closeReasonModal();
+});
 
 function highlightSelectedRow() {
   document.querySelectorAll('#historyTable .run-row').forEach(tr => {
@@ -563,8 +645,14 @@ function highlightSelectedRow() {
 
 // 특정 run 의 로그 + 결과 현황판을 함께 갱신 (실행 이력 클릭 / 진행중인 run 폴링 공용)
 function renderRunView(runId, data) {
-  $('#log').textContent = data.log || '(출력 없음)';
-  $('#log').scrollTop = $('#log').scrollHeight;
+  const logEl = $('#log');
+  // 사용자가 위로 스크롤해 과거 로그를 보고 있으면 새 내용이 쌓여도 그 자리를
+  // 유지한다 — 이미 맨 아래 근처(40px 이내)에 있을 때만 계속 따라 내려간다.
+  const stickToBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
+  logEl.textContent = data.log || '(출력 없음)';
+  if (stickToBottom) {
+    logEl.scrollTop = logEl.scrollHeight;
+  }
   $('#runningLabel').textContent = `— ${runId} (${data.meta.status})`;
 
   const rows = (data.cases || []).map(c => ({ ...c, run_id: runId, at: data.meta.finished_at || '' }));
@@ -647,11 +735,27 @@ async function refreshHistory() {
     const stopCell = r.status === 'running'
       ? `<button class="stop-btn" type="button" title="중지" data-run-id="${r.run_id}" onclick="event.stopPropagation(); stopRun('${r.run_id}', this)"></button>`
       : '';
+    // 진행중인 run은 "RUNNING" 대신 진행률(%)만 보여준다(구체적인 완료/전체 개수는
+    // title 툴팁으로만 노출 — 총 개수는 서버가 같은 버튼의 지난 완료 이력에서 추정,
+    // 이력이 전혀 없으면 분모를 모르니 %도 계산 불가). tc_done이 아예 없으면(구버전
+    // 서버 응답 — 프론트만 먼저 배포되고 서버 재시작 전인 과도기) undefined가 그대로
+    // 안 보이게 원래 RUNNING 배지로 폴백한다.
+    const statusCell = (r.status === 'running' && typeof r.tc_done === 'number')
+      ? (r.tc_total
+          ? (() => {
+              const pct = Math.min(100, Math.round(r.tc_done / r.tc_total * 100));
+              return `<span class="progress-track" title="완료된 TC ${r.tc_done}개 / 추정 총 ${r.tc_total}개(지난 이력 기준)">
+                <span class="progress-fill" style="width:${pct}%"></span>
+                <span class="progress-label" style="--pct:${pct}%">${pct}%</span>
+              </span>`;
+            })()
+          : `<span class="badge running" title="완료된 TC 개수(총 개수는 이 버튼의 첫 실행이라 추정 불가): ${r.tc_done}개">진행중</span>`)
+      : `<span class="badge ${r.status}">${r.status.toUpperCase()}</span>`;
     tr.innerHTML = `<td>${r.run_id}</td><td>${r.label || r.tc_id}</td>
       <td><span class="badge channel-${channel}">${channel.toUpperCase()}</span></td>
-      <td><span class="badge ${r.status}">${r.status}</span></td>
+      <td>${statusCell}</td>
       <td>${r.pass}/${r.fail}/${r.skip || 0}</td><td class="muted">${(r.started_at || '').replace('T', ' ')}</td>
-      <td class="muted">${r.finished_at ? r.finished_at.replace('T', ' ') : '진행중'}</td>
+      <td class="muted">${r.finished_at ? r.finished_at.replace('T', ' ') : '-'}</td>
       <td class="muted">${r.finished_at ? formatDuration(r.started_at, r.finished_at) : '-'}</td>
       <td>${dlCell}</td><td class="action-col">${stopCell}</td>`;
     tr.onclick = () => showRunLog(r.run_id);

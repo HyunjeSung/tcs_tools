@@ -8,6 +8,7 @@ DUT(config.env의 DUT_HOST)에 SSH로 tc_<app>.sh 를 transfer+실행하고,
 """
 import asyncio
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -59,7 +60,29 @@ def _load_config() -> dict:
     return values
 
 
+def _load_secrets() -> dict:
+    """레포 루트의 secrets.env(KEY=VALUE, git에 커밋 안 됨)를 읽어 os.environ에도
+    반영한다. TC 스크립트가 필요로 하는 인증정보(예: device_log의
+    FACTORY_AUTH_KEY/SECRET)를 코드/config.env(public repo)에 하드코딩하지 않고
+    이 파일로만 서버 프로세스에 주입하기 위함 — 없으면 빈 dict(해당 TC는 SKIP)."""
+    secrets_path = REPO_ROOT / "secrets.env"
+    if not secrets_path.exists():
+        return {}
+    values = {}
+    for line in secrets_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        values[key] = value
+        os.environ.setdefault(key, value)
+    return values
+
+
 _CONFIG = _load_config()
+_SECRETS = _load_secrets()
 
 DUT_HOST = _CONFIG.get("DUT_HOST", "192.168.10.25")
 SSH_KEY = str(Path(_CONFIG.get("SSH_KEY_PATH", "~/.ssh/emsplus_mass_nopass")).expanduser())
@@ -122,7 +145,8 @@ APP_MODULES = [
 
 def _register_app(app_id: str, label: str, script_name: str, catalog: list,
                    custom_tc_timeouts: dict, runs_dirname: str, status_filename: str,
-                   hidden_entries: Optional[list] = None, reboot_tc_map: Optional[dict] = None) -> dict:
+                   hidden_entries: Optional[list] = None, reboot_tc_map: Optional[dict] = None,
+                   passthrough_env: Optional[list] = None) -> dict:
     tc_dir = REPO_ROOT / "tcs" / app_id
     runs_dir = BASE_DIR / runs_dirname
     runs_dir.mkdir(exist_ok=True)
@@ -140,6 +164,9 @@ def _register_app(app_id: str, label: str, script_name: str, catalog: list,
         "custom_tc_timeouts": custom_tc_timeouts,
         "custom_tc_order": list(custom_tc_timeouts.keys()),
         "reboot_tc_map": reboot_tc_map or {},
+        # secrets.env(git에 안 올라감)에서 온 값만, 이 앱이 명시적으로 선언한
+        # 변수명만 SSH 원격 명령에 주입한다 — _env_prefix_for() 참고.
+        "passthrough_env": passthrough_env or [],
         "runs_dir": runs_dir,
         "status_file": BASE_DIR / status_filename,
     }
@@ -151,6 +178,7 @@ APPS = {
         runs_dirname=m.RUNS_DIRNAME, status_filename=m.STATUS_FILENAME,
         hidden_entries=getattr(m, "HIDDEN_ENTRIES", None),
         reboot_tc_map=getattr(m, "REBOOT_TC_MAP", None),
+        passthrough_env=getattr(m, "PASSTHROUGH_ENV", None),
     )
     for m in APP_MODULES
 }
@@ -180,6 +208,25 @@ class RunRequest(BaseModel):
 
 def ssh_argv(remote_cmd: str):
     return ["ssh", *SSH_OPTS, f"root@{DUT_HOST}", remote_cmd]
+
+
+def _env_prefix_for(app_cfg: dict) -> "tuple[str, str]":
+    """app_cfg['passthrough_env']에 등록된 변수 중 secrets.env/서버 프로세스 환경에
+    실제 값이 있는 것만 `VAR='value' ` 형태로 이어붙인 접두어를 만든다.
+
+    두 버전을 반환한다 — (실행용 원본, 로그 기록용 마스킹). remote_cmd 조립에는
+    원본을 쓰고, output.log에 남기는 커맨드라인 echo에는 마스킹판을 써서 대외비
+    값이 run 로그/PDF 리포트에 평문으로 남지 않게 한다.
+    """
+    names = app_cfg.get("passthrough_env") or []
+    real_parts, masked_parts = [], []
+    for name in names:
+        value = os.environ.get(name) or _SECRETS.get(name)
+        if not value:
+            continue
+        real_parts.append(f"{name}='{value}' ")
+        masked_parts.append(f"{name}='***' ")
+    return "".join(real_parts), "".join(masked_parts)
 
 
 def _write_meta(run_dir: Path, meta: dict):
@@ -336,7 +383,26 @@ def _parse_results(text: str, app_cfg: Optional[dict] = None):
     # 없으면 아직 실행 중이거나 중간에 끊긴 로그라, 그저 "아직 안 온" sub-case까지
     # "영원히 판정 안 될 SKIP"으로 오판하게 된다(2026-08-13 실측: system_log 진행 중인
     # run의 TC02-1/2가 서비스 재시작 대기 단계에서 SKIP으로 잘못 표시됨).
-    if app_cfg is not None and SUMMARY_RE.search(text):
+    #
+    # [2026-08-25 실측 후 수정] --full처럼 메인 실행 뒤에 재부팅 체인(tc06-pre/post,
+    # tc15-pre/post, tc20-pre/post, tc26-pre/post)을 이어붙이는 run은 각 단계마다
+    # 자체 print_result()로 "결과: PASS=X FAIL=Y"를 따로 찍는다. `SUMMARY_RE.search()`
+    # 는 맨 처음 등장(메인 --full 단계가 끝난 시점)에서 바로 true가 돼버려서, 그 뒤로
+    # 이어지는 재부팅 체인의 각 단계가 배너만 찍고 아직 assert 전인 상태를 전부
+    # "사전조건 미충족 SKIP"으로 조기 확정해버렸다 — 대시보드에 "진행중(RUNNING)" 표시가
+    # 전혀 안 보이던 원인(예: TC20-1이 실제로 실행되지도 않았는데 SKIP으로 표시).
+    # "완료"의 진짜 기준은 마지막 summary 줄 "이후"에 새 TC 배너가 더 있는지 여부다 —
+    # 있으면 다음 단계가 아직 진행 중이라는 뜻이므로 보충하지 않는다.
+    summary_matches = list(SUMMARY_RE.finditer(text))
+    is_truly_finished = False
+    if summary_matches:
+        remainder_after_last_summary = text[summary_matches[-1].end():]
+        has_more_banners = any(
+            TC_BANNER_RE.match(line.strip())
+            for line in remainder_after_last_summary.splitlines()
+        )
+        is_truly_finished = not has_more_banners
+    if app_cfg is not None and is_truly_finished:
         attempted = _attempted_tc_numbers(text)
         for sub_id, desc in _expected_cases(app_cfg).items():
             tc_no = sub_id.split("-", 1)[0]
@@ -807,8 +873,10 @@ async def _run_ssh(app_cfg: dict, entry: dict, log_path: Path, run_dir: Path,
         journal_proc, journal_lines, collector_task = await _start_journal_capture()
 
         flag = entry["flag"] or ""
-        remote_cmd = f"sh {remote_script} {flag} 2>&1".strip()
-        logf.write(f"\n$ ssh root@{DUT_HOST} '{remote_cmd}'\n\n".encode())
+        env_real, env_masked = _env_prefix_for(app_cfg)
+        remote_cmd = f"{env_real}sh {remote_script} {flag} 2>&1".strip()
+        masked_cmd = f"{env_masked}sh {remote_script} {flag} 2>&1".strip()
+        logf.write(f"\n$ ssh root@{DUT_HOST} '{masked_cmd}'\n\n".encode())
         logf.flush()
         run_proc = await asyncio.create_subprocess_exec(
             *ssh_argv(remote_cmd), stdout=logf, stderr=logf,
@@ -930,8 +998,10 @@ async def _run_ssh_full_with_reboots(app_cfg: dict, entry: dict, log_path: Path,
             journal_proc, journal_lines, collector_task = await _start_journal_capture()
 
             flag = step_entry["flag"] or ""
-            remote_cmd = f"sh {remote_script} {flag} 2>&1".strip()
-            logf.write(f"\n$ ssh root@{DUT_HOST} '{remote_cmd}'\n\n".encode())
+            env_real, env_masked = _env_prefix_for(app_cfg)
+            remote_cmd = f"{env_real}sh {remote_script} {flag} 2>&1".strip()
+            masked_cmd = f"{env_masked}sh {remote_script} {flag} 2>&1".strip()
+            logf.write(f"\n$ ssh root@{DUT_HOST} '{masked_cmd}'\n\n".encode())
             logf.flush()
             run_proc = await asyncio.create_subprocess_exec(
                 *ssh_argv(remote_cmd), stdout=logf, stderr=logf,
@@ -1127,6 +1197,13 @@ async def _run_serial(app_cfg: dict, entry: dict, log_path: Path) -> "int | None
         "-TimeoutMs", str(entry["timeout"] * 1000),
         "-LogFile", SERIAL_LIVE_LOG_WIN,
     ]
+    # SSH와 동일하게 passthrough_env(예: device_log의 FACTORY_AUTH_KEY/SECRET)를 실제
+    # 값으로 주입 — serial_run.ps1은 stty -echo 이후 SendLine으로만 보내고 SendLine
+    # 자체는 $LogFile에 안 남으므로(Pump가 수신 바이트만 기록) 마스킹 없이 원본을 그대로
+    # 넘겨도 output.log/PDF 리포트에 노출되지 않는다.
+    env_real, _ = _env_prefix_for(app_cfg)
+    if env_real:
+        argv += ["-EnvPrefix", env_real]
 
     tail_task = None
     stop_tail = asyncio.Event()
@@ -1185,6 +1262,13 @@ async def run_tc(run_id: str, app_cfg: dict, entry: dict, channel: str = "ssh"):
         "fail": 0,
         "skip": 0,
         "exit_code": None,
+        # "custom"(선택 실행)은 이번에 실제로 선택된 TC 개수를 api_run()이 이미 정확히
+        # 알고 있으므로(entry["expected_tc_count"]) 그대로 저장해둔다 — 진행률 분모를
+        # "같은 tc_id로 실행됐던 과거 run"에서 추정하면(다른 TC 조합의 과거 custom run과
+        # 뒤섞여 엉뚱한 분모가 됨, 실측: TC16 1개만 골랐던 과거 run이 이번 7개 선택 run의
+        # 분모로 잡혀 0%→100%로 튀는 버그가 났었다) tc_id="custom"은 매번 선택 개수가
+        # 달라 이 추정 자체가 성립하지 않는다.
+        "tc_total": entry.get("expected_tc_count"),
     }
     _write_meta(run_dir, meta)
 
@@ -1351,14 +1435,70 @@ def api_ping():
     return {"reachable": ping_rc == 0, "host": DUT_HOST}
 
 
+def _estimate_tc_total(app_cfg: dict, tc_id: str, exclude_run_id: str) -> Optional[int]:
+    """진행중인 run의 진행률 분모(총 TC 개수) 추정치.
+
+    같은 tc_id(버튼)로 실행됐던 가장 최근 "완료된" run에서 관측된 distinct TC
+    개수를 그대로 재사용한다 — 앱마다 quick_set/full_extra 구성이 달라 서버가
+    일반적으로 알 방법이 없으니, "지난번 이 버튼을 눌렀을 때 몇 개의 TC가
+    실행됐는지"를 근사치로 쓴다(스크립트가 TC 구성을 바꾸지 않는 한 정확하다).
+    과거 이력이 전혀 없으면(그 tc_id로 처음 실행) None — 프론트엔드가 퍼센트
+    대신 진행 개수만 표시한다.
+    """
+    runs_dir = app_cfg["runs_dir"]
+    for d in sorted(runs_dir.iterdir(), reverse=True):
+        if d.name == exclude_run_id:
+            continue
+        meta_path = d / "meta.json"
+        if not meta_path.exists():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text())
+        except Exception:
+            continue
+        # "pass"/"fail"/"skip"만 스크립트가 의도한 범위를 끝까지 실행한 상태다.
+        # "cancelled"(중지 버튼)/"timeout"/"error"/"interrupted"/"rebooted"(체이닝
+        # 중간 단계)는 도중에 끊긴 상태라 그 시점까지 관측된 distinct TC 개수가
+        # 전체 개수보다 훨씬 작을 수 있다 — 이걸 분모로 쓰면 진행률이 100%를 넘겨
+        # 버리는 버그가 났었다(예: 중지된 run이 TC01 하나만 관측된 채로 분모=1이
+        # 되어, 다음 정상 run이 TC02만 끝나도 200%로 표시됨).
+        if meta.get("status") not in ("pass", "fail", "skip"):
+            continue
+        if meta.get("tc_id") != tc_id:
+            continue
+        log_text = _read_clean_log(d / "output.log")
+        _, _, cases = _parse_results(log_text, app_cfg)
+        distinct = {c["tc"] for c in cases}
+        if distinct:
+            return len(distinct)
+    return None
+
+
 @app.get("/api/runs")
 def api_runs(app_id: str = DEFAULT_APP_ID, page: int = 1, page_size: int = 10):
-    runs_dir = _get_app(app_id)["runs_dir"]
+    app_cfg = _get_app(app_id)
+    runs_dir = app_cfg["runs_dir"]
     runs = []
     for d in sorted(runs_dir.iterdir(), reverse=True):
         meta_path = d / "meta.json"
         if meta_path.exists():
-            runs.append(json.loads(meta_path.read_text()))
+            meta = json.loads(meta_path.read_text())
+            if meta.get("status") == "running":
+                # 실행 이력 화면에서 "RUNNING" 대신 "몇 개 중 몇 개 TC 진행"을 % 로
+                # 보여주기 위한 진행률 — tc_done은 이 run 로그에서 실제로 완료(PASS/
+                # FAIL/SKIP)된 distinct TC 개수. tc_total은 run_tc()가 시작 시점에 이미
+                # 정확히 저장해둔 값(주로 tc_id="custom" — 이번에 선택된 TC 개수를 그대로
+                # 앎)이 있으면 그걸 그대로 쓰고, 없으면(quick/full처럼 스크립트 내부
+                # 구성이라 서버가 정확한 개수를 모르는 버튼) 과거 같은 버튼 실행 이력에서
+                # 추정한다(_estimate_tc_total). 이 순서를 반대로 하면 "custom"은 매번
+                # 선택 개수가 달라 과거 run의 개수가 뒤섞여 분모가 틀어진다(실측: TC16
+                # 1개짜리 과거 run이 이번 7개 선택 run의 분모로 잡혀 100%로 튐).
+                log_text = _read_clean_log(d / "output.log")
+                _, _, cases = _parse_results(log_text, app_cfg)
+                meta["tc_done"] = len({c["tc"] for c in cases})
+                if not meta.get("tc_total"):
+                    meta["tc_total"] = _estimate_tc_total(app_cfg, meta.get("tc_id", ""), d.name)
+            runs.append(meta)
     total = len(runs)
     page = max(1, page)
     start = (page - 1) * page_size
@@ -1397,7 +1537,7 @@ def api_run_detail(run_id: str, app_id: str = DEFAULT_APP_ID):
     log_text = _read_clean_log(log_path)
     _, _, cases = _parse_results(log_text, app_cfg)
     if meta.get("status") == "running":
-        cases = sorted(cases + _pending_case_rows(app_cfg, log_text, cases), key=_case_sort_key)
+        cases = cases + _pending_case_rows(app_cfg, log_text, cases)
         # 아직 진행 중인 run이면 current_run의 실시간 case_times로 소요시간을 계산한다
         # (완료 전까지는 meta.json에 case_durations가 없음) — 다른 run이 이미 시작돼
         # current_run이 이 run_id를 더 이상 가리키지 않으면 계산하지 않는다(빈 값 유지).
@@ -1407,6 +1547,11 @@ def api_run_detail(run_id: str, app_id: str = DEFAULT_APP_ID):
             case_durations = {}
     else:
         case_durations = meta.get("case_durations") or {}
+    # 결과 현황판은 실행(로그 출현) 순서가 아니라 TC ID 오름차순(TC01-1, TC01-2, TC02-1, ...)
+    # 으로 보여준다 — 재부팅 체이닝 등으로 실제 실행 순서가 TC 번호 순과 어긋나는 경우가
+    # 많아(TC06/07·TC15·TC20이 --full 뒤에 이어붙거나, --only로 임의 조합) 실행 순서 그대로
+    # 노출하면 표가 뒤섞여 보임.
+    cases = sorted(cases, key=_case_sort_key)
     for c in cases:
         c["duration_sec"] = case_durations.get(c["case"])
     return {"meta": meta, "log": log_text, "cases": cases}
@@ -1423,6 +1568,7 @@ def _load_finished_run(app_cfg: dict, run_id: str):
     log_path = run_dir / "output.log"
     log_text = _read_clean_log(log_path)
     _, _, cases = _parse_results(log_text, app_cfg)
+    cases = sorted(cases, key=_case_sort_key)
     sl_journal_path = run_dir / "sl_journal.log"
     sl_journal_text = sl_journal_path.read_text(errors="replace") if sl_journal_path.exists() else ""
     return meta, cases, log_text, sl_journal_text
@@ -1483,6 +1629,7 @@ async def api_run(req: RunRequest):
                 "reboot": False,
                 "note": pre_entry.get("note"),
                 "chain_reboot_pairs": [(pre_id, post_id)],
+                "expected_tc_count": 1,
             }
         else:
             # verify_timer_loop_started + (필요시) setup_rotate 오버헤드 여유분.
@@ -1499,6 +1646,7 @@ async def api_run(req: RunRequest):
                 "stall_timeout": stall_timeout,
                 "reboot": False,
                 "note": None,
+                "expected_tc_count": len(ordered),
             }
     else:
         if req.tc_id not in app_cfg["catalog_map"]:

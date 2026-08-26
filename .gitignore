@@ -13,3 +13,7 @@ venv/
 
 # 비공개 문서 (public repo 업로드 금지)
 docs/AC Gen2 TestCase.xlsx
+
+# 자격증명(대외비) — config.env와 달리 이 파일은 절대 커밋하지 않는다.
+# tc_dashboard의 SSH 실행 시 여기 값을 앱별 PASSTHROUGH_ENV로만 원격 명령에 주입한다.
+secrets.env
