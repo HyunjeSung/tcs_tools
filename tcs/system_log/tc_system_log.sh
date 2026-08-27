@@ -282,27 +282,17 @@ tc02_timer_running() {
     echo "  [TC02-절차6] files_after=${files_after}, 신규 파일=$(basename "${latest_xz:-none}")"
 
     # 7. 시스템 시간을 현재 시간으로 복원.
-    # 원래는 NTP(timedatectl set-ntp yes)만으로 복원했는데, 이 DUT는 NTP service가
-    # inactive라 아무리 기다려도 동기화가 안 끝나 시계가 미래에 계속 남는 문제가 있었다
-    # (find_latest_xz로 "최신 파일" 오판정은 막았지만 시계 자체는 여전히 틀어진 채 남음).
-    # 하드웨어 RTC는 이 조작과 무관하게 실제 시간을 유지하므로, RTC→시스템 시계로 즉시
-    # 동기화되는 hwclock -s 를 우선 쓰고, 실패할 때만 기존 NTP 대기로 폴백한다.
+    # [2026-08-25 device_log TC18 세션에서 발견 후 재수정] 원래는 hwclock -s(RTC 기준)를
+    # 우선 쓰고 실패 시 NTP로 폴백했는데, 이 DUT는 `/`가 ro로 마운트돼 있어
+    # `hwclock --systohc`(RTC에 쓰기)가 항상 실패한다 — 그런데 device_log의 TC18/TC19
+    # 같은 `timedatectl set-time` 기반 TC가 이 RTC에 값을 남겨두면(그 TC들은 RTC에도
+    # 쓴다), 이후 이 TC가 도는 시점에 `hwclock -s`(RTC→시스템)는 에러 없이 "성공"하면서
+    # 그 오염된 RTC 값을 시스템 시계에 그대로 옮겨버린다(실측: 13시간 이상 틀어진 채
+    # "성공"으로 보고됨) — RTC 상태에 따라 복원이 조용히 실패할 수 있는 구조였다.
+    # RTC/NTP 둘 다에 의존하지 않고, 4번에서 이미 셸 변수로 저장해둔 t0(jump 전 원래
+    # epoch)로 직접 복원한다 — device_log TC18/TC19가 이미 쓰는 것과 동일한 방식.
     echo "  [TC02-절차7] 시스템 시간 복원..."
-    if hwclock -s 2>/dev/null; then
-        echo "    hwclock -s (RTC 기준) 로 복원 완료"
-    else
-        echo "    hwclock -s 실패 — NTP로 폴백"
-        timedatectl set-ntp yes 2>/dev/null
-        local ntp_synced=""
-        local wait_i=0
-        while [ "$wait_i" -lt 15 ]; do
-            sleep 1
-            ntp_synced=$(timedatectl show -p NTPSynchronized --value 2>/dev/null)
-            [ "$ntp_synced" = "yes" ] && break
-            wait_i=$((wait_i + 1))
-        done
-        echo "    NTPSynchronized=${ntp_synced:-N/A}"
-    fi
+    date -s "@${t0}" > /dev/null
     echo "    복원 후 시간: $(date '+%F %T')"
 
     # PASS/FAIL Criteria
@@ -641,23 +631,14 @@ tc07_retention_delete() {
         assert "TC07-2: 29일 경과 파일 유지됨" "FAIL"
     fi
 
-    # 6. 시간 복원 — hwclock(RTC 기준) 우선, 실패 시 NTP 폴백 (TC02-절차7과 동일)
+    # 6. 시간 복원 (TC02-절차7과 동일 이유로 재수정, 2026-08-25) — 이 DUT는 rootfs가
+    # ro라 hwclock --systohc(RTC 쓰기)가 항상 실패하는데, device_log의 TC18/TC19 같은
+    # `timedatectl set-time` 기반 TC가 RTC에 남긴 오염값이 있으면 hwclock -s(RTC→시스템)
+    # 는 에러 없이 "성공"하면서 그 오염값을 시스템 시계에 그대로 옮겨버린다(실측:
+    # 13시간 이상 틀어진 채 성공 처리됨). RTC/NTP 둘 다 의존하지 않고 2번에서 저장해둔
+    # t0(jump 전 원래 epoch)로 직접 복원한다.
     echo "  [TC07-절차6] 시스템 시간 복원..."
-    if hwclock -s 2>/dev/null; then
-        echo "    hwclock -s (RTC 기준) 로 복원 완료"
-    else
-        echo "    hwclock -s 실패 — NTP로 폴백"
-        timedatectl set-ntp yes 2>/dev/null
-        local ntp_synced=""
-        local wait_i=0
-        while [ "$wait_i" -lt 15 ]; do
-            sleep 1
-            ntp_synced=$(timedatectl show -p NTPSynchronized --value 2>/dev/null)
-            [ "$ntp_synced" = "yes" ] && break
-            wait_i=$((wait_i + 1))
-        done
-        echo "    NTPSynchronized=${ntp_synced:-N/A}"
-    fi
+    date -s "@${t0}" > /dev/null
     echo "    복원 후 시간: $(date '+%F %T')"
 }
 

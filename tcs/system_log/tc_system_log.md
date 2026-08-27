@@ -82,7 +82,8 @@ toupload에 `.log.xz` 파일을 생성하는지 확인한다.
 
 - 공통 전제 조건 충족
 - 시스템 시간 변경 권한 (root)
-- NTP 자동 동기화 정지/복원 권한 (`timedatectl set-ntp false/yes`, `systemctl start/stop chronyd systemd-timesyncd`)
+- NTP 자동 동기화 정지 권한 (`timedatectl set-ntp false`) — 시간 이동 전 잠깐 켰다
+  끄는 용도로만 쓰고, 복원은 `set-ntp yes`가 아니라 `t0` 기반 `date -s`로 함(아래 Flag)
 - `journalctl -u docker-loader` 에서 `[system_log_timer_loop] loop started` 라인 확인 가능
    — 즉 system_log 어플리케이션의 timer thread 가 부팅 직후 정상 시작되어 24h 주기 check 루프가 돌고 있는 상태
 - `system_log` 프로세스를 kill할 권한 (root) — 절차 0에서 사용
@@ -97,7 +98,18 @@ toupload에 `.log.xz` 파일을 생성하는지 확인한다.
 4. 현재 epoch `t0` 저장 후 시스템 시간을 `t0 + 25*3600` 로 변경 (`date -s @<epoch>`)
 5. 타이머 발화 대기 (70초) — system_log_timer_loop 의 1초 sleep_for + `elapsed >= 24h` check 후 `task_rotate_sync()` 호출 완료 대기
 6. toupload 에 신규 `.log.xz` 파일 생성 확인 및 파일명의 endtime 이 변경한 시간(+25h) 근처인지 확인
-7. 시스템 시간을 현재 시간으로 복원
+7. 시스템 시간을 현재 시간으로 복원 — 4번에서 저장해둔 `t0`로 `date -s "@${t0}"`
+   직접 복원(2026-08-25 재수정, 아래 Flag 참고)
+
+> **주의 (Flag, 정정 — 2026-08-25 device_log TC18 세션에서 발견):** 원래는
+> `hwclock -s`(RTC→시스템)를 우선 쓰고 실패 시 NTP 재동기화로 폴백했는데, 이 DUT는
+> `/`가 `ro`로 마운트돼 있어 `hwclock --systohc`(RTC 쓰기)가 항상 실패한다. 그런데
+> `device_log`의 TC18/TC19처럼 `timedatectl set-time`으로 시간을 바꾸는 TC는 RTC에도
+> 값을 써버리므로, 그런 TC가 먼저 돈 뒤 이 TC가 실행되면 `hwclock -s`가 그 오염된
+> RTC 값을 시스템 시계에 에러 없이(`exit_code=0`) 그대로 옮겨버린다(실측: 13시간
+> 이상 틀어진 채 "성공"으로 보고됨) — 복원이 조용히 실패할 수 있는 구조였다. RTC/NTP
+> 둘 다 의존하지 않고, 4번에서 이미 저장해둔 `t0`(jump 전 원래 epoch)로 직접 복원하는
+> 방식으로 교체했다.
 
 ### 기대 결과
 
@@ -338,7 +350,7 @@ rotation 완료 후 생성된 파일이 유효한 `.xz`이며, 원본 `.log` 파
 - 공통 전제 조건 충족
 - `touch -d "31 days ago"` / `"29 days ago"` 명령 사용 가능 (mtime 조작)
 - 환경변수: `LOG_RETAIN_DAY=30` (system_log 빌드 상수)
-- `date -s`, `hwclock -s`, `timedatectl set-ntp` 사용 가능 (root, TC02와 동일 권한)
+- `date -s`, `timedatectl set-ntp` 사용 가능 (root, TC02와 동일 권한)
 
 ### 절차
 
@@ -357,7 +369,8 @@ rotation 완료 후 생성된 파일이 유효한 `.xz`이며, 원본 `.log` 파
    반복(iteration) 안에서 `cleanup_log_dir()`가 바로 이어 실행됨)
 6. 31일 더미 파일 존재 여부 확인 (`[ ! -f ... ]`)
 7. 29일 더미 파일 존재 여부 확인 (`[ -f ... ]`)
-8. 시스템 시간 복원 (`hwclock -s` 우선, 실패 시 NTP 재동기화 폴백 — TC02-절차7과 동일)
+8. 시스템 시간 복원 — 3번에서 저장해둔 `t0`로 `date -s "@${t0}"` 직접 복원
+   (2026-08-25 재수정, TC02-절차7 Flag와 동일 이유)
 
 > **주의:** 더미 파일은 반드시 3번(시간 이동) *이후*에 touch할 것. 이동 전에
 > touch하면 파일 나이에 25시간이 그대로 얹혀 29일 더미가 30일 문턱을 넘어설 수
