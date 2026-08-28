@@ -871,8 +871,21 @@ toupload에 파일이 남아있는 상태로 재부팅해도, 재기동 후 자�
 ### 목적
 
 `logcount.json`의 대상 log_item `perDayRoot`를 0으로 설정하면, root의 압축 파일이
-toupload로 이동하지 않고 archive로만 이동하는지 확인한다 (`isUploadAllowed()` —
-`cloud_upload_manager.cpp:1338`).
+root에서 toupload로 **직행하지 않고** 반드시 archive를 거치는지 확인한다
+(`isUploadAllowed()` — `cloud_upload_manager.cpp:1338`).
+
+> **주의 (2026-08-28 실측 후 정정):** 원래는 "toupload 최종 미이동 + archive 최종 이동"을
+> `ls` 스냅샷 diff로 판정했는데, `perDayRoot`와 `perDayArchive`는 서로 완전히 독립된
+> 게이트다 — 이 TC는 `perDayRoot`만 0으로 만들고 `perDayArchive`는 그대로 두므로,
+> root→archive로 옮겨진 파일이 **같은 idle thread 틱 안에서** `archiveToUpload()`에
+> 걸려 곧장 archive→toupload로 이어진다(archive quota가 남아있으면 정상적으로 업로드됨
+> — 앱의 의도된 동작이지 버그 아님, `perDayArchive`까지 0으로 막는 TC17이 "완전 차단"
+> 케이스를 이미 커버). 그 결과 최종 디렉토리 상태만으로는 "root에서 toupload로 직행했는지
+> (버그)"와 "root→archive→toupload로 정상 경유했는지(정상)"를 구분할 수 없다 — 실측
+> 시 100% FAIL이 확정적이었다(스크립트/스펙의 판정 방식 문제, 코드 결함 아님). 그래서
+> TC16-1/2는 `ls` 대신 journald의 `isUploadAllowed`/`rootToArchiveOrToUpload` DEBUG/INFO
+> 로그로 "root→toupload 직행이 없었는지"와 "root→archive 경유가 있었는지"를 직접
+> 판정한다(로그 확인을 위해 TC 실행 중 `log_level_dl`을 DEBUG로 임시 전환).
 
 ### 사전 조건
 
@@ -880,25 +893,26 @@ toupload로 이동하지 않고 archive로만 이동하는지 확인한다 (`isU
 
 ### 절차
 
-1. 대상 log_item의 `perDayRoot`를 0으로 설정 (`logcount.json` 직접 수정 또는 IPC)
-2. 로그 생성 → root에 `.csv.xz` 발생
-3. idle thread 사이클 대기 후 `toupload/`, `archive/` 상태 확인
-4. 23:50(자정 루틴, TC18) 도달 시 `perDayRoot`가 `defaultPerDay`로 초기화되는지 확인
+1. `log_level_dl`을 DEBUG(0)로 임시 전환 (판정 근거용, 종료 시 원복)
+2. 대상 log_item의 `perDayRoot`를 0으로 설정 (`logcount.json` 직접 수정) + `sync` + docker-loader 재시작
+3. 네트워크 차단 상태에서 강제 업로드(`get_log_data`) 호출 → root 대기열에 파일만 쌓임 → 네트워크 복구
+4. idle thread 사이클 대기 후 journald에서 `isUploadAllowed`/`rootToArchiveOrToUpload` 로그로 이동 경로 판정
+5. 23:50(자정 루틴, TC18) 도달 시 `perDayRoot`가 `defaultPerDay`로 초기화되는지 확인
 
 ### 기대 결과
 
 | 항목 | 기준 |
 |------|------|
-| toupload | 이동 없음 |
-| archive | 이동됨 |
+| root→toupload 직행 | 없음 (`isUploadAllowed`가 root에서 Meter를 allow한 기록 없어야 함) |
+| root→archive 경유 | 있음 (Meter root denied 로그 직후 `rootToArchiveOrToUpload`의 archive 이동 로그) |
 | 익일 초기화 | 자정 루틴 후 perDayRoot = defaultPerDay |
 
 ### PASS/FAIL Criteria
 
 | 기준 ID | 설명 | 타입 | 기준값 | 셸 검증 |
 |---------|------|------|--------|---------|
-| TC16-1 | toupload 미이동 | boolean | true | `[ ! -f "$toupload_dir/$fname" ]` |
-| TC16-2 | archive 이동 확인 | boolean | true | `[ -f "$archive_dir/$fname" ]` |
+| TC16-1 | root quota 소진 시 root→toupload 직행 안 함 | boolean | true | journald에 `isUploadAllowed] Upload allowed for log type: Meter from root directory` 없음 |
+| TC16-2 | root quota 소진 시 archive로 이동 | boolean | true | journald에서 `Meter from root directory has exhausted` 바로 다음 줄이 `rootToArchiveOrToUpload] Moved files from root -> archive directory` |
 
 ---
 

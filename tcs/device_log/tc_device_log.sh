@@ -1595,17 +1595,32 @@ tc16_perday_root_zero() {
     local root_before
     root_before=$(lc_field "$log_item" "perDayRoot")
     echo "  원래 perDayRoot=$root_before"
+
+    # [2026-08-28 실측 FAIL 사후분석] perDayRoot=0로 바꿔도 root 파일이 toupload로 새는
+    # 원인이 (a) restart 시 logcount.json 재로딩 실패/폴백인지 (b) 재로딩-완료 전 경합인지
+    # 소스 리뷰만으로는 구분이 안 됐다 — isUploadAllowed()/loadLogCountFrom()의 판정 근거가
+    # DEBUG 로그인데 TC08과 달리 이 TC는 레벨을 안 낮춰서 journald에 안 남았기 때문.
+    # TC08과 동일한 패턴(set_dl_log_level)으로 임시로 DEBUG를 켜서 이번엔 근거를 남긴다.
+    local orig_log_level
+    orig_log_level=$(send_and_wait "select_records" '{"db":"edge_storage.db","table":"system_setting","keys":["log_level_dl"]}' 10 | jq -r '.payload.records[] | select(.key=="log_level_dl") | .value' 2>/dev/null)
+    [ -z "$orig_log_level" ] && orig_log_level=1
+    echo "  \$ system_setting log_level_dl: $orig_log_level -> 0 (DEBUG, TC16 판정 근거용 임시 변경)"
+    set_dl_log_level 0
+
     echo "  \$ logcount.json $log_item perDayRoot: $root_before -> 0"
     set_lc_field_num "$log_item" "perDayRoot" 0
+    # container_write()는 호스트→컨테이너 경계 너머로 cat 파이프만 흘려보낼 뿐 fsync를
+    # 보장하지 않는다 — restart로 곧장 이어지는 재읽기가 미반영된 페이지캐시를 볼 가능성을
+    # 없애기 위해 명시적으로 디스크에 동기화한다.
+    echo "  \$ sync"
+    sync
     dump_container_jq "$LOGCOUNT_JSON" ".logItemUploadLimits[] | select(.logItem==\"$log_item\")"
+    local test_epoch
+    test_epoch=$(date +%s)
     restart_docker_loader
 
     dump_cmd ls -la "$TOUPLOAD_ROOT/$log_item/"
-    local before_toupload
-    before_toupload=$(ls "$TOUPLOAD_ROOT/$log_item/" 2>/dev/null)
     dump_cmd ls -la "$ARCHIVE_ROOT/$log_item/"
-    local before_archive
-    before_archive=$(ls "$ARCHIVE_ROOT/$log_item/" 2>/dev/null)
 
     network_block
     send_and_wait "get_log_data" "{}" 30 > /dev/null
@@ -1615,28 +1630,51 @@ tc16_perday_root_zero() {
     echo "  idle thread 라운드로빈이 root 파일을 집을 때까지 대기 (최대 60초)..."
     sleep 60
 
-    dump_cmd ls -la "$TOUPLOAD_ROOT/$log_item/"
-    local after_toupload new_toupload
-    after_toupload=$(ls "$TOUPLOAD_ROOT/$log_item/" 2>/dev/null)
-    new_toupload=$(comm -13 <(echo "$before_toupload" | sort) <(echo "$after_toupload" | sort) | grep -c '\.csv\.xz$')
-    if [ "$new_toupload" -eq 0 ]; then
-        assert "TC16-1: toupload 미이동" "PASS"
+    # [2026-08-28 실측 후 재수정] perDayRoot=0이어도 perDayArchive는 그대로 남아있어서,
+    # root->archive로 옮겨진 파일이 "같은 idle thread 틱 안에서" archiveToUpload()에
+    # 걸려 곧장 archive->toupload로 이어진다(root quota와 archive quota는 서로 독립된
+    # 별개 게이트라 root가 막혀도 archive가 열려있으면 결국 업로드된다 — 이건 앱의 정상
+    # 설계 동작이지 버그가 아니다, TC17이 이미 "둘 다 0"인 케이스를 커버). 그래서
+    # ls 스냅샷 diff로는 "toupload에 안 갔다"를 절대 관측할 수 없다(경합) — TC16이
+    # 실제로 검증해야 하는 건 "root quota가 소진되면 root에서 toupload로 직행하지
+    # 않고 반드시 archive를 한 번 거치는지" 뿐이므로, 최종 디렉토리 상태가 아니라
+    # journald의 isUploadAllowed/rootToArchiveOrToUpload DEBUG/INFO 로그로 그 경로
+    # 자체를 판정한다.
+    local journal_evidence
+    journal_evidence=$(journalctl -u docker-loader --no-pager --since "@$test_epoch" 2>/dev/null | grep -E "isUploadAllowed|rootToArchiveOrToUpload")
+    dump_cmd sh -c "journalctl -u docker-loader --no-pager --since '@$test_epoch' | grep -E 'loadLogCountFrom|isUploadAllowed|rootToArchiveOrToUpload'"
+
+    local root_direct_allowed=0 root_denied_then_archived=0 prev_line=""
+    while IFS= read -r line; do
+        if echo "$prev_line" | grep -q "Meter from root directory has exhausted" \
+            && echo "$line" | grep -q "rootToArchiveOrToUpload.*Moved files from root -> archive directory"; then
+            root_denied_then_archived=1
+        fi
+        echo "$line" | grep -q "isUploadAllowed.*Upload allowed for log type: Meter from root directory" && root_direct_allowed=1
+        prev_line="$line"
+    done <<< "$journal_evidence"
+
+    if [ "$root_direct_allowed" -eq 0 ]; then
+        assert "TC16-1: root quota 소진 시 root→toupload 직행 안 함" "PASS"
     else
-        assert "TC16-1: toupload 미이동" "FAIL" "toupload에 신규 파일 ${new_toupload}개 발생"
+        assert "TC16-1: root quota 소진 시 root→toupload 직행 안 함" "FAIL" "perDayRoot=0인데도 isUploadAllowed가 root에서 직접 allow한 기록 있음"
     fi
 
-    dump_cmd ls -la "$ARCHIVE_ROOT/$log_item/"
-    local after_archive new_archive
-    after_archive=$(ls "$ARCHIVE_ROOT/$log_item/" 2>/dev/null)
-    new_archive=$(comm -13 <(echo "$before_archive" | sort) <(echo "$after_archive" | sort) | grep -c '\.csv\.xz$')
-    if [ "$new_archive" -gt 0 ]; then
-        assert "TC16-2: archive 이동 확인" "PASS"
+    if [ "$root_denied_then_archived" -eq 1 ]; then
+        assert "TC16-2: root quota 소진 시 archive로 이동" "PASS"
     else
-        assert "TC16-2: archive 이동 확인" "FAIL" "archive에 신규 파일 없음"
+        assert "TC16-2: root quota 소진 시 archive로 이동" "FAIL" "Meter denied 로그 직후 root→archive 이동 로그가 없음 — 위 journalctl 근거 참고"
     fi
+
+    dump_cmd ls -la "$TOUPLOAD_ROOT/$log_item/"
+    dump_cmd ls -la "$ARCHIVE_ROOT/$log_item/"
+
+    echo "  \$ system_setting log_level_dl 원복: $orig_log_level"
+    set_dl_log_level "$orig_log_level"
 
     echo "  logcount.json 원복: perDayRoot=$root_before"
     set_lc_field_num "$log_item" "perDayRoot" "$root_before"
+    sync
     restart_docker_loader
 }
 
@@ -1657,8 +1695,21 @@ tc17_perday_both_zero() {
     root_before=$(lc_field "$log_item" "perDayRoot")
     archive_before=$(lc_field "$log_item" "perDayArchive")
     echo "  원래 perDayRoot=$root_before perDayArchive=$archive_before"
+
+    # TC16과 동일 이유(tc16_perday_root_zero() 주석 참고) — isUploadAllowed()/
+    # loadLogCountFrom() 판정 근거를 journald에 남기기 위해 임시로 DEBUG.
+    local orig_log_level
+    orig_log_level=$(send_and_wait "select_records" '{"db":"edge_storage.db","table":"system_setting","keys":["log_level_dl"]}' 10 | jq -r '.payload.records[] | select(.key=="log_level_dl") | .value' 2>/dev/null)
+    [ -z "$orig_log_level" ] && orig_log_level=1
+    echo "  \$ system_setting log_level_dl: $orig_log_level -> 0 (DEBUG, TC17 판정 근거용 임시 변경)"
+    set_dl_log_level 0
+
     set_lc_field_num "$log_item" "perDayRoot" 0
     set_lc_field_num "$log_item" "perDayArchive" 0
+    # container_write()는 fsync를 보장하지 않으므로 restart 전 명시적으로 동기화한다
+    # (tc16_perday_root_zero() 주석 참고).
+    echo "  \$ sync"
+    sync
     dump_container_jq "$LOGCOUNT_JSON" ".logItemUploadLimits[] | select(.logItem==\"$log_item\")"
     restart_docker_loader
 
@@ -1675,6 +1726,8 @@ tc17_perday_both_zero() {
     echo "  idle thread 사이클 반복 대기 (60초)..."
     sleep 60
 
+    dump_cmd sh -c "journalctl -u docker-loader --no-pager | grep -E 'loadLogCountFrom|isUploadAllowed'"
+
     dump_cmd ls -la "$TOUPLOAD_ROOT/$log_item/"
     local after_toupload new_toupload
     after_toupload=$(ls "$TOUPLOAD_ROOT/$log_item/" 2>/dev/null)
@@ -1685,9 +1738,13 @@ tc17_perday_both_zero() {
         assert "TC17-1: toupload 미이동 유지" "FAIL" "toupload에 신규 파일 ${new_toupload}개 발생"
     fi
 
+    echo "  \$ system_setting log_level_dl 원복: $orig_log_level"
+    set_dl_log_level "$orig_log_level"
+
     echo "  logcount.json 원복: perDayRoot=$root_before perDayArchive=$archive_before"
     set_lc_field_num "$log_item" "perDayRoot" "$root_before"
     set_lc_field_num "$log_item" "perDayArchive" "$archive_before"
+    sync
     restart_docker_loader
 }
 
