@@ -1270,13 +1270,23 @@ tc12_multi_file_upload() {
     # toupload에 도착했어도 다음 스캔까지 최대 300초를 기다려야 [Director] 로그에
     # 나타난다 — 이전 실행은 대기 없이 즉시 확인해 100% FAIL이 확정적이었다
     # (스크립트 버그). 최대 310초 폴링으로 교체.
+    #
+    # [2026-08-28 실측 후 재수정] 순회(최대 31회)마다 파일 3개 각각에 journalctl을
+    # --since 없이(=docker-loader 전체 히스토리) 새로 돌려 최대 93회 풀스캔을 했다 —
+    # 이 세션처럼 DEBUG 로그를 많이 찍어 journal이 불어난 상태에서는 각 호출이
+    # 느려지고, TC11(순회당 1회 호출)과 달리 TC12만 그 비용이 3배라 로컬 대시보드의
+    # stall 감지(900초, 실제 원격 루프는 여전히 진행 중인데도 새 출력이 안 잡혀 강제
+    # 종료됨)에 먼저 걸리는 사고가 있었다(20260828_145403_device_log_full). 순회당
+    # journalctl을 1회만 돌려 결과를 로컬 변수에 담아두고 grep은 로컬에서 하며,
+    # --since로 이번 TC 시작 시각 이후만 스캔해 비용을 낮춘다.
     echo "  [Director] 300초 주기 스캔 대기 (최대 310초 폴링)..."
-    local waited=0
+    local waited=0 director_log=""
     while [ "$waited" -lt 310 ]; do
+        director_log=$(journalctl -u docker-loader --no-pager --since "@$now" 2>/dev/null | grep '\[Director\]')
         local remaining=""
         local f
         for f in $new_files; do
-            journalctl -u docker-loader --no-pager 2>/dev/null | grep '\[Director\]' | grep -q "$f" || remaining="$remaining $f"
+            echo "$director_log" | grep -q "$f" || remaining="$remaining $f"
         done
         [ -z "$remaining" ] && break
         sleep 10
@@ -1284,11 +1294,13 @@ tc12_multi_file_upload() {
     done
     echo "  대기 시간: ${waited}s"
 
+    director_log=$(journalctl -u docker-loader --no-pager --since "@$now" 2>/dev/null | grep '\[Director\]')
+    dump_cmd sh -c "journalctl -u docker-loader --no-pager --since '@$now' | grep '\[Director\]'"
+
     local all_found=1
     local f
     for f in $new_files; do
-        dump_cmd sh -c "journalctl -u docker-loader --no-pager | grep '\[Director\]' | grep '$f'"
-        if journalctl -u docker-loader --no-pager 2>/dev/null | grep '\[Director\]' | grep -q "$f"; then
+        if echo "$director_log" | grep -q "$f"; then
             echo "  found: $f"
         else
             echo "  NOT found: $f"
