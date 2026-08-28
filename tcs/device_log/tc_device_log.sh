@@ -909,8 +909,19 @@ tc06_07_pre() {
     local log_item="EMSP_Installation"
 
     if [ ! -d "$LOGGER_ROOT/$log_item" ]; then
+        # [2026-08-28 실측 후 수정] 이 지점에서 reboot()를 아예 안 부르고 return하는데,
+        # 대시보드(_run_ssh_full_with_reboots)는 이 사실을 모른 채 그대로
+        # _wait_for_dut_reboot() → --tc06-post 로 이어간다 — DUT가 실제로는 재부팅
+        # 안 됐으니 ping/ssh 확인은 즉시 통과하고, --tc06-post는 $TC0607_SAVE가 없어
+        # [ERROR] 한 줄만 찍고 조용히 리턴한다(assert 없음). 그 결과 TC06-1만 FAIL로
+        # 남고 TC07-1/2는 이 run 결과에서 통째로 증발했다(latest_status에 남아있던
+        # 예전 run의 TC07-1/2만 계속 재사용되는 것처럼 보임) — TC08/TC22 등 다른
+        # "텔레메트리 미도착" 사전조건 케이스가 관련 sub-case 전부를 FAIL 처리하는
+        # 것과 다른 예외였다. TC07-1/2도 같은 이유로 FAIL 처리해 결과가 비지 않게 한다.
         echo "[ERROR] $log_item 텔레메트리 미도착 — TC06/07 진행 불가"
         assert "TC06-1: 재부팅 전후 파일명 동일" "FAIL" "$log_item 텔레메트리 미도착"
+        assert "TC07-1: 재부팅 경계에 빈 줄 존재" "FAIL" "$log_item 텔레메트리 미도착 — TC06-pre 단계에서 재부팅 자체가 스킵됨"
+        assert "TC07-2: 헤더 라인 유지" "FAIL" "$log_item 텔레메트리 미도착 — TC06-pre 단계에서 재부팅 자체가 스킵됨"
         return
     fi
 
