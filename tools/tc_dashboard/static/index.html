@@ -485,43 +485,39 @@ async function loadCatalogButtons() {
   });
 }
 
+// 두 DUT는 물리적으로 독립된 장치라 완전히 동시에 실행될 수 있다 — 그래서 DUT 선택은
+// (다른 DUT가 바쁘든 말든) 언제나 자유롭게 바꿀 수 있고, "지금 이 버튼을 누르면 어느 DUT로
+// 갈지"만 결정한다. 버튼 비활성화는 선택된 DUT 자신이 바쁠 때만 건다.
+let selectedDutPresetId = 'default';
+let dutPresetsCache = [];   // 마지막으로 받아온 프리셋 목록(running 배지 포함) — 선택 변경 시 재조회 없이 즉시 반영
+
 function setButtonsDisabled(disabled) {
   document.querySelectorAll('#catalogButtons .tc-btn').forEach(b => b.disabled = disabled);
   $('#customDropdownBtn').disabled = disabled;
   $('#customRunBtn').disabled = disabled || selectedCustoms.size === 0;
-  $('#dutSelect').disabled = disabled;
   if (disabled) openCustomDropdown(false);
+}
+
+function applyRunButtonsForSelectedDut() {
+  const preset = dutPresetsCache.find(p => p.id === selectedDutPresetId);
+  setButtonsDisabled(!!(preset && preset.running));
 }
 
 async function loadDutSelector() {
   const data = await fetch('/api/dut').then(r => r.json());
+  dutPresetsCache = data.presets;
   const sel = $('#dutSelect');
+  const stillExists = data.presets.some(p => p.id === selectedDutPresetId);
+  if (!stillExists) selectedDutPresetId = data.presets[0].id;
   sel.innerHTML = data.presets.map(p =>
-    `<option value="${escapeHtml(p.id)}">${escapeHtml(p.label)}</option>`
+    `<option value="${escapeHtml(p.id)}">${escapeHtml(p.label)}${p.running ? ' (실행 중)' : ''}</option>`
   ).join('');
-  const current = data.presets.find(p => p.host === data.host && p.port === data.port);
-  sel.value = current ? current.id : data.presets[0].id;
-  sel.onchange = async () => {
-    const presetId = sel.value;
-    sel.disabled = true;
-    try {
-      const res = await fetch('/api/dut', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ preset_id: presetId }),
-      });
-      if (!res.ok) {
-        const err = await res.json();
-        alert(`DUT 전환 실패: ${err.detail}`);
-        await loadDutSelector();  // 실패 시 select를 실제 서버 상태로 되돌림
-        return;
-      }
-    } catch (e) {
-      alert(`DUT 전환 요청 오류: ${e}`);
-      await loadDutSelector();
-    } finally {
-      sel.disabled = false;
-    }
+  sel.value = selectedDutPresetId;
+  sel.onchange = () => {
+    selectedDutPresetId = sel.value;
+    applyRunButtonsForSelectedDut();
   };
+  applyRunButtonsForSelectedDut();
 }
 
 async function runTc(tcId, btn) {
@@ -530,7 +526,7 @@ async function runTc(tcId, btn) {
   try {
     const res = await fetch('/api/run', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ app_id: currentAppId, tc_id: tcId, channel: selectedChannel }),
+      body: JSON.stringify({ app_id: currentAppId, tc_id: tcId, channel: selectedChannel, dut_preset_id: selectedDutPresetId }),
     });
     if (!res.ok) {
       const err = await res.json();
@@ -558,7 +554,7 @@ async function runCustomTc() {
   try {
     const res = await fetch('/api/run', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ app_id: currentAppId, tc_id: 'custom', tc_ids: chosen, channel: selectedChannel }),
+      body: JSON.stringify({ app_id: currentAppId, tc_id: 'custom', tc_ids: chosen, channel: selectedChannel, dut_preset_id: selectedDutPresetId }),
     });
     if (!res.ok) {
       const err = await res.json();
@@ -624,7 +620,10 @@ async function pollRun(runId) {
     }
     if (data.meta.status !== 'running') {
       clearInterval(pollTimer);
-      setButtonsDisabled(false);
+      // DUT별 running 배지를 서버에서 다시 받아와 버튼 상태를 갱신한다 — 전역 락이었던
+      // 예전과 달리, 이 run이 끝났다고 무조건 버튼을 켜면 안 된다(현재 선택된 DUT가
+      // 마침 다른 run으로 여전히 바쁠 수 있음). 진실의 원천은 항상 서버 쪽 running 배지.
+      await loadDutSelector();
       applyConnectionState(runId, data.meta);
       refreshStatus();   // 요약 카드만 갱신 — 현황판 표는 selectedRunId 가 있으면 그대로 유지
       refreshHistory();
@@ -828,10 +827,11 @@ async function initDutState() {
     $('#dutDot').className = 'dot unknown';
     $('#dutDot').title = '연결 상태 미확인 — 아직 실행 이력 없음';
   } else if (runs[0].status === 'running') {
-    // 새로고침 시점에 이미 진행 중인 run이 있으면(이 탭에서 시작했든 아니든)
-    // 실행 로그/중지 버튼을 그 run 기준으로 다시 붙인다.
+    // 새로고침 시점에 이미 진행 중인 run이 있으면(이 탭에서 시작했든 아니든, 어느 DUT든)
+    // 실행 로그를 그 run 기준으로 다시 붙인다. 버튼 비활성화 여부는 여기서 임의로 걸지
+    // 않는다 — loadDutSelector()가 이미 "현재 선택된 DUT가 실제로 바쁜지"로 정확히
+    // 반영해뒀다(이 run이 다른 DUT 것일 수도 있어, 무조건 잠그면 안 됨).
     selectedRunId = runs[0].run_id;
-    setButtonsDisabled(true);
     pollRun(runs[0].run_id);
   }
 }
@@ -842,8 +842,8 @@ async function init() {
   await refreshAppMeta();
   await Promise.all([loadCustomOptions(), loadCatalogButtons(), refreshStatus(), refreshHistory()]);
   await initDutState();
-  // 다른 클라이언트가 실행 중일 수도 있으니 주기적으로 이력만 새로고침
-  setInterval(refreshHistory, 15000);
+  // 다른 클라이언트가(다른 DUT에서도) 실행 중일 수 있으니 이력과 DUT busy 배지를 주기적으로 새로고침
+  setInterval(() => { refreshHistory(); loadDutSelector(); }, 15000);
 }
 init();
 </script>

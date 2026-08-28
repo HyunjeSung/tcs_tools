@@ -84,8 +84,9 @@ def _load_secrets() -> dict:
 _CONFIG = _load_config()
 _SECRETS = _load_secrets()
 
-# 기본 DUT(config.env) + 테스트용 프리셋. 대시보드 헤더의 DUT 선택 창(POST /api/dut)으로
-# 런타임에 DUT_HOST/DUT_PORT 전역을 바꿔치기한다 — 실행 중인 run이 없을 때만 허용(api_dut_switch).
+# 기본 DUT(config.env) + 테스트용 프리셋. 이제 두 DUT가 서로 독립적으로(동시에) 실행될 수
+# 있으므로(아래 current_runs 참고) 이 값들은 더 이상 런타임에 바꿔치기되지 않는 순수 기본값이다
+# — 어떤 run이 어떤 DUT를 쓸지는 매 요청(RunRequest.dut_preset_id)에서 명시적으로 정해진다.
 DUT_HOST = _CONFIG.get("DUT_HOST", "192.168.10.25")
 DUT_PORT = int(_CONFIG.get("DUT_PORT", "22"))
 DUT_PRESETS = [
@@ -97,12 +98,13 @@ SSH_KEY = str(Path(_CONFIG.get("SSH_KEY_PATH", "~/.ssh/emsplus_mass_nopass")).ex
 # 패턴이 관찰됨(연속 실행 시 두 번째 연결부터 timeout, 수 분 뒤 자연 복구) — 매번 새로
 # TCP+인증을 맺는 대신 ControlMaster로 한 번 맺은 연결을 계속 재사용해서 이 문제를 우회한다.
 # ControlPersist=yes: 마지막 클라이언트(scp/ssh)가 끝나도 마스터 연결은 백그라운드에 계속 살아있음.
-# 소켓 파일명에 host:port를 넣어서 DUT를 전환해도 이전 DUT의 마스터 연결과 섞이지 않게 한다.
-def _ssh_control_path() -> str:
-    return str(BASE_DIR / f"ssh_control_{DUT_HOST}_{DUT_PORT}.sock")
+# 소켓 파일명에 host:port를 넣어서 DUT별로 마스터 연결이 섞이지 않게 한다(두 DUT가 동시에
+# 돌 수 있으므로 이제 이건 "전환 시" 뿐 아니라 상시 요구사항이다).
+def _ssh_control_path(dut: dict) -> str:
+    return str(BASE_DIR / f"ssh_control_{dut['host']}_{dut['port']}.sock")
 
 
-def _ssh_opts(port_flag: str = "-p") -> list:
+def _ssh_opts(dut: dict, port_flag: str = "-p") -> list:
     """ssh는 `-p`, scp는 `-P`로 포트 플래그가 다르므로 호출부에서 지정한다."""
     return [
         "-i", SSH_KEY,
@@ -116,9 +118,9 @@ def _ssh_opts(port_flag: str = "-p") -> list:
         "-o", "ServerAliveInterval=15",
         "-o", "ServerAliveCountMax=80",
         "-o", "ControlMaster=auto",
-        "-o", f"ControlPath={_ssh_control_path()}",
+        "-o", f"ControlPath={_ssh_control_path(dut)}",
         "-o", "ControlPersist=yes",
-        port_flag, str(DUT_PORT),
+        port_flag, str(dut["port"]),
     ]
 
 SERIAL_COM_PORT = _CONFIG.get("SERIAL_COM_PORT", "COM6")
@@ -208,9 +210,26 @@ def _get_app(app_id: str) -> dict:
 
 app = FastAPI(title="AC Gen2 EMS TC Dashboard")
 
-# 물리적으로 DUT가 하나뿐이라 앱이 달라도 SSH/시리얼 채널을 동시에 쓸 수 없다 —
-# run 동시성 제한은 앱별이 아니라 전역으로 건다.
-current_run = {"run_id": None, "proc": None, "cancelled": False, "case_times": None}
+# 앱이 달라도 같은 DUT를 향한 SSH/시리얼 채널은 동시에 쓸 수 없어(물리적으로 그 DUT는 하나) run
+# 동시성 제한은 앱별이 아니라 DUT(정확히는 "실행 채널")별로 건다. 서로 다른 DUT는 물리적으로
+# 별개 장치라 완전히 독립적으로 동시에 돌 수 있다 — 슬롯 키가 다르면 서로 절대 안 막는다.
+# 시리얼은 COM 포트가 물리적으로 하나뿐이라 채널 자체를 하나의 고정 키("serial")로 묶는다.
+current_runs: dict = {}
+
+
+def _dut_key(channel: str, host: str, port: int) -> str:
+    return "serial" if channel == "serial" else f"{host}:{port}"
+
+
+def _new_run_state() -> dict:
+    return {"run_id": None, "proc": None, "cancelled": False, "case_times": None}
+
+
+def _resolve_dut(preset_id: str) -> dict:
+    preset = next((p for p in DUT_PRESETS if p["id"] == preset_id), None)
+    if preset is None:
+        raise HTTPException(400, f"unknown dut_preset_id: {preset_id}")
+    return {"host": preset["host"], "port": preset["port"]}
 
 
 class RunRequest(BaseModel):
@@ -218,14 +237,15 @@ class RunRequest(BaseModel):
     tc_id: str
     channel: str = "ssh"
     tc_ids: Optional[List[str]] = None  # tc_id == "custom" 일 때만 사용 — 선택된 TC 목록(예: ["TC01","TC03"])
+    dut_preset_id: str = "default"  # 어느 DUT(DUT_PRESETS의 id)에서 돌릴지 — 채널이 serial이면 무시됨(COM 포트 고정)
 
 
-def ssh_argv(remote_cmd: str):
-    return ["ssh", *_ssh_opts("-p"), f"root@{DUT_HOST}", remote_cmd]
+def ssh_argv(dut: dict, remote_cmd: str):
+    return ["ssh", *_ssh_opts(dut, "-p"), f"root@{dut['host']}", remote_cmd]
 
 
-def scp_argv(local: str, remote: str):
-    return ["scp", *_ssh_opts("-P"), local, remote]
+def scp_argv(dut: dict, local: str, remote: str):
+    return ["scp", *_ssh_opts(dut, "-P"), local, remote]
 
 
 def _env_prefix_for(app_cfg: dict) -> "tuple[str, str]":
@@ -497,7 +517,7 @@ def _generate_result_md(app_cfg: dict, run_id: str, meta: dict, cases: list,
         f"**Run ID:** {run_id}",
         f"**앱:** {app_cfg['label']}",
         f"**실행일시:** {meta.get('started_at', '')} ~ {meta.get('finished_at', '')}",
-        f"**DUT:** {DUT_HOST}:{DUT_PORT} (qcells-emsplus, AC Gen2, aarch64)",
+        f"**DUT:** {meta.get('dut_host', DUT_HOST)}:{meta.get('dut_port', DUT_PORT)} (qcells-emsplus, AC Gen2, aarch64)",
         f"**스크립트:** {app_cfg['tc_script'].name}",
         "",
         f"**총 결과: PASS={meta.get('pass', 0)} / FAIL={meta.get('fail', 0)} / SKIP={meta.get('skip', 0)} / {len(cases)}기준**",
@@ -704,7 +724,7 @@ def _rebuild_latest_status(app_cfg: dict):
 SL_TAG_RE = re.compile(r"\[SL\]|\[SM\]")
 
 
-async def _start_journal_capture():
+async def _start_journal_capture(dut: dict):
     """DUT의 [SL]/[SM] 애플리케이션 로그를 별도 SSH 세션으로 실시간 캡처 시작.
     캡처 자체는 둘 다 남기고, 보고서에 실릴 때는 _filter_journal_for_tc가 TC별로
     관련 있는 라인만(최대 JOURNAL_EXCERPT_MAX_LINES줄) 추려서 방대해지지 않게 한다.
@@ -716,7 +736,7 @@ async def _start_journal_capture():
     """
     try:
         proc = await asyncio.create_subprocess_exec(
-            *ssh_argv("journalctl -u docker-loader -f -o short-iso --no-pager"),
+            *ssh_argv(dut, "journalctl -u docker-loader -f -o short-iso --no-pager"),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         )
     except Exception:
@@ -755,7 +775,7 @@ async def _stop_journal_capture(proc, lines: list, task, run_dir: Path):
         (run_dir / "sl_journal.log").write_text("".join(sl_lines))
 
 
-async def _ensure_fresh_ssh_master():
+async def _ensure_fresh_ssh_master(dut: dict):
     """DUT가 재부팅되면 기존 ControlMaster 연결은 죽지만, 그 마스터 프로세스 자체는
     ServerAliveCountMax(80회)를 다 채워야 스스로 종료돼 최대 20분간 좀비로 남는다 —
     그동안 새 scp/ssh는 죽은 채널을 계속 재사용하려다 (타임아웃 없이) 멈춰버린다.
@@ -771,7 +791,7 @@ async def _ensure_fresh_ssh_master():
     master_alive = False
     try:
         check = await asyncio.create_subprocess_exec(
-            "ssh", "-o", f"ControlPath={_ssh_control_path()}", "-O", "check", f"root@{DUT_HOST}",
+            "ssh", "-o", f"ControlPath={_ssh_control_path(dut)}", "-O", "check", f"root@{dut['host']}",
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
         )
         rc = await asyncio.wait_for(check.wait(), timeout=5)
@@ -784,7 +804,7 @@ async def _ensure_fresh_ssh_master():
         probe = None
         try:
             probe = await asyncio.create_subprocess_exec(
-                "ssh", *_ssh_opts("-p"), f"root@{DUT_HOST}", "true",
+                "ssh", *_ssh_opts(dut, "-p"), f"root@{dut['host']}", "true",
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
             )
             probe_rc = await asyncio.wait_for(probe.wait(), timeout=8)
@@ -800,7 +820,7 @@ async def _ensure_fresh_ssh_master():
     if zombie:
         try:
             exit_proc = await asyncio.create_subprocess_exec(
-                "ssh", "-o", f"ControlPath={_ssh_control_path()}", "-O", "exit", f"root@{DUT_HOST}",
+                "ssh", "-o", f"ControlPath={_ssh_control_path(dut)}", "-O", "exit", f"root@{dut['host']}",
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
             )
             await asyncio.wait_for(exit_proc.wait(), timeout=5)
@@ -867,16 +887,16 @@ async def _wait_run_proc(run_proc, log_path: Path, timeout: float, stall_timeout
             wait_task.cancel()
 
 
-async def _run_ssh(app_cfg: dict, entry: dict, log_path: Path, run_dir: Path,
+async def _run_ssh(dut: dict, run_state: dict, app_cfg: dict, entry: dict, log_path: Path, run_dir: Path,
                     case_times: Optional[dict] = None) -> "int | None":
-    await _ensure_fresh_ssh_master()
+    await _ensure_fresh_ssh_master(dut)
     tc_script = app_cfg["tc_script"]
     remote_script = app_cfg["remote_script"]
     with open(log_path, "wb") as logf:
-        logf.write(f"$ scp {tc_script.name} -> root@{DUT_HOST}:{remote_script}\n".encode())
+        logf.write(f"$ scp {tc_script.name} -> root@{dut['host']}:{remote_script}\n".encode())
         logf.flush()
         scp_proc = await asyncio.create_subprocess_exec(
-            "scp", *_ssh_opts("-P"), str(tc_script), f"root@{DUT_HOST}:{remote_script}",
+            "scp", *_ssh_opts(dut, "-P"), str(tc_script), f"root@{dut['host']}:{remote_script}",
             stdout=logf, stderr=logf,
         )
         scp_rc = await asyncio.wait_for(scp_proc.wait(), timeout=30)
@@ -884,22 +904,22 @@ async def _run_ssh(app_cfg: dict, entry: dict, log_path: Path, run_dir: Path,
             raise RuntimeError(f"scp 전송 실패 (exit={scp_rc})")
 
         chmod_proc = await asyncio.create_subprocess_exec(
-            *ssh_argv(f"chmod +x {remote_script}"), stdout=logf, stderr=logf,
+            *ssh_argv(dut, f"chmod +x {remote_script}"), stdout=logf, stderr=logf,
         )
         await asyncio.wait_for(chmod_proc.wait(), timeout=15)
 
-        journal_proc, journal_lines, collector_task = await _start_journal_capture()
+        journal_proc, journal_lines, collector_task = await _start_journal_capture(dut)
 
         flag = entry["flag"] or ""
         env_real, env_masked = _env_prefix_for(app_cfg)
         remote_cmd = f"{env_real}sh {remote_script} {flag} 2>&1".strip()
         masked_cmd = f"{env_masked}sh {remote_script} {flag} 2>&1".strip()
-        logf.write(f"\n$ ssh root@{DUT_HOST} '{masked_cmd}'\n\n".encode())
+        logf.write(f"\n$ ssh root@{dut['host']} '{masked_cmd}'\n\n".encode())
         logf.flush()
         run_proc = await asyncio.create_subprocess_exec(
-            *ssh_argv(remote_cmd), stdout=logf, stderr=logf,
+            *ssh_argv(dut, remote_cmd), stdout=logf, stderr=logf,
         )
-        current_run["proc"] = run_proc
+        run_state["proc"] = run_proc
         on_progress = (
             (lambda: _record_case_times(log_path, app_cfg, case_times))
             if case_times is not None else None
@@ -920,7 +940,7 @@ async def _run_ssh(app_cfg: dict, entry: dict, log_path: Path, run_dir: Path,
     return exit_code
 
 
-async def _wait_for_dut_reboot(logf, max_wait_s: int = 180) -> bool:
+async def _wait_for_dut_reboot(dut: dict, logf, max_wait_s: int = 180) -> bool:
     """TC10-pre 직후 ping → SSH 순으로 폴링해 재부팅 완료를 기다린다.
     tc-run 스킬의 SSH fallback 절차(ping 폴링 → ssh ALIVE 폴링 → boot+merge sleep)를
     대시보드 오케스트레이션으로 재현한 것. reboot로 기존 ControlMaster 소켓이 좀비가
@@ -933,7 +953,7 @@ async def _wait_for_dut_reboot(logf, max_wait_s: int = 180) -> bool:
     pinged = False
     while loop.time() < deadline:
         proc = await asyncio.create_subprocess_exec(
-            "ping", "-c", "1", "-W", "1", DUT_HOST,
+            "ping", "-c", "1", "-W", "1", dut["host"],
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
         )
         if await proc.wait() == 0:
@@ -946,13 +966,13 @@ async def _wait_for_dut_reboot(logf, max_wait_s: int = 180) -> bool:
 
     logf.write("[DASHBOARD] ping 응답 확인. SSH 재접속 대기...\n".encode())
     logf.flush()
-    await _ensure_fresh_ssh_master()
+    await _ensure_fresh_ssh_master(dut)
 
     deadline = loop.time() + max_wait_s
     alive = False
     while loop.time() < deadline:
         proc = await asyncio.create_subprocess_exec(
-            *ssh_argv("echo ALIVE"), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            *ssh_argv(dut, "echo ALIVE"), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         )
         try:
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
@@ -974,7 +994,7 @@ async def _wait_for_dut_reboot(logf, max_wait_s: int = 180) -> bool:
     return True
 
 
-async def _run_ssh_full_with_reboots(app_cfg: dict, entry: dict, log_path: Path, run_dir: Path,
+async def _run_ssh_full_with_reboots(dut: dict, run_state: dict, app_cfg: dict, entry: dict, log_path: Path, run_dir: Path,
                                       case_times: Optional[dict] = None) -> "int | None":
     """entry["flag"](있으면, 예: --full)를 먼저 실행한 뒤 entry["chain_reboot_pairs"]에 담긴
     (pre_id, post_id) 목록을 순서대로 pre → 재부팅 대기 → post 로 이어 붙인다.
@@ -993,15 +1013,15 @@ async def _run_ssh_full_with_reboots(app_cfg: dict, entry: dict, log_path: Path,
 
     async def _run_step(step_entry: dict) -> "int | None":
         nonlocal wrote_header
-        await _ensure_fresh_ssh_master()
+        await _ensure_fresh_ssh_master(dut)
         tc_script = app_cfg["tc_script"]
         remote_script = app_cfg["remote_script"]
         with open(log_path, "ab" if wrote_header else "wb") as logf:
             wrote_header = True
-            logf.write(f"$ scp {tc_script.name} -> root@{DUT_HOST}:{remote_script}\n".encode())
+            logf.write(f"$ scp {tc_script.name} -> root@{dut['host']}:{remote_script}\n".encode())
             logf.flush()
             scp_proc = await asyncio.create_subprocess_exec(
-                "scp", *_ssh_opts("-P"), str(tc_script), f"root@{DUT_HOST}:{remote_script}",
+                "scp", *_ssh_opts(dut, "-P"), str(tc_script), f"root@{dut['host']}:{remote_script}",
                 stdout=logf, stderr=logf,
             )
             scp_rc = await asyncio.wait_for(scp_proc.wait(), timeout=30)
@@ -1009,22 +1029,22 @@ async def _run_ssh_full_with_reboots(app_cfg: dict, entry: dict, log_path: Path,
                 raise RuntimeError(f"scp 전송 실패 (exit={scp_rc})")
 
             chmod_proc = await asyncio.create_subprocess_exec(
-                *ssh_argv(f"chmod +x {remote_script}"), stdout=logf, stderr=logf,
+                *ssh_argv(dut, f"chmod +x {remote_script}"), stdout=logf, stderr=logf,
             )
             await asyncio.wait_for(chmod_proc.wait(), timeout=15)
 
-            journal_proc, journal_lines, collector_task = await _start_journal_capture()
+            journal_proc, journal_lines, collector_task = await _start_journal_capture(dut)
 
             flag = step_entry["flag"] or ""
             env_real, env_masked = _env_prefix_for(app_cfg)
             remote_cmd = f"{env_real}sh {remote_script} {flag} 2>&1".strip()
             masked_cmd = f"{env_masked}sh {remote_script} {flag} 2>&1".strip()
-            logf.write(f"\n$ ssh root@{DUT_HOST} '{masked_cmd}'\n\n".encode())
+            logf.write(f"\n$ ssh root@{dut['host']} '{masked_cmd}'\n\n".encode())
             logf.flush()
             run_proc = await asyncio.create_subprocess_exec(
-                *ssh_argv(remote_cmd), stdout=logf, stderr=logf,
+                *ssh_argv(dut, remote_cmd), stdout=logf, stderr=logf,
             )
-            current_run["proc"] = run_proc
+            run_state["proc"] = run_proc
             on_progress = (
                 (lambda: _record_case_times(log_path, app_cfg, case_times))
                 if case_times is not None else None
@@ -1064,7 +1084,7 @@ async def _run_ssh_full_with_reboots(app_cfg: dict, entry: dict, log_path: Path,
     if entry.get("flag"):
         exit_code = await _run_step(entry)
         if exit_code != 0:
-            reason = "사용자가 중지함" if current_run.get("cancelled") else f"비정상 종료(exit_code={exit_code}) — 타임아웃/좀비 감지 등"
+            reason = "사용자가 중지함" if run_state.get("cancelled") else f"비정상 종료(exit_code={exit_code}) — 타임아웃/좀비 감지 등"
             with open(log_path, "ab") as logf:
                 logf.write(f"\n[DASHBOARD ERROR] 메인 단계가 정상 종료되지 않음({reason}) - 재부팅 체인 스킵, 이후 단계 중단\n".encode())
             if accumulated_sl_lines:
@@ -1081,7 +1101,7 @@ async def _run_ssh_full_with_reboots(app_cfg: dict, entry: dict, log_path: Path,
         await _run_step(app_cfg["catalog_map"][pre_id])
 
         with open(log_path, "ab") as logf:
-            rebooted_ok = await _wait_for_dut_reboot(logf)
+            rebooted_ok = await _wait_for_dut_reboot(dut, logf)
 
         if not rebooted_ok:
             with open(log_path, "ab") as logf:
@@ -1203,7 +1223,7 @@ async def _tail_serial_log(wsl_log_path: Path, start_offset: int, log_path: Path
             break
 
 
-async def _run_serial(app_cfg: dict, entry: dict, log_path: Path) -> "int | None":
+async def _run_serial(run_state: dict, app_cfg: dict, entry: dict, log_path: Path) -> "int | None":
     """COM 포트로 transfer+실행. SSH 를 전혀 쓰지 않으므로 SSH lockout 상태에서도 동작한다
     (journal capture 등 SSH 기반 부가 기능은 지원하지 않음)."""
     flag = entry["flag"] or ""
@@ -1239,7 +1259,7 @@ async def _run_serial(app_cfg: dict, entry: dict, log_path: Path) -> "int | None
         logf.write(f"$ powershell.exe serial_run.ps1 -ComPort {SERIAL_COM_PORT} -Flag '{flag}' (SSH 미사용)\n\n".encode())
         logf.flush()
         proc = await asyncio.create_subprocess_exec(*argv, stdout=logf, stderr=logf)
-        current_run["proc"] = proc
+        run_state["proc"] = proc
         try:
             await asyncio.wait_for(proc.wait(), timeout=entry["timeout"] + 90)
         except asyncio.TimeoutError:
@@ -1262,7 +1282,7 @@ async def _run_serial(app_cfg: dict, entry: dict, log_path: Path) -> "int | None
     return None
 
 
-async def run_tc(run_id: str, app_cfg: dict, entry: dict, channel: str = "ssh"):
+async def run_tc(run_id: str, app_cfg: dict, entry: dict, channel: str, dut: dict, run_state: dict):
     run_dir = app_cfg["runs_dir"] / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     log_path = run_dir / "output.log"
@@ -1273,8 +1293,8 @@ async def run_tc(run_id: str, app_cfg: dict, entry: dict, channel: str = "ssh"):
         "label": entry["label"],
         "flag": entry["flag"],
         "channel": channel,
-        "dut_host": DUT_HOST,
-        "dut_port": DUT_PORT,
+        "dut_host": dut["host"],
+        "dut_port": dut["port"],
         "started_at": datetime.now().isoformat(timespec="seconds"),
         "finished_at": None,
         "status": "running",
@@ -1295,19 +1315,20 @@ async def run_tc(run_id: str, app_cfg: dict, entry: dict, channel: str = "ssh"):
     # case_id별 "처음 목격한 시각" — _wait_run_proc()의 on_progress 콜백(_record_case_times)이
     # 폴링 주기(2초)마다 채운다. serial 채널은 아직 미지원(그래도 duration_sec=None으로
     # 안전하게 표시됨 — _compute_case_durations가 case_times에 없는 case는 건너뜀).
-    # current_run["case_times"]에도 같이 얹어둬서, 이 run이 아직 "running"인 동안에도
-    # api_run_detail()이 실시간으로 진행중 소요시간을 계산할 수 있게 한다(동시에 하나의
-    # run만 진행되는 이 대시보드의 싱글턴 실행 모델을 그대로 재사용).
+    # run_state["case_times"]에도 같이 얹어둬서, 이 run이 아직 "running"인 동안에도
+    # api_run_detail()이 실시간으로 진행중 소요시간을 계산할 수 있게 한다 — run_state는
+    # api_run()이 이 run 전용으로 만들어 current_runs[dut_key]에 넣어둔 슬롯이라, 동시에
+    # 다른 DUT에서 도는 run과 서로 안 섞인다.
     case_times: dict = {}
-    current_run["case_times"] = case_times
+    run_state["case_times"] = case_times
 
     try:
         if channel == "serial":
-            exit_code = await _run_serial(app_cfg, entry, log_path)
+            exit_code = await _run_serial(run_state, app_cfg, entry, log_path)
         elif entry.get("chain_reboot_pairs"):
-            exit_code = await _run_ssh_full_with_reboots(app_cfg, entry, log_path, run_dir, case_times)
+            exit_code = await _run_ssh_full_with_reboots(dut, run_state, app_cfg, entry, log_path, run_dir, case_times)
         else:
-            exit_code = await _run_ssh(app_cfg, entry, log_path, run_dir, case_times)
+            exit_code = await _run_ssh(dut, run_state, app_cfg, entry, log_path, run_dir, case_times)
 
         meta["exit_code"] = exit_code
         text = log_path.read_text(errors="replace")
@@ -1317,7 +1338,7 @@ async def run_tc(run_id: str, app_cfg: dict, entry: dict, channel: str = "ssh"):
         meta["pass"] = pass_n
         meta["fail"] = fail_n
         meta["skip"] = sum(1 for c in cases if c["status"] == "SKIP")
-        if current_run.get("cancelled"):
+        if run_state.get("cancelled"):
             # 사용자가 중지 버튼을 눌러 강제 종료한 경우 — reboot/timeout/fail 판정보다 우선.
             meta["status"] = "cancelled"
         elif entry["reboot"]:
@@ -1354,10 +1375,10 @@ async def run_tc(run_id: str, app_cfg: dict, entry: dict, channel: str = "ssh"):
         with open(log_path, "ab") as logf:
             logf.write(f"\n[DASHBOARD ERROR] {e}\n".encode())
     finally:
-        current_run["run_id"] = None
-        current_run["proc"] = None
-        current_run["cancelled"] = False
-        current_run["case_times"] = None
+        run_state["run_id"] = None
+        run_state["proc"] = None
+        run_state["cancelled"] = False
+        run_state["case_times"] = None
         _prune_old_runs(app_cfg["runs_dir"])
         _rebuild_latest_status(app_cfg)
 
@@ -1414,7 +1435,7 @@ def _reconcile_stale_runs():
 
 @app.on_event("startup")
 def _on_startup():
-    current_run["run_id"] = None
+    current_runs.clear()
     _reconcile_stale_runs()
     for app_cfg in APPS.values():
         _prune_old_runs(app_cfg["runs_dir"])
@@ -1451,47 +1472,32 @@ def api_status(app_id: str = DEFAULT_APP_ID):
 
 
 @app.get("/api/ping")
-def api_ping():
+def api_ping(dut_preset_id: str = "default"):
     # SSH(22번 포트) 연결 시도는 절대 여기서 하지 않는다 — DUT는 SSH 연결 시도가 3회 이상
     # 실패하면 리부트 전까지 lockout 되므로, 실제 TC 실행(run_tc) 외에는 SSH를 건드리지 않는다.
     # 이 헬스체크는 ICMP ping만으로 DUT 전원/네트워크 생존 여부만 확인한다 (SSH 가능 여부 보장 아님).
+    dut = _resolve_dut(dut_preset_id)
     ping_rc = subprocess.run(
-        ["ping", "-c", "1", "-W", "1", DUT_HOST],
+        ["ping", "-c", "1", "-W", "1", dut["host"]],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     ).returncode
-    return {"reachable": ping_rc == 0, "host": DUT_HOST, "port": DUT_PORT}
-
-
-class DutSwitchRequest(BaseModel):
-    preset_id: Optional[str] = None
-    host: Optional[str] = None
-    port: Optional[int] = None
+    return {"reachable": ping_rc == 0, "host": dut["host"], "port": dut["port"]}
 
 
 @app.get("/api/dut")
 def api_dut():
-    return {"host": DUT_HOST, "port": DUT_PORT, "presets": DUT_PRESETS}
-
-
-@app.post("/api/dut")
-def api_dut_switch(req: DutSwitchRequest):
-    global DUT_HOST, DUT_PORT
-    # 물리적으로 SSH/시리얼 채널이 하나뿐이라(전역 current_run) DUT를 바꿀 때 실행 중인
-    # run이 있으면 어느 DUT를 향한 건지 뒤섞이므로 막는다.
-    if current_run["run_id"] is not None:
-        raise HTTPException(409, f"이미 실행 중인 run: {current_run['run_id']}")
-
-    if req.preset_id is not None:
-        preset = next((p for p in DUT_PRESETS if p["id"] == req.preset_id), None)
-        if preset is None:
-            raise HTTPException(400, f"unknown preset_id: {req.preset_id}")
-        DUT_HOST, DUT_PORT = preset["host"], preset["port"]
-    elif req.host:
-        DUT_HOST, DUT_PORT = req.host, (req.port or 22)
-    else:
-        raise HTTPException(400, "preset_id 또는 host가 필요합니다")
-
-    return {"host": DUT_HOST, "port": DUT_PORT}
+    # 프리셋마다 지금 실행 중인 run이 있는지도 같이 내려준다 — 프론트가 "이 DUT는 지금
+    # 바쁘다"는 걸 그 DUT 하나만 보고 판단할 수 있게(다른 DUT가 바쁘다고 이 DUT까지
+    # 막을 이유가 없다 — 두 DUT는 물리적으로 독립된 장치라 완전히 동시에 돌 수 있음).
+    presets = []
+    for p in DUT_PRESETS:
+        run_state = current_runs.get(_dut_key("ssh", p["host"], p["port"]))
+        presets.append({**p, "running": bool(run_state and run_state.get("run_id"))})
+    serial_state = current_runs.get("serial")
+    return {
+        "presets": presets,
+        "serial_running": bool(serial_state and serial_state.get("run_id")),
+    }
 
 
 def _estimate_tc_total(app_cfg: dict, tc_id: str, exclude_run_id: str) -> Optional[int]:
@@ -1597,11 +1603,14 @@ def api_run_detail(run_id: str, app_id: str = DEFAULT_APP_ID):
     _, _, cases = _parse_results(log_text, app_cfg)
     if meta.get("status") == "running":
         cases = cases + _pending_case_rows(app_cfg, log_text, cases)
-        # 아직 진행 중인 run이면 current_run의 실시간 case_times로 소요시간을 계산한다
-        # (완료 전까지는 meta.json에 case_durations가 없음) — 다른 run이 이미 시작돼
-        # current_run이 이 run_id를 더 이상 가리키지 않으면 계산하지 않는다(빈 값 유지).
-        if current_run.get("run_id") == run_id and current_run.get("case_times") is not None:
-            case_durations = _compute_case_durations(meta["started_at"], cases, current_run["case_times"])
+        # 아직 진행 중인 run이면 그 run을 담당하는 슬롯(current_runs[dut_key])의 실시간
+        # case_times로 소요시간을 계산한다(완료 전까지는 meta.json에 case_durations가 없음).
+        # 이제 DUT마다 슬롯이 독립적이라, run_id로 그 run을 실제로 담당 중인 슬롯을 찾아야
+        # 한다(단일 전역 current_run 가정은 더 이상 성립하지 않음 — 두 DUT가 동시에 각자
+        # 다른 run을 진행 중일 수 있음).
+        run_state = next((s for s in current_runs.values() if s.get("run_id") == run_id), None)
+        if run_state is not None and run_state.get("case_times") is not None:
+            case_durations = _compute_case_durations(meta["started_at"], cases, run_state["case_times"])
         else:
             case_durations = {}
     else:
@@ -1651,8 +1660,13 @@ async def api_run(req: RunRequest):
     app_cfg = _get_app(req.app_id)
     if req.channel not in ("ssh", "serial"):
         raise HTTPException(400, "unknown channel")
-    if current_run["run_id"] is not None:
-        raise HTTPException(409, f"이미 실행 중인 run: {current_run['run_id']}")
+    dut = _resolve_dut(req.dut_preset_id)
+    dut_key = _dut_key(req.channel, dut["host"], dut["port"])
+    # 슬롯이 DUT/채널별로 독립적이라, 다른 DUT가 실행 중이어도 이 요청은 막지 않는다 —
+    # 오직 "이 요청이 쓰려는 것과 같은 슬롯"이 이미 바쁠 때만 막는다.
+    existing = current_runs.get(dut_key)
+    if existing and existing.get("run_id") is not None:
+        raise HTTPException(409, f"이미 실행 중인 run: {existing['run_id']}")
 
     if req.tc_id == "custom":
         custom_timeouts = app_cfg["custom_tc_timeouts"]
@@ -1713,8 +1727,10 @@ async def api_run(req: RunRequest):
         entry = app_cfg["catalog_map"][req.tc_id]
 
     run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{req.app_id}_{req.tc_id}"
-    current_run["run_id"] = run_id
-    asyncio.create_task(run_tc(run_id, app_cfg, entry, req.channel))
+    run_state = _new_run_state()
+    run_state["run_id"] = run_id
+    current_runs[dut_key] = run_state
+    asyncio.create_task(run_tc(run_id, app_cfg, entry, req.channel, dut, run_state))
     return {"run_id": run_id, "app_id": req.app_id}
 
 
@@ -1727,12 +1743,13 @@ def api_stop_run(run_id: str):
     동일한 한계), 로컬 채널이 끊기면 run_tc()의 대기가 곧바로 풀려 dashboard는
     항상 정상적으로 "cancelled"로 마무리된다.
     """
-    if current_run["run_id"] != run_id:
-        raise HTTPException(409, f"'{run_id}'는 현재 실행 중인 run이 아님 (현재: {current_run['run_id']})")
-    proc = current_run.get("proc")
+    run_state = next((s for s in current_runs.values() if s.get("run_id") == run_id), None)
+    if run_state is None:
+        raise HTTPException(409, f"'{run_id}'는 현재 실행 중인 run이 아님")
+    proc = run_state.get("proc")
     if proc is None:
         raise HTTPException(409, "아직 프로세스가 시작되지 않음 — 잠시 후 다시 시도")
-    current_run["cancelled"] = True
+    run_state["cancelled"] = True
     try:
         proc.kill()
     except ProcessLookupError:
