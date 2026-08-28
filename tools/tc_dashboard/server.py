@@ -84,28 +84,42 @@ def _load_secrets() -> dict:
 _CONFIG = _load_config()
 _SECRETS = _load_secrets()
 
+# 기본 DUT(config.env) + 테스트용 프리셋. 대시보드 헤더의 DUT 선택 창(POST /api/dut)으로
+# 런타임에 DUT_HOST/DUT_PORT 전역을 바꿔치기한다 — 실행 중인 run이 없을 때만 허용(api_dut_switch).
 DUT_HOST = _CONFIG.get("DUT_HOST", "192.168.10.25")
+DUT_PORT = int(_CONFIG.get("DUT_PORT", "22"))
+DUT_PRESETS = [
+    {"id": "default", "label": f"기본 DUT ({DUT_HOST})", "host": DUT_HOST, "port": DUT_PORT},
+    {"id": "test", "label": "테스트 DUT (172.23.1.166:10430)", "host": "172.23.1.166", "port": 10430},
+]
 SSH_KEY = str(Path(_CONFIG.get("SSH_KEY_PATH", "~/.ssh/emsplus_mass_nopass")).expanduser())
 # DUT가 SSH 연결을 짧은 간격으로 반복하면(성공/실패 무관) 한동안 새 연결을 거부하는
 # 패턴이 관찰됨(연속 실행 시 두 번째 연결부터 timeout, 수 분 뒤 자연 복구) — 매번 새로
 # TCP+인증을 맺는 대신 ControlMaster로 한 번 맺은 연결을 계속 재사용해서 이 문제를 우회한다.
 # ControlPersist=yes: 마지막 클라이언트(scp/ssh)가 끝나도 마스터 연결은 백그라운드에 계속 살아있음.
-SSH_CONTROL_PATH = str(BASE_DIR / "ssh_control.sock")
-SSH_OPTS = [
-    "-i", SSH_KEY,
-    "-o", "StrictHostKeyChecking=no",
-    "-o", "ConnectTimeout=5",
-    "-o", "UserKnownHostsFile=/dev/null",
-    # TC04 등 고부하 TC 중 DUT CPU가 거의 100%까지 치솟는 구간이 있어(systemd-cat
-    # 대량 injection), keepalive를 너무 타이트하게 잡으면 세션이 살아있는데도
-    # false-negative 로 끊길 수 있다 (실측: feedback_serial_vs_ssh_polling 참고).
-    # interval*countmax 로 최대 무응답 허용 시간을 넉넉히 잡는다.
-    "-o", "ServerAliveInterval=15",
-    "-o", "ServerAliveCountMax=80",
-    "-o", "ControlMaster=auto",
-    "-o", f"ControlPath={SSH_CONTROL_PATH}",
-    "-o", "ControlPersist=yes",
-]
+# 소켓 파일명에 host:port를 넣어서 DUT를 전환해도 이전 DUT의 마스터 연결과 섞이지 않게 한다.
+def _ssh_control_path() -> str:
+    return str(BASE_DIR / f"ssh_control_{DUT_HOST}_{DUT_PORT}.sock")
+
+
+def _ssh_opts(port_flag: str = "-p") -> list:
+    """ssh는 `-p`, scp는 `-P`로 포트 플래그가 다르므로 호출부에서 지정한다."""
+    return [
+        "-i", SSH_KEY,
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "ConnectTimeout=5",
+        "-o", "UserKnownHostsFile=/dev/null",
+        # TC04 등 고부하 TC 중 DUT CPU가 거의 100%까지 치솟는 구간이 있어(systemd-cat
+        # 대량 injection), keepalive를 너무 타이트하게 잡으면 세션이 살아있는데도
+        # false-negative 로 끊길 수 있다 (실측: feedback_serial_vs_ssh_polling 참고).
+        # interval*countmax 로 최대 무응답 허용 시간을 넉넉히 잡는다.
+        "-o", "ServerAliveInterval=15",
+        "-o", "ServerAliveCountMax=80",
+        "-o", "ControlMaster=auto",
+        "-o", f"ControlPath={_ssh_control_path()}",
+        "-o", "ControlPersist=yes",
+        port_flag, str(DUT_PORT),
+    ]
 
 SERIAL_COM_PORT = _CONFIG.get("SERIAL_COM_PORT", "COM6")
 SERIAL_RUN_PS1 = BASE_DIR / "serial_run.ps1"
@@ -207,7 +221,11 @@ class RunRequest(BaseModel):
 
 
 def ssh_argv(remote_cmd: str):
-    return ["ssh", *SSH_OPTS, f"root@{DUT_HOST}", remote_cmd]
+    return ["ssh", *_ssh_opts("-p"), f"root@{DUT_HOST}", remote_cmd]
+
+
+def scp_argv(local: str, remote: str):
+    return ["scp", *_ssh_opts("-P"), local, remote]
 
 
 def _env_prefix_for(app_cfg: dict) -> "tuple[str, str]":
@@ -479,7 +497,7 @@ def _generate_result_md(app_cfg: dict, run_id: str, meta: dict, cases: list,
         f"**Run ID:** {run_id}",
         f"**앱:** {app_cfg['label']}",
         f"**실행일시:** {meta.get('started_at', '')} ~ {meta.get('finished_at', '')}",
-        f"**DUT:** {DUT_HOST} (qcells-emsplus, AC Gen2, aarch64)",
+        f"**DUT:** {DUT_HOST}:{DUT_PORT} (qcells-emsplus, AC Gen2, aarch64)",
         f"**스크립트:** {app_cfg['tc_script'].name}",
         "",
         f"**총 결과: PASS={meta.get('pass', 0)} / FAIL={meta.get('fail', 0)} / SKIP={meta.get('skip', 0)} / {len(cases)}기준**",
@@ -753,7 +771,7 @@ async def _ensure_fresh_ssh_master():
     master_alive = False
     try:
         check = await asyncio.create_subprocess_exec(
-            "ssh", "-o", f"ControlPath={SSH_CONTROL_PATH}", "-O", "check", f"root@{DUT_HOST}",
+            "ssh", "-o", f"ControlPath={_ssh_control_path()}", "-O", "check", f"root@{DUT_HOST}",
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
         )
         rc = await asyncio.wait_for(check.wait(), timeout=5)
@@ -766,7 +784,7 @@ async def _ensure_fresh_ssh_master():
         probe = None
         try:
             probe = await asyncio.create_subprocess_exec(
-                "ssh", *SSH_OPTS, f"root@{DUT_HOST}", "true",
+                "ssh", *_ssh_opts("-p"), f"root@{DUT_HOST}", "true",
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
             )
             probe_rc = await asyncio.wait_for(probe.wait(), timeout=8)
@@ -782,7 +800,7 @@ async def _ensure_fresh_ssh_master():
     if zombie:
         try:
             exit_proc = await asyncio.create_subprocess_exec(
-                "ssh", "-o", f"ControlPath={SSH_CONTROL_PATH}", "-O", "exit", f"root@{DUT_HOST}",
+                "ssh", "-o", f"ControlPath={_ssh_control_path()}", "-O", "exit", f"root@{DUT_HOST}",
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
             )
             await asyncio.wait_for(exit_proc.wait(), timeout=5)
@@ -858,7 +876,7 @@ async def _run_ssh(app_cfg: dict, entry: dict, log_path: Path, run_dir: Path,
         logf.write(f"$ scp {tc_script.name} -> root@{DUT_HOST}:{remote_script}\n".encode())
         logf.flush()
         scp_proc = await asyncio.create_subprocess_exec(
-            "scp", *SSH_OPTS, str(tc_script), f"root@{DUT_HOST}:{remote_script}",
+            "scp", *_ssh_opts("-P"), str(tc_script), f"root@{DUT_HOST}:{remote_script}",
             stdout=logf, stderr=logf,
         )
         scp_rc = await asyncio.wait_for(scp_proc.wait(), timeout=30)
@@ -983,7 +1001,7 @@ async def _run_ssh_full_with_reboots(app_cfg: dict, entry: dict, log_path: Path,
             logf.write(f"$ scp {tc_script.name} -> root@{DUT_HOST}:{remote_script}\n".encode())
             logf.flush()
             scp_proc = await asyncio.create_subprocess_exec(
-                "scp", *SSH_OPTS, str(tc_script), f"root@{DUT_HOST}:{remote_script}",
+                "scp", *_ssh_opts("-P"), str(tc_script), f"root@{DUT_HOST}:{remote_script}",
                 stdout=logf, stderr=logf,
             )
             scp_rc = await asyncio.wait_for(scp_proc.wait(), timeout=30)
@@ -1255,6 +1273,8 @@ async def run_tc(run_id: str, app_cfg: dict, entry: dict, channel: str = "ssh"):
         "label": entry["label"],
         "flag": entry["flag"],
         "channel": channel,
+        "dut_host": DUT_HOST,
+        "dut_port": DUT_PORT,
         "started_at": datetime.now().isoformat(timespec="seconds"),
         "finished_at": None,
         "status": "running",
@@ -1309,6 +1329,13 @@ async def run_tc(run_id: str, app_cfg: dict, entry: dict, channel: str = "ssh"):
         elif not cases:
             # exit_code가 0이어도(예: 시리얼 결과 dump가 노이즈로 깨진 경우) 파싱된 케이스가
             # 하나도 없으면 "결과 없음"이지 "pass"가 아니다.
+            meta["status"] = "error"
+        elif exit_code not in (0, None):
+            # ssh 클라이언트 관례상 0이 아니고 timeout(None)도 아닌 exit_code(대표적으로
+            # 255)는 원격 스크립트가 아니라 SSH 연결 자체가 끊겼다는 뜻이다 — 그때까지
+            # 파싱된 케이스에 FAIL이 없어도 나머지 TC가 통째로 못 돌았을 뿐이지 "pass"가
+            # 아니다(실측: 20260828_084642_device_log_default — TC01 2개만 PASS하고
+            # exit_code=255로 끊겼는데 status=pass로 잘못 표시됨).
             meta["status"] = "error"
         elif pass_n == 0:
             # cases는 있지만 전부 SKIP(자동화 불가/환경 제약)인 경우 — "결과 없음"과
@@ -1432,7 +1459,39 @@ def api_ping():
         ["ping", "-c", "1", "-W", "1", DUT_HOST],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     ).returncode
-    return {"reachable": ping_rc == 0, "host": DUT_HOST}
+    return {"reachable": ping_rc == 0, "host": DUT_HOST, "port": DUT_PORT}
+
+
+class DutSwitchRequest(BaseModel):
+    preset_id: Optional[str] = None
+    host: Optional[str] = None
+    port: Optional[int] = None
+
+
+@app.get("/api/dut")
+def api_dut():
+    return {"host": DUT_HOST, "port": DUT_PORT, "presets": DUT_PRESETS}
+
+
+@app.post("/api/dut")
+def api_dut_switch(req: DutSwitchRequest):
+    global DUT_HOST, DUT_PORT
+    # 물리적으로 SSH/시리얼 채널이 하나뿐이라(전역 current_run) DUT를 바꿀 때 실행 중인
+    # run이 있으면 어느 DUT를 향한 건지 뒤섞이므로 막는다.
+    if current_run["run_id"] is not None:
+        raise HTTPException(409, f"이미 실행 중인 run: {current_run['run_id']}")
+
+    if req.preset_id is not None:
+        preset = next((p for p in DUT_PRESETS if p["id"] == req.preset_id), None)
+        if preset is None:
+            raise HTTPException(400, f"unknown preset_id: {req.preset_id}")
+        DUT_HOST, DUT_PORT = preset["host"], preset["port"]
+    elif req.host:
+        DUT_HOST, DUT_PORT = req.host, (req.port or 22)
+    else:
+        raise HTTPException(400, "preset_id 또는 host가 필요합니다")
+
+    return {"host": DUT_HOST, "port": DUT_PORT}
 
 
 def _estimate_tc_total(app_cfg: dict, tc_id: str, exclude_run_id: str) -> Optional[int]:

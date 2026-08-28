@@ -122,7 +122,6 @@
   table { width: 100%; border-collapse: collapse; font-size: 12.5px; table-layout: fixed; }
   th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border);
            overflow-wrap: anywhere; }
-  th.action-col, td.action-col { width: 44px; padding-left: 0; padding-right: 14px; text-align: center; }
   th { color: var(--muted); font-weight: 500; }
   .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
   .badge.PASS, .badge.pass { background: rgba(46,204,113,.15); color: var(--pass); }
@@ -170,7 +169,7 @@
   .badge.rebooted { background: rgba(243,156,18,.15); color: var(--warn); }
   .badge.interrupted { background: rgba(231,76,60,.12); color: var(--warn); }
   .badge.cancelled { background: rgba(231,76,60,.12); color: var(--warn); }
-  .stop-btn { width: 22px; height: 22px; padding: 0; border-radius: 5px;
+  .stop-btn { width: 22px; height: 22px; padding: 0; border-radius: 5px; margin-left: 6px;
     border: 1px solid var(--muted); color: var(--muted); background: var(--btn-bg); cursor: pointer;
     display: inline-flex; align-items: center; justify-content: center; vertical-align: middle; }
   .stop-btn::before { content: ""; width: 8px; height: 8px; background: currentColor; }
@@ -178,6 +177,7 @@
   .stop-btn:disabled { opacity: .4; cursor: default; }
   .badge.channel-ssh { background: rgba(77,141,255,.15); color: var(--accent); }
   .badge.channel-serial { background: rgba(46,204,113,.15); color: var(--pass); }
+  .badge.dut { background: rgba(139,145,167,.15); color: var(--muted); font-weight: 500; }
   .run-row { cursor: pointer; }
   .run-row:hover { background: var(--hover-bg); }
   .run-row.selected { background: var(--selected-bg); }
@@ -187,6 +187,10 @@
                   padding: 4px 10px; border-radius: 5px; cursor: pointer; font-size: 12px; }
   .pager button:hover:not(:disabled) { border-color: var(--accent); }
   .pager button:disabled { opacity: .4; cursor: not-allowed; }
+  #dutSelect { background: var(--btn-bg); border: 1px solid var(--border); color: var(--text);
+               padding: 3px 6px; border-radius: 5px; font-size: 12px; margin: 0 6px; cursor: pointer; }
+  #dutSelect:hover:not(:disabled) { border-color: var(--accent); }
+  #dutSelect:disabled { opacity: .5; cursor: not-allowed; }
   #themeToggle { position: relative; width: 44px; height: 22px; margin-left: 12px; padding: 0 4px;
                  display: inline-flex; align-items: center; justify-content: space-between;
                  background: var(--panel); border: 1px solid var(--border); border-radius: 11px;
@@ -222,7 +226,9 @@
   <div class="content">
     <header>
       <h1 id="pageTitle">system_log TC Dashboard</h1>
-      <div class="dut"><span id="dutDot" class="dot unknown" title="연결 상태 미확인 — 아직 실행 이력 없음"></span>DUT 192.168.10.25 <span id="channelBadge" class="badge channel-ssh" title="TC 실행에 사용되는 연결 채널">SSH</span>
+      <div class="dut"><span id="dutDot" class="dot unknown" title="연결 상태 미확인 — 아직 실행 이력 없음"></span>DUT
+        <select id="dutSelect" title="테스트할 DUT 선택"></select>
+        <span id="channelBadge" class="badge channel-ssh" title="TC 실행에 사용되는 연결 채널">SSH</span>
         <button id="themeToggle" type="button" title="테마 전환">
           <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
           <span class="thumb"></span>
@@ -280,7 +286,7 @@
         <section>
           <h2>실행 이력</h2>
           <table id="historyTable">
-            <thead><tr><th>Run ID</th><th>대상</th><th>채널</th><th>상태</th><th>PASS/FAIL/SKIP</th><th>시작</th><th>종료</th><th>소요시간</th><th>결과</th><th class="action-col">제어</th></tr></thead>
+            <thead><tr><th>Run ID</th><th>대상</th><th>채널</th><th>DUT</th><th>상태</th><th>PASS/FAIL/SKIP</th><th>시작</th><th>종료</th><th>소요시간</th><th>결과</th></tr></thead>
             <tbody></tbody>
           </table>
           <div id="historyPager" class="pager"></div>
@@ -483,7 +489,39 @@ function setButtonsDisabled(disabled) {
   document.querySelectorAll('#catalogButtons .tc-btn').forEach(b => b.disabled = disabled);
   $('#customDropdownBtn').disabled = disabled;
   $('#customRunBtn').disabled = disabled || selectedCustoms.size === 0;
+  $('#dutSelect').disabled = disabled;
   if (disabled) openCustomDropdown(false);
+}
+
+async function loadDutSelector() {
+  const data = await fetch('/api/dut').then(r => r.json());
+  const sel = $('#dutSelect');
+  sel.innerHTML = data.presets.map(p =>
+    `<option value="${escapeHtml(p.id)}">${escapeHtml(p.label)}</option>`
+  ).join('');
+  const current = data.presets.find(p => p.host === data.host && p.port === data.port);
+  sel.value = current ? current.id : data.presets[0].id;
+  sel.onchange = async () => {
+    const presetId = sel.value;
+    sel.disabled = true;
+    try {
+      const res = await fetch('/api/dut', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ preset_id: presetId }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        alert(`DUT 전환 실패: ${err.detail}`);
+        await loadDutSelector();  // 실패 시 select를 실제 서버 상태로 되돌림
+        return;
+      }
+    } catch (e) {
+      alert(`DUT 전환 요청 오류: ${e}`);
+      await loadDutSelector();
+    } finally {
+      sel.disabled = false;
+    }
+  };
 }
 
 async function runTc(tcId, btn) {
@@ -732,6 +770,12 @@ async function refreshHistory() {
       ? `<a href="/api/runs/${r.run_id}/result.pdf?app_id=${encodeURIComponent(appIdAtCall)}" download class="muted" style="text-decoration:underline;" onclick="event.stopPropagation()">다운로드</a>`
       : '-';
     const channel = r.channel || 'ssh';
+    const dutLabel = r.dut_host
+      ? r.dut_host + (r.dut_port && r.dut_port !== 22 ? `:${r.dut_port}` : '')
+      : null;
+    const dutCell = dutLabel
+      ? `<span title="이 run이 실행된 DUT">${escapeHtml(dutLabel)}</span>`
+      : `<span class="muted" title="이 기능 추가 이전 실행이라 기록 없음">-</span>`;
     const stopCell = r.status === 'running'
       ? `<button class="stop-btn" type="button" title="중지" data-run-id="${r.run_id}" onclick="event.stopPropagation(); stopRun('${r.run_id}', this)"></button>`
       : '';
@@ -753,11 +797,12 @@ async function refreshHistory() {
       : `<span class="badge ${r.status}">${r.status.toUpperCase()}</span>`;
     tr.innerHTML = `<td>${r.run_id}</td><td>${r.label || r.tc_id}</td>
       <td><span class="badge channel-${channel}">${channel.toUpperCase()}</span></td>
-      <td>${statusCell}</td>
+      <td>${dutCell}</td>
+      <td>${statusCell}${stopCell}</td>
       <td>${r.pass}/${r.fail}/${r.skip || 0}</td><td class="muted">${(r.started_at || '').replace('T', ' ')}</td>
       <td class="muted">${r.finished_at ? r.finished_at.replace('T', ' ') : '-'}</td>
       <td class="muted">${r.finished_at ? formatDuration(r.started_at, r.finished_at) : '-'}</td>
-      <td>${dlCell}</td><td class="action-col">${stopCell}</td>`;
+      <td>${dlCell}</td>`;
     tr.onclick = () => showRunLog(r.run_id);
     tbody.appendChild(tr);
   });
@@ -792,6 +837,7 @@ async function initDutState() {
 }
 
 async function init() {
+  await loadDutSelector();
   await loadApps();
   await refreshAppMeta();
   await Promise.all([loadCustomOptions(), loadCatalogButtons(), refreshStatus(), refreshHistory()]);
