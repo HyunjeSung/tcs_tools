@@ -84,7 +84,7 @@ def _load_secrets() -> dict:
 _CONFIG = _load_config()
 _SECRETS = _load_secrets()
 
-# 기본 DUT(config.env) + 테스트용 프리셋. 이제 두 DUT가 서로 독립적으로(동시에) 실행될 수
+# 기본 DUT(config.env) + 테스트용 프리셋. 이제 여러 DUT가 서로 독립적으로(동시에) 실행될 수
 # 있으므로(아래 current_runs 참고) 이 값들은 더 이상 런타임에 바꿔치기되지 않는 순수 기본값이다
 # — 어떤 run이 어떤 DUT를 쓸지는 매 요청(RunRequest.dut_preset_id)에서 명시적으로 정해진다.
 DUT_HOST = _CONFIG.get("DUT_HOST", "192.168.10.25")
@@ -92,6 +92,7 @@ DUT_PORT = int(_CONFIG.get("DUT_PORT", "22"))
 DUT_PRESETS = [
     {"id": "default", "label": f"기본 DUT ({DUT_HOST})", "host": DUT_HOST, "port": DUT_PORT},
     {"id": "test", "label": "테스트 DUT (172.23.1.166:10430)", "host": "172.23.1.166", "port": 10430},
+    {"id": "test2", "label": "테스트 DUT2 (172.23.1.166:10420)", "host": "172.23.1.166", "port": 10420},
 ]
 SSH_KEY = str(Path(_CONFIG.get("SSH_KEY_PATH", "~/.ssh/emsplus_mass_nopass")).expanduser())
 # DUT가 SSH 연결을 짧은 간격으로 반복하면(성공/실패 무관) 한동안 새 연결을 거부하는
@@ -684,6 +685,28 @@ def _valid_tc_numbers(app_cfg: dict) -> set:
     return set(CASE_ID_IN_ASSERT_RE.findall(text))
 
 
+def _valid_case_ids(app_cfg: dict) -> "tuple[set, set]":
+    """(exact_case_ids, tc_numbers_with_literal_subcases) — TC 번호 단위로는 여전히
+    유효해도(스크립트에 그 TC 함수가 남아있어도) 그 아래 sub-case 구성이 바뀌어(예:
+    TC26이 원래 -3~-6까지 있었는데 지금은 -0~-2로 정리됨, TC15가 -2 없이 -1만 남음)
+    더 이상 스크립트가 만들어내지 않는 sub-case가 latest_status.json에 유령처럼
+    계속 남는 문제(2026-08-28 device_log TC07/TC15-2/TC26-3~6 실측)를 잡기 위한
+    sub-case 단위 화이트리스트. `_expected_cases()`(리터럴 `assert "TCxx-n: ..."`
+    스캔)를 그대로 재사용한다.
+
+    tc_numbers_with_literal_subcases: 그 TC 번호 아래 리터럴 sub-case가 하나라도
+    있는 TC 번호 집합 — 이 집합에 속한 TC 번호만 sub-case 단위로 걸러도 안전하다
+    (스크립트가 그 번호의 전체 sub-case 목록을 리터럴로 다 알려주므로). 반대로
+    sub-id를 쉘 변수로 동적 생성하는 TC(예: system_log TC04)는 이 집합에 없으므로
+    호출부가 TC 번호 단위 필터링(기존 _valid_tc_numbers())로만 대체한다 — 안 그러면
+    동적 sub-id를 전부 "리터럴에 없는 유령"으로 오판해 그 TC 전체가 사라지는
+    회귀가 난다(2026-08-04 사고, _valid_tc_numbers() 주석 참고).
+    """
+    expected = _expected_cases(app_cfg)
+    tc_numbers_with_literal_subcases = {cid.split("-", 1)[0] for cid in expected}
+    return set(expected.keys()), tc_numbers_with_literal_subcases
+
+
 def _prune_old_runs(runs_dir: Path, keep: int = MAX_RUNS):
     """runs_dir 아래 run_id(=YYYYMMDD_HHMMSS_... 접두라 이름순=시간순) 기준 최신 keep개만 남기고 나머지는 삭제."""
     run_dirs = sorted((d for d in runs_dir.iterdir() if d.is_dir()), key=lambda d: d.name, reverse=True)
@@ -716,7 +739,16 @@ def _rebuild_latest_status(app_cfg: dict):
 
     valid_tcs = _valid_tc_numbers(app_cfg)
     if valid_tcs:
-        status_map = {cid: v for cid, v in status_map.items() if v.get("tc") in valid_tcs}
+        valid_case_ids, tc_numbers_with_literal_subcases = _valid_case_ids(app_cfg)
+
+        def _still_valid(cid: str, tc: str) -> bool:
+            if tc not in valid_tcs:
+                return False
+            if tc in tc_numbers_with_literal_subcases:
+                return cid in valid_case_ids
+            return True
+
+        status_map = {cid: v for cid, v in status_map.items() if _still_valid(cid, v.get("tc"))}
 
     app_cfg["status_file"].write_text(json.dumps(status_map, ensure_ascii=False, indent=2))
 
@@ -1345,18 +1377,23 @@ async def run_tc(run_id: str, app_cfg: dict, entry: dict, channel: str, dut: dic
             meta["status"] = "rebooted"
         elif exit_code is None:
             meta["status"] = "timeout"
+        elif exit_code != 0:
+            # ssh 클라이언트 관례상 0이 아니고 timeout(None)도 아닌 exit_code(대표적으로
+            # 255)는 원격 스크립트가 아니라 SSH 연결 자체가 끊겼다는 뜻이다 — 그때까지
+            # 이미 FAIL이 기록돼 있었더라도(fail_n>0) 이 판정이 먼저다: 비정상 종료로
+            # 나머지 TC가 통째로 못 돌았으니 그때까지의 pass/fail 집계는 "최종 결과"가
+            # 아니라 우연히 끊기기 전까지 모인 부분집합일 뿐이다. fail_n>0을 먼저 보면
+            # "fail"로 잘못 확정되어 _estimate_tc_total()이 이 불완전한 run을 정상
+            # 완료로 오인해 그 적은 distinct TC 개수를 다음 run들의 진행률 분모로
+            # 오염시킨다(실측: 20260828_145403_device_log_full — TC11 FAIL 1건 기록
+            # 후 TC12에서 exit_code=255로 끊겼는데 fail_n>0이 우선시돼 status=fail로
+            # 저장, 다음 20260828_155141 run의 진행률이 6/7=86%로 튐).
+            meta["status"] = "error"
         elif fail_n > 0:
             meta["status"] = "fail"
         elif not cases:
             # exit_code가 0이어도(예: 시리얼 결과 dump가 노이즈로 깨진 경우) 파싱된 케이스가
             # 하나도 없으면 "결과 없음"이지 "pass"가 아니다.
-            meta["status"] = "error"
-        elif exit_code not in (0, None):
-            # ssh 클라이언트 관례상 0이 아니고 timeout(None)도 아닌 exit_code(대표적으로
-            # 255)는 원격 스크립트가 아니라 SSH 연결 자체가 끊겼다는 뜻이다 — 그때까지
-            # 파싱된 케이스에 FAIL이 없어도 나머지 TC가 통째로 못 돌았을 뿐이지 "pass"가
-            # 아니다(실측: 20260828_084642_device_log_default — TC01 2개만 PASS하고
-            # exit_code=255로 끊겼는데 status=pass로 잘못 표시됨).
             meta["status"] = "error"
         elif pass_n == 0:
             # cases는 있지만 전부 SKIP(자동화 불가/환경 제약)인 경우 — "결과 없음"과
