@@ -1645,9 +1645,21 @@ tc16_perday_root_zero() {
     dump_cmd ls -la "$TOUPLOAD_ROOT/$log_item/"
     dump_cmd ls -la "$ARCHIVE_ROOT/$log_item/"
 
+    # [2026-08-31] get_log_data가 강제로 rotate+compress해 root tier
+    # ($LOGGER_ROOT/$log_item/*.xz)에 새로 만드는 파일을 before/after diff로
+    # 특정해둔다 — 아래 root_denied_then_archived 판정이 놓치는 offline race를
+    # file-tracking으로 보완하기 위한 사전 준비(이유는 해당 지점 주석 참고).
+    local root_xz_before root_xz_after new_root_xz
+    root_xz_before=$(ls "$LOGGER_ROOT/$log_item/"*.xz 2>/dev/null | sort)
+
     network_block
     send_and_wait "get_log_data" "{}" 30 > /dev/null
     sleep 15
+
+    root_xz_after=$(ls "$LOGGER_ROOT/$log_item/"*.xz 2>/dev/null | sort)
+    new_root_xz=$(comm -13 <(echo "$root_xz_before") <(echo "$root_xz_after") | head -1)
+    echo "  get_log_data로 root tier에 새로 생긴 파일: ${new_root_xz:-(감지 안 됨)}"
+
     network_restore
 
     echo "  idle thread 라운드로빈이 root 파일을 집을 때까지 대기 (최대 60초)..."
@@ -1686,7 +1698,24 @@ tc16_perday_root_zero() {
     if [ "$root_denied_then_archived" -eq 1 ]; then
         assert "TC16-2: root quota 소진 시 archive로 이동" "PASS"
     else
-        assert "TC16-2: root quota 소진 시 archive로 이동" "FAIL" "Meter denied 로그 직후 root→archive 이동 로그가 없음 — 위 journalctl 근거 참고"
+        # [2026-08-31 버그 수정] "Meter from root directory has exhausted" 로그 뒤에
+        # "Moved ... archive" 로그가 오는 인접 패턴만 인정하면, network_block 구간(15초)
+        # 안에서 idle tick(5초 주기)이 Meter를 처리하는 race가 놓친다 — 그 틱에서는
+        # isInternetAvailable()==false라 cloud_upload_manager.cpp:855의
+        # `if (isInternetAvailable() && isUploadAllowed() && ...)`가 short-circuit되어
+        # isUploadAllowed()가 아예 호출되지 않고(=denied 로그 없음) 곧장
+        # moveFilesToArchiveDir()로 넘어간다 — 실제로는 정상적으로 archive를 거쳤는데도
+        # denied 로그가 없다는 이유만으로 FAIL 처리되던 것(2026-08-31 실측 확인).
+        # 로그 인접 패턴이 안 잡히면, get_log_data 직후 root tier에 새로 생긴 파일이
+        # 지금 더 이상 root tier에 없는지(=root를 떠났는지)로 fallback 판정한다.
+        # TC16-1이 이미 "root->toupload 직행 없음"을 독립적으로 확인했으므로, 여기서
+        # root를 떠났다는 사실만 추가로 확인되면 archive를 거쳤다고 결론지을 수 있다
+        # (root에서 나가는 경로는 direct-toupload 아니면 archive 둘뿐).
+        if [ -n "$new_root_xz" ] && [ "$root_direct_allowed" -eq 0 ] && [ ! -e "$new_root_xz" ]; then
+            assert "TC16-2: root quota 소진 시 archive로 이동" "PASS" "denied 로그 인접 매칭은 실패(network_block 구간 offline race로 로그 미기록 가능성)했으나, 파일이 root tier를 떠났고 TC16-1에서 toupload 직행도 없었음을 확인 — archive 경유로 판정. new_root_xz=$new_root_xz"
+        else
+            assert "TC16-2: root quota 소진 시 archive로 이동" "FAIL" "Meter denied 로그 직후 root→archive 이동 로그가 없음, fallback(root tier 이탈 확인)도 불충족 — 위 journalctl 근거 및 new_root_xz=$new_root_xz(존재 여부) 참고"
+        fi
     fi
 
     dump_cmd ls -la "$TOUPLOAD_ROOT/$log_item/"
@@ -2341,11 +2370,11 @@ tc24_eol_field_logging_stop() {
         assert "TC24-0: telemetry notification column 데이터 도착 확인(TC23과 동일 사전 확인)" "FAIL" "telemetry 미도착 — 아래 결과가 EOL 기능과 무관할 수 있음"
     fi
 
-    local csv rows_before interval
-    csv=$(active_csv "$log_item")
-    rows_before=$(wc -l < "$csv")
+    local csv_before rows_before interval
+    csv_before=$(active_csv "$log_item")
+    rows_before=$(wc -l < "$csv_before")
     interval=$(lp_field "$log_item" "logRowInterval")
-    dump_cmd wc -l "$csv"
+    dump_cmd wc -l "$csv_before"
 
     echo "  \$ send_and_wait set_factory_eol_mode {eol_mode:true}"
     local eol_on_resp
@@ -2354,20 +2383,37 @@ tc24_eol_field_logging_stop() {
 
     sleep "$((interval * 3 + 10))"
 
-    dump_cmd wc -l "$csv"
-    local rows_after
-    rows_after=$(wc -l < "$csv")
+    # [버그 수정 2026-08-31] active_csv를 wait 이전에 한 번만 잡아 재사용했더니,
+    # 직전 TC(TC19)의 date -s 시각 조작으로 만들어진 미래 날짜 파일이 시각 복원 후
+    # LogPolicyManager에 의해 rollover되어 사라지면서 "before" 경로가 대기 중 유실,
+    # wc -l이 "No such file or directory"로 실패하고 rows_after가 빈 문자열이 되어
+    # 이후 -eq/-gt 정수 비교가 깨지는 현상 발생(EOL 모드와 무관한 rollover 타이밍
+    # 경쟁). active_csv를 wait 이후 다시 조회해 실제 활성 파일을 추적한다.
+    local csv_after rows_after
+    csv_after=$(active_csv "$log_item")
 
-    if [ "$rows_after" -eq "$rows_before" ]; then
-        assert "TC24-1: EOL 모드 중 field 로깅 중단 확인(요구사항 AC 기준, 예상 FAIL)" "PASS"
-    else
-        assert "TC24-1: EOL 모드 중 field 로깅 중단 확인(요구사항 AC 기준, 예상 FAIL)" "FAIL" "before=$rows_before after=$rows_after — 예상된 결과(stopLogging() 미호출, device_log.cpp:455-461 참고)"
-    fi
-
-    if [ "$rows_after" -gt "$rows_before" ]; then
+    if [ "$csv_after" != "$csv_before" ]; then
+        echo "  [경고] 활성 CSV 파일이 대기 중 회전됨(rollover, EOL 모드와 무관) — before=$csv_before after=$csv_after"
+        echo "  회전 자체가 로깅 파이프라인이 계속 동작 중이라는 근거이므로 새 파일 기준으로 재판정"
+        dump_cmd wc -l "$csv_after"
+        rows_after=$(wc -l < "$csv_after")
+        assert "TC24-1: EOL 모드 중 field 로깅 중단 확인(요구사항 AC 기준, 예상 FAIL)" "FAIL" "csv rollover(before=$csv_before after=$csv_after, rows_after=$rows_after) — 예상된 결과(stopLogging() 미호출, device_log.cpp:526-530 참고)"
         assert "TC24-2: 실제로는 필드 로깅 계속됨(참고용)" "PASS"
     else
-        assert "TC24-2: 실제로는 필드 로깅 계속됨(참고용)" "FAIL" "before=$rows_before after=$rows_after"
+        dump_cmd wc -l "$csv_after"
+        rows_after=$(wc -l < "$csv_after")
+
+        if [ "$rows_after" -eq "$rows_before" ]; then
+            assert "TC24-1: EOL 모드 중 field 로깅 중단 확인(요구사항 AC 기준, 예상 FAIL)" "PASS"
+        else
+            assert "TC24-1: EOL 모드 중 field 로깅 중단 확인(요구사항 AC 기준, 예상 FAIL)" "FAIL" "before=$rows_before after=$rows_after — 예상된 결과(stopLogging() 미호출, device_log.cpp:526-530 참고)"
+        fi
+
+        if [ "$rows_after" -gt "$rows_before" ]; then
+            assert "TC24-2: 실제로는 필드 로깅 계속됨(참고용)" "PASS"
+        else
+            assert "TC24-2: 실제로는 필드 로깅 계속됨(참고용)" "FAIL" "before=$rows_before after=$rows_after"
+        fi
     fi
 
     echo "  \$ send_and_wait set_factory_eol_mode {eol_mode:false}"

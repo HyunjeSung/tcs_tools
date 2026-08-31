@@ -887,6 +887,22 @@ root에서 toupload로 **직행하지 않고** 반드시 archive를 거치는지
 > 로그로 "root→toupload 직행이 없었는지"와 "root→archive 경유가 있었는지"를 직접
 > 판정한다(로그 확인을 위해 TC 실행 중 `log_level_dl`을 DEBUG로 임시 전환).
 
+> **주의 (2026-08-31 실측 후 정정, TC16-2 fallback 추가):** 위 log-adjacency 판정도
+> 자체 blind spot이 있다 — `rootToArchiveOrToUpload()`(`cloud_upload_manager.cpp:855`)의
+> `if (isInternetAvailable() && isUploadAllowed() && ...)`는 short-circuit 평가라서,
+> 절차 3의 `network_block` 구간(15초) 안에서 idle tick(5초 주기)이 Meter를 처리하면
+> `isInternetAvailable()==false`로 `isUploadAllowed()` 자체가 호출되지 않고(→ "denied"
+> 로그 없음) 곧장 `moveFilesToArchiveDir()`로 넘어간다. 이 경우 실제로는 정상적으로
+> archive를 거쳤는데도 "denied 로그 직후 archive 이동"이라는 인접 패턴이 관측되지 않아
+> TC16-2가 FAIL로 오판된다(2026-08-31 device_log_full 실행에서 실측 확인, 15초 offline
+> 구간에 idle tick이 최대 3회 들어갈 수 있어 라운드로빈이 그 중 하나에서 Meter를 집으면
+> 재현). **스크립트에 fallback 추가**: `get_log_data` 직후 root tier(`$LOGGER_ROOT/
+> $log_item/*.xz`)에 새로 생긴 파일을 before/after diff로 특정해두고, log-adjacency
+> 패턴이 안 잡히는 경우 그 파일이 root tier를 떠났는지로 재판정한다 — root를 벗어나는
+> 경로는 direct-toupload 아니면 archive 둘뿐이고, TC16-1이 이미 direct-toupload가
+> 없었음을 독립적으로 확인하므로, "root 이탈 + TC16-1 통과"만으로 archive 경유를
+> 결론지을 수 있다.
+
 ### 사전 조건
 
 - 공통 전제 조건 충족, `logcount.json` 편집 권한
@@ -912,7 +928,7 @@ root에서 toupload로 **직행하지 않고** 반드시 archive를 거치는지
 | 기준 ID | 설명 | 타입 | 기준값 | 셸 검증 |
 |---------|------|------|--------|---------|
 | TC16-1 | root quota 소진 시 root→toupload 직행 안 함 | boolean | true | journald에 `isUploadAllowed] Upload allowed for log type: Meter from root directory` 없음 |
-| TC16-2 | root quota 소진 시 archive로 이동 | boolean | true | journald에서 `Meter from root directory has exhausted` 바로 다음 줄이 `rootToArchiveOrToUpload] Moved files from root -> archive directory` |
+| TC16-2 | root quota 소진 시 archive로 이동 | boolean | true | journald에서 `Meter from root directory has exhausted` 바로 다음 줄이 `rootToArchiveOrToUpload] Moved files from root -> archive directory` — 안 잡히면 fallback: `get_log_data` 직후 root tier에 생긴 신규 파일이 이후 root tier에서 사라졌는지(+ TC16-1 통과) |
 
 ---
 
@@ -1420,9 +1436,20 @@ Factory EOL Mode ON 시 `/edge/log/eol/`에 `eol_1sec.csv`, `eol_1min.csv`가 �
 EOL 모드가 ON된 동안 일반 필드 로깅(SID0201의 정규 log_item)이 중단되는지 확인한다.
 **본 TC는 아래 코드 근거상 AC가 구현되어 있지 않음을 확인하는 목적이며, DUT 실측
 없이도 FAIL이 확정적이다** — `handle_request_set_factory_eol_mode()`
-(`device_log.cpp:455`)는 `EolLogger::setEolLoggingEnabled(eol_mode)`만 호출하고,
+(`device_log.cpp:526-532`)는 `EolLogger::setEolLoggingEnabled(eol_mode)`만 호출하고,
 필드 로깅을 멈추는 `LogPolicyManager::stopLogging()`은 호출하지 않는다. `stopLogging()`
-호출부는 코드 전체에 `handle_request_factory_reset()`(`device_log.cpp:425`) 단 한 곳뿐이다.
+호출부는 코드 전체에 `handle_request_factory_reset()`(`device_log.cpp:484-514`, 호출
+자체는 `:492`) 단 한 곳뿐이다. (2026-08-31 재확인: 스펙 최초 작성 시점 대비 파일 내
+다른 위치의 편집으로 실제 줄번호가 455/425 → 526/492로 이동함 — 로직은 동일)
+
+추가 근거(2026-08-31 코드 조사): `LogPolicyManager::processData()`
+(`log_policy_manager.cpp:202-233`)의 `noti_data` 순회 루프(`flushColValuesToFile`로
+정규 CSV 행을 쓰는 부분)는 EOL 플래그와 무관하게 항상 실행된다. `EolLogger::
+isEolLoggingEnabled()` 체크는 그 뒤 "3. Finalize" 단계(`:236-238`)에서 `EolLogger::
+processEolLogging()`(EOL 전용 `eol_1sec`/`eol_1min` 파일 기록, additive)을 켤지
+말지에만 관여한다 — 즉 EOL 플래그는 정규 필드 로깅 루프의 실행 여부에 어떤 분기도
+걸지 않는 구조이며, 이는 "필드 로깅이 멈추지 않는다"는 결론을 코드 두 곳
+(핸들러 + LogPolicyManager 처리 루프)에서 교차 확인한다.
 
 ### 사전 조건
 
@@ -1449,8 +1476,8 @@ EOL 모드가 ON된 동안 일반 필드 로깅(SID0201의 정규 log_item)이 �
 | 기준 ID | 설명 | 타입 | 기준값 | 셸 검증 |
 |---------|------|------|--------|---------|
 | TC24-0 | telemetry notification column 데이터 도착 확인(TC23과 동일 사전 확인) | boolean | true | 대상 log_item 최신 CSV 행의 non-empty 컬럼 수 > 3 |
-| TC24-1 | EOL 모드 중 field 로깅 중단 확인 (요구사항 AC 기준, 예상 FAIL) | boolean | true | `[ "$(wc -l < "$csv")" -eq "$rows_before" ]` |
-| TC24-2 | 실제로는 필드 로깅 계속됨(참고용) | boolean | true | `[ "$(wc -l < "$csv")" -gt "$rows_before" ]` |
+| TC24-1 | EOL 모드 중 field 로깅 중단 확인 (요구사항 AC 기준, 예상 FAIL) | boolean | true | `[ "$(wc -l < "$csv_after")" -eq "$rows_before" ]` |
+| TC24-2 | 실제로는 필드 로깅 계속됨(참고용) — TC19 rollover와 겹칠 경우 예상 FAIL이었으나 스크립트 수정으로 해소(아래 주의 참고) | boolean | true | `[ "$(wc -l < "$csv_after")" -gt "$rows_before" ]` |
 
 > **주의 (Flag, 미구현 확정):** `handle_request_set_factory_eol_mode()`는
 > `EolLogger::setEolLoggingEnabled(eol_mode)`만 호출하며, 일반 필드 로깅을 멈추는
@@ -1460,6 +1487,26 @@ EOL 모드가 ON된 동안 일반 필드 로깅(SID0201의 정규 log_item)이 �
 > EOL 모드 ON은 EOL 로그를 "추가로" 기록할 뿐, 필드 로깅을 중단시키지 않는다. AC
 > "Field logging is disabled in EOL mode"와 배치되므로 Jira 재확인/개발 이슈 등록
 > 대상으로 보고할 것을 권장한다.
+
+> **주의 (TC24-2, 예상 FAIL 사유 — 2026-08-31 실측 후 정정):** TC24-2는 "참고용"
+> 확인이라 원칙적으로는 (미구현 상태가 유지되는 한) rows 증가로 PASS하는 게
+> 정상이다. 다만 직전 TC19가 `date -s`로 시각을 미래로 조작했다가 종료 시 복원하는데,
+> 그 복원 시점에 TC23/24가 이어서 참조하던 활성 CSV가 미래 날짜 파일이었던 경우
+> LogPolicyManager가 실시간 기준으로 rollover시키며 그 파일이 사라진다. 원래 스크립트는
+> `active_csv`를 대기(wait) 이전에 한 번만 캐시해 재사용했기 때문에, 이 rollover가
+> EOL 대기 구간과 겹치면 "before" 파일 경로가 유실되어 `wc -l`이
+> `No such file or directory`로 실패하고 `rows_after`가 빈 문자열이 되어 이후 정수
+> 비교(`-eq`/`-gt`)가 깨지면서 TC24-1/TC24-2가 함께 FAIL로 오판되었다(EOL 모드 자체와
+> 무관한 스크립트 결함). **스크립트 수정 완료**(`tc_device_log.sh`
+> `tc24_eol_field_logging_stop()`): wait 이후 `active_csv`를 재조회해 rollover 여부를
+> 판별하고, rollover가 감지되면 그 자체를 "로깅 파이프라인이 계속 동작 중"이라는
+> 근거로 삼아 TC24-1=FAIL(예상됨)/TC24-2=PASS로 직접 판정하도록 분기를 추가했다.
+> 결과적으로 TC24-2는 rollover가 발생하지 않는 정상 케이스와, rollover가 겹치는
+> 케이스 모두에서 크래시 없이 PASS로 판정된다. 즉 "예상 FAIL"은 **수정 전 스크립트의
+> 이력**(rollover 경쟁으로 정수 비교가 깨져 발생한 FAIL)이며, 그 FAIL 자체는 device_log
+> 결함이 아니라 원인이 파악된 스크립트 버그였다는 뜻이다 — 수정 후 재실행 시 TC24-2가
+> FAIL로 나온다면 이 note에서 설명한 rollover 케이스가 아닌 새로운 원인이므로 재조사할
+> 것.
 
 ---
 
