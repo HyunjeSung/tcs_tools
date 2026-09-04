@@ -281,6 +281,41 @@ try {
         WaitFor 'M_SNAP_END' 10000 | Out-Null
         Write-Host 'TC14_DONE'
     }
+    elseif ($Phase -eq 'tc18') {
+        # TC18(SYSTEM_LOG_DIRS 저장공간-부족 cleanup) 조사용 — SSH로 재부팅 후 journalctl을
+        # 사후 조회했을 때 [cleanup_if_low_disk_space]/[cleanup] Removing: 로그가 전혀 안
+        # 잡히는 현상을, systemctl restart docker-loader 트리거 "직전"부터 journalctl -f로
+        # 실시간 tail해서 rotation/timing 문제 없이 확정 검증한다(tc14 패턴과 동일 구조).
+        CtrlC; CtrlC
+        Pump 1000
+        EnsureLogin
+        MakeQuiet
+        SendLine 'rm -f /tmp/tc18.out /tmp/tc18_journal.log; echo M_TC18_READY'
+        WaitFor 'M_TC18_READY' 5000 | Out-Null
+        # journald 백그라운드 캡처를 --tc18 실행보다 먼저 건다 — task_cleanup_logs()가
+        # docker-loader 재시작 직후 맨 먼저 도는 타이밍(첫 수십 초)까지 놓치지 않기 위함.
+        SendLine 'journalctl -b 0 -u docker-loader -f --no-pager -o short-iso > /tmp/tc18_journal.log 2>&1 &'
+        Pump 500
+        # TC18 실행 (더미 배치 + restart + 최대 90초 폴링 + sync 안정화 최대 30초 → 약 3분)
+        SendLine '/tmp/tc_system_log.sh --tc18 > /tmp/tc18.out 2>&1; echo M_TC18_DONE_END'
+        $ok = WaitFor 'M_TC18_DONE_END' 300000
+        Write-Host ('TC18_RUN matched=' + $ok)
+        # 캡처 중단
+        SendLine 'kill %1 2>/dev/null; sleep 1; wc -l /tmp/tc18.out /tmp/tc18_journal.log; echo M_TC18_STOPCAP'
+        WaitFor 'M_TC18_STOPCAP' 8000 | Out-Null
+        # cleanup 관련 키워드로 미리 필터링한 작은 파일 (case-insensitive, 넓게)
+        SendLine 'grep -iE "cleanup|removing|free space|delete_log|task_cleanup_logs|low disk|enough space recovered|failed to remove|system_log_timer_loop|delete_old_journals" /tmp/tc18_journal.log > /tmp/tc18_journal_filt.log; wc -l /tmp/tc18_journal_filt.log; echo M_TC18FILT_DONE'
+        WaitFor 'M_TC18FILT_DONE' 30000 | Out-Null
+        # 결과 dump — tc18.out(스크립트 표준출력), 필터링된 journal, 그리고 혹시
+        # 필터가 놓쳤을 경우를 대비해 raw journal 전체도 chunked로 받는다.
+        DumpSmall 'tc18_out'        'cat /tmp/tc18.out' | Out-Null
+        DumpSmall 'tc18_journal_filt' 'cat /tmp/tc18_journal_filt.log' | Out-Null
+        DumpChunked 'tc18_journal_raw' '/tmp/tc18_journal.log' | Out-Null
+        # 상태 스냅샷
+        SendLine 'echo M_SNAP_BEGIN; echo "---archive---"; ls -la /edge/log/system/archive/ 2>&1; echo "---staging---"; ls -la /edge/log/system/tc18_dummy_staging_* 2>&1; echo "---toupload---"; ls -la /edge/log/toupload/system/tc18_dummy_toupload_* 2>&1; echo "---df---"; df -h /edge/log; echo M_SNAP_END'
+        WaitFor 'M_SNAP_END' 10000 | Out-Null
+        Write-Host 'TC18_DONE'
+    }
     else {
         Write-Host ('UNKNOWN_PHASE: ' + $Phase)
     }

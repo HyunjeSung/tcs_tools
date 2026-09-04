@@ -391,7 +391,7 @@ def _case_sort_key(c: dict):
     return (tc_num, sub_num)
 
 
-def _parse_results(text: str, app_cfg: Optional[dict] = None):
+def _parse_results(text: str, app_cfg: Optional[dict] = None, running: bool = False):
     # case_id로 dedup — 시리얼 채널은 tee로 살린 라이브 스트림과 최종 base64 디코딩본에
     # 같은 [PASS]/[FAIL] 블록이 두 번 나타날 수 있어(_tail_serial_log 참고), 같은 case가
     # 중복 매칭되면 나중 것(더 뒤에 오는 최종 디코딩본, 항상 깨끗함)으로 덮어써 한 번만 센다.
@@ -432,6 +432,17 @@ def _parse_results(text: str, app_cfg: Optional[dict] = None):
     # 전혀 안 보이던 원인(예: TC20-1이 실제로 실행되지도 않았는데 SKIP으로 표시).
     # "완료"의 진짜 기준은 마지막 summary 줄 "이후"에 새 TC 배너가 더 있는지 여부다 —
     # 있으면 다음 단계가 아직 진행 중이라는 뜻이므로 보충하지 않는다.
+    # [2026-09-04 실측 후 수정] "다음 TC 배너가 로그에 없으면 끝난 것"이라는 위 휴리스틱은
+    # 재부팅 체인(pre → DUT 재부팅 대기 → post)의 "대기 중" 구간에서도 똑같이 참이 돼버린다
+    # — pre 단계 자신의 summary는 이미 찍혔고, post 단계는 SSH가 아직 안 붙어 배너 자체가
+    # 로그에 없기 때문이다(예: system_log TC18-pre 완료 직후 "[DASHBOARD] DUT 재부팅 대기
+    # 중..." 상태). 그 결과 아직 실행되지도 않은 post 단계의 sub-case(TC18-2/3/4)가 전부
+    # "사전조건 미충족 SKIP"으로 확정돼버리고, 그 case id가 cases_map에 이미 들어가 있으니
+    # _pending_case_rows()가 그 자리에 정상적으로 채워야 할 "RUNNING" placeholder를 다시
+    # 안 채운다(existing_ids 체크에 걸림) — 대시보드에 진행 중인데 SKIP으로 표시되는 원인.
+    # 호출부가 이 run이 아직 "running" 상태임을 확실히 아는 경우(라이브 폴링 경로)엔
+    # running=True로 넘겨 이 텍스트 휴리스티브 자체를 건너뛴다 — 진짜로 끝난 run을 다시
+    # 파싱하는 호출부(리포트 생성 등)는 running 인자를 안 넘기므로 기존 동작 그대로 유지.
     summary_matches = list(SUMMARY_RE.finditer(text))
     is_truly_finished = False
     if summary_matches:
@@ -441,7 +452,7 @@ def _parse_results(text: str, app_cfg: Optional[dict] = None):
             for line in remainder_after_last_summary.splitlines()
         )
         is_truly_finished = not has_more_banners
-    if app_cfg is not None and is_truly_finished:
+    if app_cfg is not None and is_truly_finished and not running:
         attempted = _attempted_tc_numbers(text)
         for sub_id, desc in _expected_cases(app_cfg).items():
             tc_no = sub_id.split("-", 1)[0]
@@ -459,7 +470,13 @@ def _parse_results(text: str, app_cfg: Optional[dict] = None):
     return pass_n, fail_n, cases
 
 
-TC_SECTION_RE = re.compile(r"^(?:===|---)\s*(TC\d+)(?:-\d+)?\s*[:：].*?(?:===|---)$")
+# 서브케이스 접미사가 숫자(-2)뿐 아니라 reboot pre/post 배너처럼 문자(-PRE/-POST)일 수도
+# 있다(예: system_log TC10/TC18의 "=== TC10-PRE: ... ===", "=== TC18-POST: ... ===") —
+# 숫자만 허용하던 원래 패턴은 이런 배너를 아예 못 찾아서 _split_log_by_tc()가 그 TC의
+# 블록을 영원히 못 만들고, 결과 보고서(_generate_result_md)에 "근거 (output.log)"
+# 섹션이 통째로 빠지는 채로 조용히 넘어갔다(2026-09-04, TC18 결과 보고서에 근거가 하나도
+# 없다는 지적으로 발견 — TC10도 같은 배너 포맷이라 처음부터 똑같이 영향받고 있었음).
+TC_SECTION_RE = re.compile(r"^(?:===|---)\s*(TC\d+)(?:-[A-Za-z0-9]+)?\s*[:：].*?(?:===|---)$")
 JOURNAL_TOKEN_RE = re.compile(r"[\w./\-]*\d[\w./\-]*\.(?:log(?:\.xz)?(?:\.meta)?|xz|meta|nmon(?:\.meta)?)\b")
 JOURNAL_EXCERPT_MAX_LINES = 8
 
@@ -469,21 +486,34 @@ def _split_log_by_tc(text: str) -> dict:
 
     tc_system_log.sh 가 각 TC 실행 전 이런 구분선을 찍어주는 것을 그대로 활용 —
     tc_system_log_result.md 의 "근거 (tc_run.out)" 인용과 같은 방식.
+
+    같은 TC 번호로 배너가 여러 번 찍히면(예: TC10/TC18의 `-PRE`/`-POST`처럼 reboot로
+    두 단계로 나뉘는 TC) 마지막 걸로 덮어쓰지 않고 순서대로 이어 붙인다 — 안 그러면
+    pre 단계 증거(TC18-0/1이 근거로 삼는 df/더미 생성 로그 등)가 통째로 사라진다
+    (2026-09-04, 결과 보고서에 pre 단계 근거가 없다는 지적으로 발견).
     """
     blocks: dict = {}
     current_tc = None
     current_lines: list = []
+
+    def _flush():
+        if not current_tc:
+            return
+        text_block = "\n".join(current_lines).strip()
+        if current_tc in blocks:
+            blocks[current_tc] = blocks[current_tc] + "\n\n" + text_block
+        else:
+            blocks[current_tc] = text_block
+
     for line in text.splitlines():
         m = TC_SECTION_RE.match(line.strip())
         if m:
-            if current_tc:
-                blocks[current_tc] = "\n".join(current_lines).strip()
+            _flush()
             current_tc = m.group(1)
             current_lines = [line]
         elif current_tc:
             current_lines.append(line)
-    if current_tc:
-        blocks[current_tc] = "\n".join(current_lines).strip()
+    _flush()
     return blocks
 
 
@@ -972,11 +1002,16 @@ async def _run_ssh(dut: dict, run_state: dict, app_cfg: dict, entry: dict, log_p
     return exit_code
 
 
-async def _wait_for_dut_reboot(dut: dict, logf, max_wait_s: int = 180) -> bool:
+async def _wait_for_dut_reboot(dut: dict, logf, max_wait_s: int = 180, post_wait_s: int = 45) -> bool:
     """TC10-pre 직후 ping → SSH 순으로 폴링해 재부팅 완료를 기다린다.
     tc-run 스킬의 SSH fallback 절차(ping 폴링 → ssh ALIVE 폴링 → boot+merge sleep)를
     대시보드 오케스트레이션으로 재현한 것. reboot로 기존 ControlMaster 소켓이 좀비가
-    되는 문제는 _ensure_fresh_ssh_master()가 처리(module docstring 참고)."""
+    되는 문제는 _ensure_fresh_ssh_master()가 처리(module docstring 참고).
+
+    post_wait_s: SSH 재접속 확인 후 추가로 기다리는 고정 시간(TC10의 boot+merge 완료
+    가정용, 기본 45초). TC18처럼 그 가정이 필요 없고(-post 스크립트 자체가 최대 240초
+    자체 폴링을 이미 함) 오히려 낭비인 TC는 호출부에서 0으로 넘겨 스킵한다
+    (2026-09-04, 사용자 확인)."""
     loop = asyncio.get_event_loop()
 
     logf.write("\n[DASHBOARD] DUT 재부팅 대기 중 (ping polling)...\n".encode())
@@ -1020,9 +1055,13 @@ async def _wait_for_dut_reboot(dut: dict, logf, max_wait_s: int = 180) -> bool:
         logf.write(f"[DASHBOARD] SSH 재접속 실패 ({max_wait_s}s 초과)\n".encode())
         return False
 
-    logf.write("[DASHBOARD] SSH 재접속 확인. boot+merge 완료 대기 (45s)...\n".encode())
-    logf.flush()
-    await asyncio.sleep(45)
+    if post_wait_s > 0:
+        logf.write(f"[DASHBOARD] SSH 재접속 확인. boot+merge 완료 대기 ({post_wait_s}s)...\n".encode())
+        logf.flush()
+        await asyncio.sleep(post_wait_s)
+    else:
+        logf.write("[DASHBOARD] SSH 재접속 확인. (post 스크립트 자체 폴링에 맡김, 추가 대기 없음)\n".encode())
+        logf.flush()
     return True
 
 
@@ -1133,7 +1172,10 @@ async def _run_ssh_full_with_reboots(dut: dict, run_state: dict, app_cfg: dict, 
         await _run_step(app_cfg["catalog_map"][pre_id])
 
         with open(log_path, "ab") as logf:
-            rebooted_ok = await _wait_for_dut_reboot(dut, logf)
+            # TC18-post는 자체적으로 최대 240초 폴링하며 더미 소멸을 확인하므로, TC10과
+            # 공유하는 고정 45초 boot+merge 대기는 TC18에는 불필요한 낭비다.
+            post_wait_s = 0 if tc_label == "TC18" else 45
+            rebooted_ok = await _wait_for_dut_reboot(dut, logf, post_wait_s=post_wait_s)
 
         if not rebooted_ok:
             with open(log_path, "ab") as logf:
@@ -1596,7 +1638,7 @@ def api_runs(app_id: str = DEFAULT_APP_ID, page: int = 1, page_size: int = 10):
                 # 선택 개수가 달라 과거 run의 개수가 뒤섞여 분모가 틀어진다(실측: TC16
                 # 1개짜리 과거 run이 이번 7개 선택 run의 분모로 잡혀 100%로 튐).
                 log_text = _read_clean_log(d / "output.log")
-                _, _, cases = _parse_results(log_text, app_cfg)
+                _, _, cases = _parse_results(log_text, app_cfg, running=True)
                 meta["tc_done"] = len({c["tc"] for c in cases})
                 if not meta.get("tc_total"):
                     meta["tc_total"] = _estimate_tc_total(app_cfg, meta.get("tc_id", ""), d.name)
@@ -1637,7 +1679,7 @@ def api_run_detail(run_id: str, app_id: str = DEFAULT_APP_ID):
     meta = json.loads(meta_path.read_text())
     log_path = run_dir / "output.log"
     log_text = _read_clean_log(log_path)
-    _, _, cases = _parse_results(log_text, app_cfg)
+    _, _, cases = _parse_results(log_text, app_cfg, running=(meta.get("status") == "running"))
     if meta.get("status") == "running":
         cases = cases + _pending_case_rows(app_cfg, log_text, cases)
         # 아직 진행 중인 run이면 그 run을 담당하는 슬롯(current_runs[dut_key])의 실시간

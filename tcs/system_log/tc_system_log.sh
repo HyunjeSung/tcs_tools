@@ -21,6 +21,16 @@ JOURNAL_DIR="/var/log/journal"
 # 아니므로, 한 번 뽑은 고엔트로피 데이터를 재사용해도 무방하다).
 DUMMY_BLOB="/edge/log/.tc_dummy_journal_blob"
 DUMMY_BLOB_RAW_MB=400
+# TC18 저장공간 부족(<10%) 재현용 상수. reboot이 아니라 systemctl restart docker-loader로
+# 트리거하는 단일 함수라 세션 간 상태 저장(TC18_SAVE) 자체가 불필요해졌다(2026-09-04 재설계).
+TC18_TARGET_LOW_PERCENT=9
+TC18_MIN_FREE_BEFORE_PERMILLE=250
+# 상한은 "df 파싱이 완전히 깨진 경우"만 걸러내는 최후 안전장치로만 두고(실사용 DUT는
+# 여유율이 얼마든 실제로 채운다 — 실측 192.168.10.25: 5.9GB 파티션 여유율 85%에서 목표
+# 9%까지 낮추는 데 더미 약 4.55GB 필요했음), 안전 상한(TC18_MAX_FILL_MB)을 그 실측치보다
+# 넉넉히 크게 잡아 그대로 수용한다.
+TC18_MAX_FREE_BEFORE_PERMILLE=950
+TC18_MAX_FILL_MB=6144
 PASS=0
 FAIL=0
 
@@ -107,6 +117,15 @@ inject_dummy_blob() {
         slice_bytes=$((blob_total * raw_mb / DUMMY_BLOB_RAW_MB))
         head -c "$slice_bytes" "$DUMMY_BLOB" | systemd-cat -t "$tag"
     fi
+}
+
+# TC18용 — df -P 로 얻은 1K-block 값을 정수 연산(퍼밀, ‰)으로 다뤄 busybox awk의
+# 부동소수 출력 편차를 피한다. 100‰=10%, 200‰=20% (cleanup_if_low_disk_space의
+# threshold_percent=10, delete_oldest_files_until_safe의 목표치 threshold_percent*2=20 과 대응).
+disk_total_kb() { df -P "$1" 2>/dev/null | awk 'NR==2{print $2}'; }
+disk_avail_kb() { df -P "$1" 2>/dev/null | awk 'NR==2{print $4}'; }
+disk_free_permille() {
+    df -P "$1" 2>/dev/null | awk 'NR==2{ if ($2>0) printf "%d", ($4*1000)/$2; else print 0 }'
 }
 
 # ============================================================
@@ -784,6 +803,290 @@ tc10_post() {
         assert "TC10-3: 재부팅 후 toupload .xz 파일 증가 (boot 로그 병합)" "FAIL"
         echo "  toupload before=${before_toupload} after=${after_toupload}"
     fi
+
+    echo ""
+    echo "============================================"
+    echo " 결과: PASS=${PASS}  FAIL=${FAIL}"
+    echo "============================================"
+}
+
+# ============================================================
+# TC18: 저장공간 부족(<10%) 시 SYSTEM_LOG_DIRS(staging/toupload/archive) cleanup 확인
+# [2026-09-04 재설계] 원래는 더미 배치 후 실제 reboot으로 재현했으나, reboot 자체가
+# (원인 불명, 실 필드 버그 패턴과도 다른) 대용량 쓰기를 유실시키는 별개 현상과 뒤섞여
+# 있었다 — systemctl restart docker-loader(전원 재부팅 없이 앱만 재시작)로 트리거를
+# 바꾸면 cleanup이 매번 로그 증거까지 포함해 정상 발화하는 것을 실측으로 확인했다
+# (TC12가 이미 쓰는 검증된 트리거와 동일 패턴). reboot 관련 유실 현상 자체는 원인
+# 불명·실 필드 패턴 불일치로 이 TC 범위에서 제외하고 별도 이슈로만 기록한다.
+# 더미 mtime은 30일 미만(1일 전)으로 둬서 day-retention(delete_log)이 같이 지우지
+# 않게 하고, 순수하게 cleanup_if_low_disk_space() 경로만 검증한다.
+# [주의] 실제 파티션 여유공간을 소진시키는 파괴적 시험이다 — 사전 조건(여유율 >=25%,
+#        필요 소진량 <= 안전 상한) 미충족 시 자동으로 SKIP(TC18-0 FAIL로 기록).
+# ============================================================
+tc18_low_disk_cleanup() {
+    echo "=== TC18: 저장공간 부족(<10%) 시 SYSTEM_LOG_DIRS cleanup 확인 (systemctl restart docker-loader 트리거) ==="
+
+    mkdir -p "${STAGING_DIR}" "${TOUPLOAD_DIR}" "${ARCHIVE_DIR}"
+
+    dump_cmd df -h "${STAGING_DIR}"
+    local total_kb avail_kb before_permille
+    total_kb=$(disk_total_kb "${STAGING_DIR}")
+    avail_kb=$(disk_avail_kb "${STAGING_DIR}")
+    before_permille=$(disk_free_permille "${STAGING_DIR}")
+    echo "  [TC18] 현재 파티션: total=${total_kb}KB avail=${avail_kb}KB free=${before_permille}‰"
+
+    local TC18_0_LABEL="TC18-0: 사전 조건 확인 (df 파싱 성공, 여유율>=25%, 필요 소진량<=안전상한)"
+
+    if [ -z "$total_kb" ] || [ -z "$avail_kb" ]; then
+        assert "$TC18_0_LABEL" "FAIL" "df -P 파싱 실패 (total_kb=${total_kb} avail_kb=${avail_kb})"
+        return
+    fi
+    if [ "$total_kb" -le 0 ]; then
+        assert "$TC18_0_LABEL" "FAIL" "total_kb=${total_kb} 비정상"
+        return
+    fi
+
+    # 여유율 하한(>=25%): 더미 삭제만으로 코드의 회복 목표치(threshold_percent*2=20%)를
+    # 확정적으로 넘길 수 있고, 실제 로그 파일을 건드릴 위험도 없게 하는 마진.
+    if [ "$before_permille" -lt "$TC18_MIN_FREE_BEFORE_PERMILLE" ]; then
+        assert "$TC18_0_LABEL" "FAIL" "현재 여유율 ${before_permille}‰(<250‰) - 이미 부족한 상태라 안전하게 재현 불가, 시험 중단"
+        return
+    fi
+    # 상한(<=950‰)은 df 파싱이 완전히 깨진 극단적 케이스만 걸러내는 최후 안전장치다.
+    # 여유율 자체가 아무리 높아도 실제로 그만큼 더미를 채운다 — 필요 더미량은 안전 상한
+    # (TC18_MAX_FILL_MB)이 실측치(약 4.55GB, 192.168.10.25 5.9GB 파티션 기준)보다
+    # 넉넉히 크게 잡혀있어 이 DUT에서도 그대로 수용됨.
+    if [ "$before_permille" -gt "$TC18_MAX_FREE_BEFORE_PERMILLE" ]; then
+        assert "$TC18_0_LABEL" "FAIL" "현재 여유율 ${before_permille}‰(>950‰) - df 파싱 이상 가능성, 시험 중단"
+        return
+    fi
+
+    # 목표: STAGING/TOUPLOAD엔 각 1MB(트리거 확인용) / ARCHIVE엔 나머지 전부(실제 회복을
+    # 담당). SYSTEM_LOG_DIRS는 STAGING→TOUPLOAD→ARCHIVE 순서로 처리되고 매 디렉토리마다
+    # "파티션 전체 여유율<10%"인지 다시 확인한다 — 회복량이 큰 더미를 마지막 디렉토리에
+    # 몰아둬야 앞선 두 디렉토리 처리 뒤에도 여전히 10% 밑에 머물러 세 곳 모두 확정적으로
+    # 발화한다(파일 삭제 여부는 그 시점 파티션 여유율<10%만으로 결정되고, 삭제되는 각 파일
+    # 자체의 크기와는 무관 — delete_oldest_files_until_safe는 그 디렉토리에 남은 대상
+    # 확장자 파일이 없어질 때까지 또는 20%에 도달할 때까지 가장 오래된 것부터 지운다).
+    # 목표 여유율을 10%에 최대한 가깝게(9%) 잡아 필요 더미량 자체를 최소화한다.
+    local need_kb archive_mb
+    need_kb=$(awk -v avail="$avail_kb" -v total="$total_kb" -v tgt="$TC18_TARGET_LOW_PERCENT" 'BEGIN{ n = avail - (total*tgt/100); if (n<1024) n=1024; printf "%d", n }')
+    archive_mb=$(( (need_kb / 1024) - 2 ))
+    [ "$archive_mb" -lt 1 ] && archive_mb=1
+
+    if [ "$archive_mb" -gt "$TC18_MAX_FILL_MB" ]; then
+        assert "$TC18_0_LABEL" "FAIL" "필요 소진량 ${archive_mb}MB > 안전 상한 ${TC18_MAX_FILL_MB}MB — 시험 중단(코드 결함 아님)"
+        return
+    fi
+    assert "$TC18_0_LABEL" "PASS"
+
+    local d1_glob="${STAGING_DIR}/tc18_dummy_staging_"
+    local d2_glob="${TOUPLOAD_DIR}/tc18_dummy_toupload_"
+    local d3_glob="${ARCHIVE_DIR}/tc18_dummy_archive_"
+
+    echo "  [TC18] 더미 생성: 세 디렉토리 전부 단일 거대 파일이 아니라 여러 개로 분할한다"
+    echo "         (system_log_partition.txt 참고 사례처럼 여러 파일이 쌓인 형태를 재현,"
+    echo "         delete_oldest_files_until_safe가 오래된 순으로 순차 삭제하는 것도 관찰 가능)"
+
+    # 파일마다 mtime을 1분씩 어긋나게(모두 1일 전 기준) 찍어서 삭제 순서가 오래된 것부터
+    # 결정적으로 보이도록 한다(2026-09-04, 사용자 확인). day-retention(LOG_RETAIN_DAY=30일,
+    # delete_log)이 이 더미를 같이 집어가지 않도록 30일 미만으로 유지한다.
+    local now_epoch base_epoch
+    now_epoch=$(date +%s)
+    base_epoch=$(( now_epoch - 86400 ))
+    local global_idx=1
+
+    # total_mb를 sizes 목록 청크로 쪼개 glob_prefix{NNN}.ext 여러 파일로 나눠 쓴다.
+    # global_idx를 함수 밖(전역)에서 계속 증가시켜, 같은 mtime 오프셋이 세 디렉토리에
+    # 걸쳐 겹치지 않게 한다.
+    make_split_dummy() {
+        local glob_prefix="$1" ext="$2" total_mb="$3" sizes="$4"
+        local made_mb=0 count=0
+        while [ "$made_mb" -lt "$total_mb" ]; do
+            for sz in $sizes; do
+                [ "$made_mb" -ge "$total_mb" ] && break
+                local remain=$(( total_mb - made_mb ))
+                [ "$sz" -gt "$remain" ] && sz=$remain
+                [ "$sz" -lt 1 ] && sz=1
+                local f="${glob_prefix}$(printf '%03d' "$global_idx").${ext}"
+                local file_epoch=$(( base_epoch + global_idx * 60 ))
+                dd if=/dev/zero of="$f" bs=1M count="$sz" 2>/dev/null
+                touch -d "@${file_epoch}" "$f" 2>/dev/null
+                made_mb=$(( made_mb + sz ))
+                count=$((count + 1))
+                global_idx=$((global_idx + 1))
+            done
+        done
+        echo "$count"
+    }
+
+    local staging_count toupload_count archive_count
+    # staging/toupload는 트리거 확인용(합쳐서 최대 3MB — 목표~10% 문턱 사이 마진(약 60MB)
+    # 대비 무시할 수준이라, 지워져도 그 자체만으로 20% 회복을 채우지 않는다. 그래야
+    # STAGING→TOUPLOAD→ARCHIVE 순회 중 뒤 디렉토리도 계속 "여유율<10%"로 남아 확정적으로
+    # 발화한다 — 위 더미 배치 설계 근거 참고).
+    staging_count=$(make_split_dummy "$d1_glob" "log" 3 "1 1 1")
+    toupload_count=$(make_split_dummy "$d2_glob" "xz" 3 "1 1 1")
+    archive_count=$(make_split_dummy "$d3_glob" "xz" "$archive_mb" "8 23 47 68 91 105 42 15 33 76 12 58 99 29 64")
+    echo "  [TC18] 분할 생성 완료: staging ${staging_count}개(3MB), toupload ${toupload_count}개(3MB), archive ${archive_count}개(${archive_mb}MB)"
+    sync
+
+    dump_cmd ls -la "${d1_glob}"* "${d2_glob}"* "${d3_glob}"*
+    dump_cmd df -h "${STAGING_DIR}"
+    local after_permille
+    after_permille=$(disk_free_permille "${STAGING_DIR}")
+    echo "  [TC18] 더미 배치 후 여유율: ${after_permille}‰"
+
+    if [ "$after_permille" -lt 100 ]; then
+        assert "TC18-1: 더미 배치로 파티션 여유율이 10% 미만으로 낮춰짐" "PASS"
+    else
+        assert "TC18-1: 더미 배치로 파티션 여유율이 10% 미만으로 낮춰짐" "FAIL"
+        echo "  여유율 ${after_permille}‰ (목표 <100‰) — archive_mb 재계산 필요"
+        rm -f "${d1_glob}"* "${d2_glob}"* "${d3_glob}"*
+        return
+    fi
+
+    local d1_prefix d2_prefix d3_prefix
+    d1_prefix=$(basename "$d1_glob")
+    d2_prefix=$(basename "$d2_glob")
+    d3_prefix=$(basename "$d3_glob")
+
+    # 전체 경로로 매칭 필수(TC12/TC14/TC16 관례) — "system_log"만 쓰면 이 스크립트
+    # 자신(tc_system_log.sh)까지 걸려 엉뚱한 PID를 집는 사고가 날 수 있다.
+    local SL_PID
+    SL_PID=$(pgrep -f /edge/app/bin/system_log | head -1)
+
+    echo "  [TC18] systemctl restart docker-loader 트리거 (현재 system_log PID ${SL_PID})..."
+    dump_cmd systemctl restart docker-loader
+
+    # [2026-09-04, serial 실측으로 확인] task_cleanup_logs()가 남기는 [cleanup] Removing:
+    # 로그는 실제로 찍히지만, 바로 다음 순서인 task_capture_boot_log()가 1초도 안 돼
+    # request_rotate_log() → `journalctl --rotate && journalctl --vacuum-files=1`을 호출해
+    # journald 자체 저장소에서 archived journal을 지워버린다(journald 자체 용량을 작게
+    # 유지하려는 정상 동작 — delete_old_journals()가 아니라 task_capture_boot_log() 소관).
+    # 그래서 restart "후" journalctl을 사후 조회하면 이미 지워지고 없다 — restart 직후
+    # `journalctl -f`를 20초만 background로 짧게 걸어 별도 파일에 사본을 떠두면, vacuum이
+    # journald 내부 저장소를 지우더라도 그 사본은 안전하다. timeout으로 자체 종료되니
+    # PID 추적/kill 불필요 — 뒤이은 90초 더미-소멸 폴링 동안 이미 다 끝나 있다.
+    local JOURNAL_CAP="/tmp/tc18_journal_capture.log"
+    rm -f "$JOURNAL_CAP"
+    timeout 20 journalctl -u docker-loader -f --no-pager -o short-iso > "$JOURNAL_CAP" 2>&1 &
+
+    # task_cleanup_logs()는 system_log_timer_loop() 시작 직후(92db92bb 이후 맨 앞)
+    # 동기 실행되므로 재시작 후 몇 초 내 반영된다 — TC12와 동일하게 최대 90초 폴링.
+    local i gone=0 staging_remain toupload_remain archive_remain
+    for i in $(seq 1 90); do
+        sleep 1
+        staging_remain=$(ls "${d1_glob}"*.log 2>/dev/null | wc -l)
+        toupload_remain=$(ls "${d2_glob}"*.xz 2>/dev/null | wc -l)
+        archive_remain=$(ls "${d3_glob}"*.xz 2>/dev/null | wc -l)
+        if [ "$staging_remain" -eq 0 ] && [ "$toupload_remain" -eq 0 ] && [ "$archive_remain" -eq 0 ]; then
+            gone=1
+            echo "  [${i}s] 더미 전부 소멸 감지"
+            break
+        fi
+        [ $((i % 20)) -eq 0 ] && echo "  [${i}s] 대기 중... staging 잔존=${staging_remain}개 toupload 잔존=${toupload_remain}개 archive 잔존=${archive_remain}개"
+    done
+    [ "$gone" -eq 0 ] && echo "  [WARN] 90초 내 더미 완전 소멸 미감지 — 현재 상태 기준으로 판정"
+
+    # [2026-09-04, 실측 후 추가] 파일이 사라진 것(unlink 반영)과 df가 그 블록 회수를
+    # 보고하는 것 사이에 지연이 있었다 — archive 더미(4.5GB급) 삭제 직후 곧바로 df를
+    # 찍으면 회수가 겨우 몇 MB만 반영되고, 몇 분 뒤 다시 찍으면 baseline까지 완전히
+    # 회복돼 있었다(`/edge/log`가 `commit=60`으로 마운트돼 있어 대용량 단일 파일 삭제의
+    # 블록 회수 반영이 지연되는 것으로 추정). `sync`로 강제 커밋을 요청한 뒤, df가
+    # 안정될 때까지 최대 30초 폴링해서 이 지연으로 인한 TC18-3 오탐(false negative)을
+    # 막는다.
+    sync
+    local j prev_permille=-1 stable_count=0 cur_permille
+    for j in $(seq 1 30); do
+        cur_permille=$(disk_free_permille "${STAGING_DIR}")
+        if [ "$cur_permille" -ge 200 ]; then
+            echo "  [df 안정화 ${j}s] 여유율 ${cur_permille}‰ (목표 도달)"
+            break
+        fi
+        if [ "$cur_permille" -eq "$prev_permille" ]; then
+            stable_count=$((stable_count + 1))
+            [ "$stable_count" -ge 3 ] && { echo "  [df 안정화 ${j}s] 여유율 ${cur_permille}‰ (더 안 변함, 폴링 종료)"; break; }
+        else
+            stable_count=0
+        fi
+        prev_permille="$cur_permille"
+        sync
+        sleep 1
+    done
+
+    dump_cmd ls -la "${STAGING_DIR}" "${TOUPLOAD_DIR}" "${ARCHIVE_DIR}"
+    dump_cmd df -h "${STAGING_DIR}"
+    cur_permille=$(disk_free_permille "${STAGING_DIR}")
+    echo "  [TC18] 현재 여유율: ${cur_permille}‰"
+
+    # 파일 부재만으로는 "cleanup이 지웠다"는 걸 확정할 수 없으므로, journald에서
+    # cleanup_if_low_disk_space()/delete_oldest_files_until_safe()가 실제로 발화한
+    # 직접 증거를 같이 남긴다 — restart 직후 20초만 떴던 백그라운드 캡처($JOURNAL_CAP,
+    # timeout으로 이미 자체 종료됨)에서 읽는다(라이브 journalctl 재조회 아님 —
+    # task_capture_boot_log()의 vacuum-files=1이 이미 원본을 지웠을 수 있어 사후 조회는
+    # 신뢰 불가, 위 트리거 직후 주석 참고).
+    dump_cmd wc -l "$JOURNAL_CAP"
+    dump_cmd sh -c "grep -F '[cleanup_if_low_disk_space]' '$JOURNAL_CAP'"
+    dump_cmd sh -c "grep -F '[cleanup] Removing:' '$JOURNAL_CAP'"
+
+    local removed_log found1_count=0 found2_count=0 found3_count=0
+    removed_log=$(grep -F '[cleanup] Removing:' "$JOURNAL_CAP" 2>/dev/null)
+    # 3곳 모두 여러 개로 쪼갰으므로 각 접두어로 몇 개나 매치되는지 센다(1개 이상이면 그
+    # 디렉토리에서 실제로 발화한 것).
+    found1_count=$(echo "$removed_log" | grep -cF "$d1_prefix")
+    found2_count=$(echo "$removed_log" | grep -cF "$d2_prefix")
+    found3_count=$(echo "$removed_log" | grep -cF "$d3_prefix")
+    echo "  [TC18] journald [cleanup] Removing 매치: staging=${found1_count}개 toupload=${found2_count}개 archive=${found3_count}개"
+
+    local staging_remain_final toupload_remain_final archive_remain_final
+    staging_remain_final=$(ls "${d1_glob}"*.log 2>/dev/null | wc -l)
+    toupload_remain_final=$(ls "${d2_glob}"*.xz 2>/dev/null | wc -l)
+    archive_remain_final=$(ls "${d3_glob}"*.xz 2>/dev/null | wc -l)
+
+    # [2026-09-04 정정] "3곳 전부 파일 부재"는 delete_oldest_files_until_safe의 실제
+    # 설계(파티션 전체 여유율이 목표(20%)에 도달하면 그 즉시 멈춤 — 남은 파일을 끝까지
+    # 다 지우는 게 아님)와 안 맞는 기준이었다. 실측(2026-09-04)에서도 archive 89개 중
+    # 13개만 지우고 20.397%에서 멈췄는데 이걸 FAIL로 오판정했다. 그래서 "파일 개수가
+    # 실제로 줄었는지"(생성량 대비 잔존량 감소, filesystem 관점의 독립 증거 — TC18-4의
+    # journal 로그 증거와는 별개 채널)로 바꾼다: 3곳 중 최소 1곳에서라도 개수가 줄면 PASS.
+    local staging_removed toupload_removed archive_removed
+    staging_removed=$(( staging_count - staging_remain_final ))
+    toupload_removed=$(( toupload_count - toupload_remain_final ))
+    archive_removed=$(( archive_count - archive_remain_final ))
+    echo "  [TC18] 파일 개수 감소(생성 대비 잔존): staging ${staging_count}→${staging_remain_final}(${staging_removed}개 감소) toupload ${toupload_count}→${toupload_remain_final}(${toupload_removed}개 감소) archive ${archive_count}→${archive_remain_final}(${archive_removed}개 감소)"
+    if [ "$staging_removed" -ge 1 ] || [ "$toupload_removed" -ge 1 ] || [ "$archive_removed" -ge 1 ]; then
+        assert "TC18-2: SYSTEM_LOG_DIRS 중 최소 1곳에서 더미 파일 개수가 실제로 감소함(filesystem 관점 증거)" "PASS"
+    else
+        assert "TC18-2: SYSTEM_LOG_DIRS 중 최소 1곳에서 더미 파일 개수가 실제로 감소함(filesystem 관점 증거)" "FAIL"
+        echo "    3곳 전부 감소 없음 — cleanup이 전혀 발화하지 않았을 가능성"
+    fi
+
+    # 3곳 전부를 요구하지 않는다 — staging/toupload에 우리 더미 말고 다른 실제 파일이
+    # 남아있으면(운영 중 쌓인 실 로그 등) delete_oldest_files_until_safe가 그것들까지
+    # 오래된 순으로 같이 지우다 그 디렉토리만으로 20%를 채워버릴 수 있고, 그러면 archive
+    # 차례는 아예 오지도 않는다(뒤 디렉토리는 그 시점 여유율이 이미 10% 넘어 스킵) — 몇
+    # 곳에서 회수되는지는 그때그때 실제 파일 분포에 달려있어 우리가 통제할 수 없다.
+    # 그래서 "SYSTEM_LOG_DIRS 중 최소 1곳 이상에서 delete_oldest_files_until_safe가
+    # 실제로 돌았다"는 것만 직접 증거로 요구한다.
+    if [ "$found1_count" -ge 1 ] || [ "$found2_count" -ge 1 ] || [ "$found3_count" -ge 1 ]; then
+        assert "TC18-4: journald에 SYSTEM_LOG_DIRS 중 1곳 이상의 [cleanup] Removing 로그 존재 (실제 cleanup 경로로 삭제됐다는 직접 증거)" "PASS"
+        echo "    매치: staging=${found1_count}개 toupload=${found2_count}개 archive=${found3_count}개"
+    else
+        assert "TC18-4: journald에 SYSTEM_LOG_DIRS 중 1곳 이상의 [cleanup] Removing 로그 존재 (실제 cleanup 경로로 삭제됐다는 직접 증거)" "FAIL"
+        echo "    journal에 해당 로그가 하나도 없으면 파일이 없어졌더라도 cleanup이 지웠다는 증거가 아님"
+    fi
+
+    if [ "$cur_permille" -ge 200 ]; then
+        assert "TC18-3: 여유율이 20% 이상으로 회복됨" "PASS"
+    else
+        assert "TC18-3: 여유율이 20% 이상으로 회복됨" "FAIL"
+        echo "    현재 ${cur_permille}‰ (목표 >=200‰)"
+    fi
+
+    # 폴링 타임아웃으로 더미가 남았으면 디바이스 청결을 위해 여기서 정리(판정에는 영향 없음)
+    rm -f "${d1_glob}"*.log "${d2_glob}"*.xz "${d3_glob}"*.xz 2>/dev/null
+    rm -f "$JOURNAL_CAP"
 
     echo ""
     echo "============================================"
@@ -1685,6 +1988,14 @@ case "${1}" in
     --tc10-post)
         tc10_post
         ;;
+    --tc18)
+        tc18_low_disk_cleanup
+
+        echo ""
+        echo "============================================"
+        echo " 결과: PASS=${PASS}  FAIL=${FAIL}"
+        echo "============================================"
+        ;;
     --tc05)
         # TC05-4 단독 검증용 (TC05-1~3은 setup_rotate 필요, 여기선 TC05-4만 실행)
         tc05_compression
@@ -1801,7 +2112,7 @@ case "${1}" in
         # 스크립트의 표준 실행 순서를 그대로 따른다 — 사용자가 콤마 목록을 어떤 순서로
         # 넘기든 무관하게 항상 이 순서로 실행한다. TC09(factory_reset)는 toupload/staging을
         # 통째로 비우므로, 다른 TC와 같이 선택돼도 항상 맨 마지막에 오도록 배열 끝에 둔다.
-        for tc in TC01 TC02 TC03 TC04 TC05 TC06 TC07 TC08 TC11 TC12 TC13 TC14 TC15 TC16 TC17 TC09; do
+        for tc in TC01 TC02 TC03 TC04 TC05 TC06 TC07 TC08 TC11 TC12 TC13 TC14 TC15 TC16 TC17 TC18 TC09; do
             case ",${SELECTED}," in
                 *,${tc},*)
                     case "$tc" in
@@ -1821,6 +2132,7 @@ case "${1}" in
                         TC15) tc15_rotate_sync_compress_fail ;;
                         TC16) tc16_boot_log_compress_fail ;;
                         TC17) tc17_message_context_tid_pollution ;;
+                        TC18) tc18_low_disk_cleanup ;;
                     esac
                     ;;
             esac
@@ -1833,15 +2145,19 @@ case "${1}" in
         ;;
     --full)
         # 전체 실행: TC10(리부트 수반, SSH 세션이 끊겨 이 스크립트 안에서 이어갈 수 없어
-        # 유일하게 제외)만 빼고 TC01~09, 11~16 을 순서대로 실행한다. TC15/16이 각 8~9분+
-        # 걸려 빠른 실행(기본, 인자 없음) 대비 훨씬 길다 — 회귀 확인엔 기본 실행을,
-        # 릴리즈 전 전수 검증엔 --full 을 쓴다.
+        # 유일하게 제외)만 빼고 TC01~09, 11~16, 18 을 순서대로 실행한다. TC15/16이 각
+        # 8~9분+ 걸려 빠른 실행(기본, 인자 없음) 대비 훨씬 길다 — 회귀 확인엔 기본 실행을,
+        # 릴리즈 전 전수 검증엔 --full 을 쓴다. TC18은 2026-09-04 재설계로 reboot 대신
+        # systemctl restart docker-loader 트리거를 쓰게 되면서 --full/--only에 자연스럽게
+        # 편입됐다(더 이상 세션이 안 끊김) — 다만 실제 파티션을 소진시키는 파괴적 시험이라
+        # TC09(factory_reset) 직전에 둔다(TC18이 만든 상태를 TC09가 정리해주는 효과도 있음).
         run_quick_set
 
         # system_log kill/재시작을 수반하는 TC16보다 먼저 대용량 journal 주입 TC15를 둔다
         # (빠른 실행 순서에 TC15/16을 이어붙이는 형태 — TC14 뒤, TC09 앞).
         tc15_rotate_sync_compress_fail
         tc16_boot_log_compress_fail
+        tc18_low_disk_cleanup
 
         # TC09(factory_reset)는 toupload/staging을 통째로 비운다 — 뒤늦게(backlog로 밀려)
         # 처리돼도 더 건드릴 대상이 없도록 항상 맨 마지막에 실행한다.
@@ -1859,8 +2175,9 @@ case "${1}" in
     *)
         # 빠른 실행(회귀 세트): TC10(리부트 수반, SSH 세션이 끊겨 이 스크립트 안에서 이어갈
         # 수 없음)과 TC15/16(대용량 journal 주입 + 180s 타임아웃 대기로 각각 8~9분+ 걸려
-        # 빠른 실행을 지나치게 길게 만듦)을 제외하고 TC01~09, 11~14 를 순서대로 실행한다.
-        # 전체(TC01~09, 11~16)는 --full 참조.
+        # 빠른 실행을 지나치게 길게 만듦), TC18(실제 파티션을 소진시키는 파괴적 시험이라
+        # 매 회귀 실행마다 도는 건 과함)을 제외하고 TC01~09, 11~14 를 순서대로 실행한다.
+        # 전체(TC01~09, 11~16, 18)는 --full 참조.
         run_quick_set
 
         # TC09(factory_reset)는 toupload/staging을 통째로 비운다 — 뒤늦게(backlog로 밀려)
@@ -1872,12 +2189,13 @@ case "${1}" in
         echo " 결과: PASS=${PASS}  FAIL=${FAIL}"
         echo "============================================"
         echo ""
-        echo "[안내] TC10(리부트)/TC15/TC16/TC17 은 별도 실행 (빠른 실행/--full 모두 미포함):"
+        echo "[안내] TC10(리부트)/TC15/TC16/TC17/TC18 은 별도 실행 (빠른 실행/--full 모두 미포함):"
         echo "  ./tc_system_log.sh --tc10-pre   (재부팅 발생)"
         echo "  ./tc_system_log.sh --tc10-post  (SSH 재접속 후)"
         echo "  ./tc_system_log.sh --tc15       (rotate_sync compress 실패, 8분+)"
         echo "  ./tc_system_log.sh --tc16       (boot_log compress 실패, 9분+)"
         echo "  ./tc_system_log.sh --tc17       (MessageContext tid 미검증 재현 — TC17-1 위조 응답 소비/크래시 + TC17-2 진짜 요청 무결성)"
-        echo "  ./tc_system_log.sh --full       (TC01~09, 11~16 전체, TC15/16 포함, TC17은 미포함)"
+        echo "  ./tc_system_log.sh --tc18       (저장공간 부족 cleanup, systemctl restart docker-loader 트리거 — 파괴적, 사전조건 미충족 시 자동 SKIP)"
+        echo "  ./tc_system_log.sh --full       (TC01~09, 11~16, 18 전체, TC17은 미포함)"
         ;;
 esac

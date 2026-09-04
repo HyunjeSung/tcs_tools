@@ -928,6 +928,176 @@ status=success여도 조용한 오염 사례(실측으로 확인됨).
 
 ---
 
+## TC18 — 저장공간 부족(<10%) 시 SYSTEM_LOG_DIRS cleanup
+
+### 목적
+
+`/edge/log` 파티션 여유공간이 10% 미만으로 떨어졌을 때, `system_log`가 `SYSTEM_LOG_DIRS =
+{STAGING_DIR("/edge/log/system"), TOUPLOAD_DIR(SYSTEM_LOG_PATH, "/edge/log/toupload/system/"),
+ARCHIVE_DIR("/edge/log/system/archive")}` 3개 디렉토리를 순회하며 `cleanup_log_dir()` →
+`cleanup_if_low_disk_space()` → `delete_oldest_files_until_safe()`로 오래된 파일(`.xz`/
+`.log`/`.meta`)부터 삭제해 여유공간을 회복시키는지 검증한다.
+
+> **재설계 이력 (2026-09-04):** 최초 버전은 더미 배치 후 실제 `reboot`으로 재현했다.
+> 하지만 대용량(GB급) 쓰기 직후 `reboot`하면 — `sync` 2회, 이중 sync, `/proc/meminfo`
+> Dirty/Writeback 폴링까지 다 동원해봐도 — **더미가 cleanup 로그 증거 없이 통째로
+> 사라지는 현상이 반복 재현**됐다. 같은 조건에서 `reboot` 대신
+> `systemctl restart docker-loader`(전원 재부팅 없이 앱만 재시작)로 트리거를 바꾸면
+> cleanup이 `[cleanup_if_low_disk_space]`/`[cleanup] Removing:` 로그까지 남기며 매번
+> 정상 발화하는 것을 실측으로 확인했다. 또한 실제 필드 버그 리포트(디스크 사용률이
+> 91%→71%→31%→11%로 여러 날에 걸쳐 점진적으로 회복된 사례)와 대조해보면, 그 패턴은
+> "cleanup이 완전히 실패한다"가 아니라 "cleanup이 여러 차례에 걸쳐 정상적으로 누적
+> 동작한다"는 증거였다 — 즉 "대용량 쓰기 직후 즉시 reboot"이라는 조합 자체가 실 필드
+> 시나리오에 없던, 이 TC의 재현 방법론이 만든 별개의 인위적 엣지 케이스였을 가능성이
+> 높다. 그래서 트리거를 `systemctl restart docker-loader`(TC12가 이미 쓰는 검증된
+> 패턴)로 바꾸고, `reboot` 관련 유실 현상 자체는 원인 불명·실 필드 패턴 불일치로 이 TC
+> 범위에서 제외해 별도 이슈로만 추적한다. 이 전환으로 SSH/시리얼 세션이 더 이상 안
+> 끊기게 돼 `--only`/`--full`에도 자연스럽게 편입됐다(TC10처럼 별도 pre/post로 나눌
+> 필요가 없어짐).
+
+> **더미 mtime을 30일 미만으로 두는 이유:** `cleanup_log_dir()`는 이 TC가 검증하려는
+> 저장공간-부족 경로(`cleanup_if_low_disk_space`) 외에도, 매 호출마다 **여유공간과
+> 무관하게 30일(`LOG_RETAIN_DAY`) 지난 파일을 무조건 삭제**하는 `delete_log()`를 먼저
+> 실행한다. 더미를 30일 이상 오래된 것으로 만들면 두 경로가 뒤섞여 "저장공간 부족 시
+> 정말로 `cleanup_if_low_disk_space`가 지운 것"인지 판별이 흐려진다. 그래서 더미
+> mtime을 1일 전으로 둔다 — `delete_oldest_files_until_safe()`는 mtime이 아니라 "그
+> 순간 파티션 여유율<10%"만으로 삭제 여부를 결정하므로, 1일 전이어도 최우선(가장 오래된
+> 순서) 삭제 대상이 되는 데는 지장이 없다.
+
+> **더미 배치 설계 근거 (및 한계):** `task_cleanup_logs()`는 `SYSTEM_LOG_DIRS`를
+> STAGING→TOUPLOAD→ARCHIVE 순서로 순회하고, 각 디렉토리 처리 시점마다
+> `cleanup_if_low_disk_space()`가 **그 순간의 파티션 전체 여유율**을 다시 확인한다
+> (`free_ratio >= threshold_percent(10)`이면 그 디렉토리는 그냥 스킵). 그래서
+> STAGING/TOUPLOAD엔 트리거 여부만 확인할 작은 더미(합쳐서 3MB, 1MB×3개 분할)를,
+> ARCHIVE엔 실제 회복을 담당할 큰 더미(8~105MB대 여러 개 분할)를 두는 구성으로
+> 만들었다 — **세 디렉토리 전부 단일 거대 파일이 아니라 여러 개로 쪼갠다**
+> (`system_log_partition.txt` 참고 사례처럼 실제로는 파일이 여러 개 쌓인 형태이고,
+> `delete_oldest_files_until_safe`가 오래된 순으로 순차 삭제하는 과정도 관찰할 수
+> 있게 하기 위함, 2026-09-04 사용자 확인). 다만 STAGING/TOUPLOAD에 우리 더미 말고
+> 다른 실제 운영 파일이 남아있으면 `delete_oldest_files_until_safe()`가 그것들까지
+> 오래된 순으로 같이 지우다 그 디렉토리만으로 20%를 채워버릴 수 있고, 그러면 ARCHIVE
+> 차례는 아예 오지 않을 수 있다 — 몇 곳에서 회수되는지는 실제 파일 분포에 달려있어
+> 스크립트가 통제할 수 없다. 그래서 TC18-4는 "세 디렉토리 모두"가 아니라
+> "SYSTEM_LOG_DIRS 중 최소 1곳 이상에서 실제로 발화했다"만 직접 증거로 요구한다.
+
+### 사전 조건
+
+- 공통 전제 조건 충족
+- **예외 케이스 전용 파괴적 시험**: 실제 파티션 여유공간을 소진시킨다. 시험 시작 시점
+  `/edge/log` 파티션 여유율이 **25% 이상**이어야 하며(더미 삭제만으로 코드의 회복
+  목표치(threshold_percent*2=20%)를 확정적으로 넘기기 위한 마진, 실제 로그 파일을
+  건드릴 위험 배제) — 그 외엔 여유율이 얼마든 목표 여유율(9%, 10% 트리거 바로 아래)까지
+  낮추는 데 필요한 만큼 실제로 더미를 채운다. 안전 상한(`TC18_MAX_FILL_MB`, 기본
+  6144MB)은 df 파싱이 완전히 깨진 극단적 케이스만 걸러내는 최후 안전장치일 뿐, 정상적인
+  여유율 범위에서 필요한 더미량을 막지 않는다.
+
+  > **실측(2026-09-04, 192.168.10.25):** 5.9GB 파티션(`/dev/mmcblk2p9` → `/edge/log`)에서
+  > 여유율 85%(`df -h` 기준 Used 10%와 혼동 주의 — `df`의 Capacity% 컬럼은 **사용률**이지
+  > 여유율이 아니다). 이 상태에서 10% 밑으로 낮추려면 더미가 약 4.55GB 필요 — 안전 상한
+  > 6144MB 이내라 그대로 채워서 시험이 진행된다.
+- `systemctl restart docker-loader` 실행 권한(root), `pgrep`, `dd`, `df -P`, `touch -d`,
+  `awk` 사용 가능
+- 다른 TC와 동시 실행 금지 (파티션 여유공간을 실제로 바꾸는 시험이라 TC04/15/16 등
+  디스크 여유공간을 전제하는 다른 TC와 겹치면 서로 오판을 유발할 수 있음)
+
+### 절차
+
+1. `df -P`로 `STAGING_DIR`가 속한 파티션의 `total_kb`/`avail_kb`/여유율(퍼밀) 확인
+2. 사전 조건(여유율 ≥25%, 목표 여유율까지 낮추는 데 필요한 용량 ≤ 안전 상한) 확인 —
+   미충족 시 TC18-0 FAIL 기록 후 더미 생성 없이 즉시 종료(SKIP)
+3. 더미 생성 (**세 디렉토리 전부 단일 파일이 아니라 여러 개로 분할**, 2026-09-04
+   사용자 확인): `staging`(1MB×3개 분할, `.log`), `toupload`(1MB×3개 분할, `.xz`),
+   `archive`(나머지 전체를 **8~105MB대 여러 개 파일로 분할** — 실제 로그 rotation
+   크기에 가까운 청크 여러 개로 나눠서, `delete_oldest_files_until_safe`가 오래된
+   것부터 순차적으로 지우는 걸 관찰할 수 있게 함) — 총량은 파티션 여유율을 9% 부근
+   (10% 트리거 바로 아래)까지 낮추도록 매 실행 시 동적 계산
+4. 모든 더미를 `touch -d "1 day ago"`(archive는 파일마다 1분씩 어긋나게, 모두 1일 전
+   기준)로 mtime 설정(30일 미만 — day-retention 경로와 섞이지 않게 함, 오래된 순서도
+   결정적으로 확인 가능)
+5. `df -P`로 더미 배치 후 여유율 재확인 — 10% 미만으로 낮아졌는지 확인
+6. `systemctl restart docker-loader` 실행(system_log 포함 재시작, TC12와 동일 트리거
+   패턴) — `task_cleanup_logs()`가 재시작 직후(`system_log_timer_loop()` 시작 직후,
+   92db92bb 이후 맨 앞) 동기 실행된다. 트리거 직후 **`journalctl -u docker-loader -f
+   --no-pager -o short-iso`를 `timeout 20`으로 20초만 백그라운드 실시간 캡처**해 별도
+   파일(`/tmp/tc18_journal_capture.log`)에 사본을 떠둔다(아래 Flag 참고) — `timeout`으로
+   자체 종료되므로 PID 추적/kill 불필요
+7. 더미가 모두 사라질 때까지 최대 90초, 1초 간격 폴링(TC12와 동일 예산) — 이 동안 위
+   20초 캡처는 이미 자체 종료돼 있다
+8. **`sync` 강제 실행 후 `df -P`가 안정될 때까지 최대 30초 폴링**(아래 Flag 참고),
+   현재 여유율 확인
+9. **캡처 파일에서**(라이브 재조회 아님, 아래 Flag 참고) `cleanup_if_low_disk_space()`/
+   `delete_oldest_files_until_safe()`가 실제로 발화한 직접 증거를 확인:
+   `[cleanup_if_low_disk_space]`(발화 여부), `[cleanup] Removing:`(어떤 파일을
+   지웠는지) 로그를 `dump_cmd`로 통째 캡처하고, 더미 파일명 중 **1개 이상**이
+   `[cleanup] Removing:` 로그에 등장하는지 확인
+10. 파티션 여유율이 20% 이상으로 회복됐는지 확인
+
+> **주의 (Flag, 2026-09-04 추가, df 지연):** archive 더미(4.5GB급)가 실제로 `[cleanup]
+> Removing:` 로그까지 남기며 삭제됐는데도, 그 직후 곧바로 `df`를 찍으면 여유율 회수가
+> 겨우 몇 MB만 반영되고(예: 537M→544M), 몇 분 뒤 다시 확인하면 baseline까지 완전히
+> 회복돼 있는 게 실측됐다(`du -sh`로 블록도 실제로 비었음을 확인) — `/edge/log`가
+> `commit=60`으로 마운트돼 있어(기본 5초 대비 12배 긴 간격) 대용량 단일/누적 삭제의
+> 블록 회수 반영이 지연되는 것으로 추정된다. `sync`를 강제로 호출한 뒤 `df`가 안정될
+> 때까지 짧게 폴링해서, 이 지연으로 인한 TC18-3 오탐(false negative)을 막는다.
+
+> **주의 (Flag, 2026-09-04 추가, journal 증거 소멸 — serial 실측으로 원인 특정):**
+> restart 이후 `journalctl -u docker-loader`를 사후 조회하면 `[cleanup] Removing:`
+> 로그가 매번 0건이었다. 처음엔 "cleanup이 증거 없이 파일만 지운다"는 미스터리로
+> 의심했으나, `journalctl -f` 백그라운드 실시간 tail(시리얼 콘솔로 직접 확인)로 대조한
+> 결과 **로그는 실제로 정상 발화**한다(`[cleanup] Removing: ...` 19건 전부 + `[cleanup]
+> Enough space recovered: 20.397%`까지 확인). 문제는 그 직후(260ms 뒤) `task_cleanup_logs()`
+> 바로 다음 순서로 매 시작마다 호출되는 **`task_capture_boot_log()`**가
+> `request_rotate_log()` → `SYSTEM_LOG_CMD_ROTATE_VACUUM`(`journalctl --rotate &&
+> journalctl --vacuum-files=1`)을 실행해 journald 자체 저장소(같은 `/edge/log` 파티션)를
+> 작게 유지하려고 archived journal을 지워버리는 것 — 방금 남긴 `[cleanup] Removing:`
+> 로그까지 같이 날아간다. `delete_old_journals()`(machine-id 불일치 디렉토리만 지움,
+> 무관)가 아니라 `task_capture_boot_log()`가 원인이며, journald를 롤링 버퍼처럼 쓰고
+> 주기적으로 비우는 게 이 앱의 정상 설계라 코드 결함은 아니다 — 다만 이 때문에 "restart
+> 후 사후 조회"로는 근본적으로 증거를 못 잡는다. 그래서 절차 6에서 트리거 직후
+> `journalctl -f`를 20초만 별도 파일에 실시간 tail해 사본을 떠 두고, vacuum이 journald
+> 내부 저장소를 지우더라도 그 사본에서 읽는다(같은 파일을 매 시작마다 만드는
+> `task_capture_boot_log()`의 `systemlog_*.log.xz` 산출물도 이론상 같은 사본이 되지만,
+> 뒤이은 `task_merge_staged_logs()`가 곧바로 병합·업로드 큐로 옮겨 언제 사라질지 통제할
+> 수 없어 증거로 채택하지 않았다).
+
+> **주의 (Flag, 2026-09-04 추가, TC18-2 기준 정정):** 원래 TC18-2는 "3곳 모두 파일
+> 부재"를 요구했는데, 이는 `delete_oldest_files_until_safe()`의 실제 설계(파티션 전체
+> 여유율이 목표(threshold_percent*2=20%)에 도달하는 순간 그 디렉토리 처리를 멈춤 — 남은
+> 파일을 끝까지 다 지우는 게 아님)와 안 맞는 기준이었다. 실측(2026-09-04)에서 archive
+> 더미 89개 중 13개만 지우고 20.397%에서 정상적으로 멈췄는데, 이걸 "3곳 모두 삭제
+> 안 됨"으로 FAIL 오판정했다. 그래서 "3곳 중 최소 1곳에서라도 파일 개수가 실제로
+> 줄었는지"(생성량 대비 잔존량 감소)로 완화했다 — TC18-4(journal 로그 증거)와는 독립된
+> filesystem 관점의 보조 증거로만 쓰고, "전부 삭제"를 더 이상 정상 기준으로 삼지 않는다.
+
+> **왜 파일 부재만으론 부족한가:** 더미가 사라졌다는 사실만으로는 "cleanup 코드 경로가
+> 지운 것"과 다른 원인(예: 알 수 없는 유실)을 완전히 구분할 수 없다. `[cleanup]
+> Removing: <path>`는 삭제 루프(`delete_oldest_files_until_safe`)가 그 파일을 실제로
+> 지목해 `EdgeUtils::remove_file()`을 호출했다는 코드 레벨 증거이므로, 이걸 하나도 못
+> 찾으면 파일이 없어졌더라도 TC18-4는 FAIL로 남아 "증거 없음"을 명시적으로 드러낸다.
+
+### 기대 결과
+
+| 항목 | 기준 |
+|------|------|
+| 사전 조건 | 여유율 ≥25% AND 필요 소진량 ≤ 안전 상한 |
+| 더미 배치 후 여유율 | 10% 미만 |
+| 더미 (restart 후) | SYSTEM_LOG_DIRS 중 최소 1곳에서 더미 파일 개수가 실제로 감소함 (전부 삭제까지는 요구하지 않음 — 아래 Flag 참고) |
+| journald 삭제 증거 (restart 후) | 3개 더미 파일명 중 1개 이상이 `[cleanup] Removing:` 로그에 등장 |
+| 파티션 여유율 (restart 후) | 20% 이상으로 회복 |
+
+### PASS/FAIL Criteria
+
+| 기준 ID | 설명 | 타입 | 기준값 | 셸 검증 |
+|---------|------|------|--------|---------|
+| TC18-0 | 사전 조건 충족(여유율≥25% AND 필요 소진량≤안전상한 6144MB) — 미충족 시 이후 절차 생략 | boolean | true | df 파싱값 기반 계산 |
+| TC18-1 | 더미 배치로 파티션 여유율이 10% 미만으로 낮춰짐 | boolean | true | `[ "$after_permille" -lt 100 ]` |
+| TC18-2 | SYSTEM_LOG_DIRS 중 최소 1곳에서 더미 파일 개수가 실제로 감소함 (filesystem 관점 증거, TC18-4의 journal 증거와는 독립 채널) | boolean | true | `staging_removed>=1 \|\| toupload_removed>=1 \|\| archive_removed>=1` (각 `생성개수 - 잔존개수`) |
+| TC18-4 | journald에 SYSTEM_LOG_DIRS 중 1곳 이상의 `[cleanup] Removing:` 로그 존재 (실제 cleanup 코드 경로로 삭제됐다는 직접 증거) | boolean | true | 3개 디렉토리 접두어(`tc18_dummy_staging_`/`toupload_`/`archive_`) 중 1개 이상 `journalctl -u docker-loader \| grep -F '[cleanup] Removing:'` 결과에 매치 |
+| TC18-3 | 여유율이 20% 이상으로 회복됨 | boolean | true | `[ "$cur_permille" -ge 200 ]` |
+
+---
+
+
 ## 환경 변수 (Environment Variables)
 
 | 변수 | 기본값 | 설명 |
@@ -975,6 +1145,7 @@ status=success여도 조용한 오염 사례(실측으로 확인됨).
 | TC15 | A (자동) | task_rotate_sync compress 실패 시 raw .log 보존 — journal 대량 주입으로 180s 타임아웃 강제 유발 |
 | TC16 | A (자동) | task_capture_boot_log compress 실패 시 raw .log 보존 — TC15와 동일 기법 + `kill -9 system_log` 재시작 |
 | TC17 | A (자동) | MessageContext tid 미검증 재현 — cmd_host 응답 위조(`mosquitto_pub`) 직접 발행, 회귀 세트 미포함(단독 실행 전용) |
+| TC18 | A (자동) | 저장공간 부족(<10%) 시 SYSTEM_LOG_DIRS cleanup — 예외 케이스 전용 파괴적 시험이라 기본 실행 미포함이지만, `systemctl restart docker-loader` 트리거로 재설계(2026-09-04)돼 reboot 없이 단일 실행으로 완결됨. `--full`/`--only`에 포함, 기본 실행에는 미포함. 사전 조건(여유율≥25%) 미충족 시만 자동 SKIP — 그 외엔 여유율만큼 실제로 채움(실측: 개발 DUT 여유율 85%에서 더미 약 4.55GB) |
 
 ---
 
