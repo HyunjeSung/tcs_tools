@@ -780,6 +780,7 @@ system_log를 `kill -9` 하면 edge_runtime이 재시작하고 startup 시
 | TC14-2 | toupload .log.xz 신규 생성됨 | boolean | true | `[ "$AFTER_TOUPLOAD" -gt "$BEFORE_TOUPLOAD" ]` |
 | TC14-3 | 병합 파일 start_time = BOOT_START | boolean | true | `[ "$new_start" = "$BOOT_START" ]` |
 | TC14-4 | 병합 파일 xz 무결성 | exit code | 0 | `xz --test "$NEW_XZ"` |
+| TC14-5 | 병합 결과에 더미 A/B가 정확히 1번씩 포함 — 재귀/자기복사 증가 없음 + `.merging_*.tmp` 잔존 없음 (2026-10-06 추가) | boolean | true | 더미 내용에 고유 마커(`TC14_DUMMY_A_n`/`TC14_DUMMY_B_n`, 각 2000줄)를 넣고 `xz -dc "$NEW_XZ" \| grep -c` 가 각각 정확히 2000. 병합은 .xz 스트림 바이트 연결이라, 예전 merge 버그(병합 결과 경로가 입력과 같아 자기복사 → 무한 증가, `repro_merge_bug.sh`)가 재발하면 중복돼 2000을 넘는다. 중복된 결과도 `xz --test`는 통과하므로 TC14-4만으로는 못 잡음(로컬 재현 확인) |
 
 ---
 
@@ -915,6 +916,14 @@ system_log를 `kill -9` 하면 edge_runtime이 재시작하고 startup 시
    원문 캡처
 10. `BEFORE_HEAD` = `journalctl --list-boots | head -n1` 기록, toupload `.log`(xz
     아닌) 목록 스냅샷(`BEFORE_LIST`)
+> **[2026-10-06] keep-full 재충전:** journal이 `/var/log` → `/edge/log/system`, 즉 filler로 채우는 같은
+> 파티션에 있다. system_log는 dump → `journalctl --rotate && --vacuum-files=1` → xz 순서라 vacuum이 지난
+> journal(주입한 48MB 포함)을 지우며 공간이 다시 생겨 xz가 성공해버리는 비결정성이 있었다(R090127 실측
+> 4회 중 2회 성공). 트리거 직전 archived journal 목록이 사라지는 순간(= vacuum 완료)부터 백그라운드
+> (`start_keep_full`)가 0.5초마다 true-free를 16MB만 남기고 다시 채워(`keep_*.bin`, filler 디렉토리 안)
+> 이후 xz를 결정적으로 ENOSPC로 만든다. vacuum 전에는 손대지 않아 dump는 계획한 RESERVE 안에서 성공한다.
+> 16MB는 journald가 판정 근거 로그를 계속 기록할 여유. 재충전 기록은 cleanup 직전 output.log에 남긴다.
+
 11. `get_log_data` 요청 송신, 최대 300초 대기 — 응답은 task_rotate_sync 종료 후에 오므로 곧 compress
     결과 확정 신호. ENOSPC 도달 시간은 xz 레벨에 좌우(xz -0 빌드는 수 초, 기본 레벨 R090127은 127초
     실측)되어, 90초 대기로는 partial .xz가 아직 쓰이는 중에 판정한 오판이 있었음(2026-10-06)
@@ -974,7 +983,7 @@ system_log를 `kill -9` 하면 edge_runtime이 재시작하고 startup 시
 | TC15-3 | `.meta` 생성되지 않음 | boolean | true | `[ ! -f "${NEW_LOG}.xz.meta" ]` |
 | TC15-4 | compress 실패 경로(ENOSPC) ERROR 로그 등장, dump 실패 메시지 아님 | boolean | true | `journalctl -u docker-loader \| grep -F "[task_rotate_sync] Failed to compress log!!"` 매치 AND `Failed to make log!!` 없음 |
 | TC15-5 | 수동 재현: `xz --keep -0` 이 ENOSPC로 실패 | boolean | true | `manual_xz_exit -ne 0` AND stderr에 `No space left on device` 포함 |
-| TC15-6 | vacuum이 실행되어 list-boots head 변경됨 | boolean | true | `[ "$after_head" != "$before_head" ]` |
+| TC15-6 | compress 실패와 무관하게 vacuum 실행됨 | boolean | true | 트리거 직전 `/var/log/journal/*/system@*.journal`(archived) 목록 ≥1개가 트리거 후 전부 삭제됨(`comm -12` 잔존 0). 예전 판정(`list-boots` 첫 줄 비교)은 시간만 지나도 바뀌어 vacuum 여부와 무관하게 PASS 났음(2026-10-06 교체) |
 | TC15-7 | 정리 후 filler 잔재 없음 + 여유공간 AVAIL0의 95% 이상 복원 | boolean | true | `[ ! -d /edge/log/.tc15_disk_filler ]` AND `df -P /edge/log` 재확인값 ≥ AVAIL0×95% (상한 없음 — 업로드/vacuum으로 늘어나는 건 정상) |
 
 ---
@@ -1052,7 +1061,10 @@ system_log를 `kill -9` 하면 edge_runtime이 재시작하고 startup 시
 8. `mkdir -p /edge/log/.tc16_disk_filler` 후 `dd`/`fallocate`로 `FILLER_BYTES`만큼
    여러 파일로 분할 채움(TC15-절차8과 동일)
 9. `df -P /edge/log`로 채운 후 여유공간이 `RESERVE_BYTES` 근방인지 `dump_cmd`로 확인
-10. `BEFORE_HEAD` = `journalctl --list-boots | head -n1` 기록
+10. 트리거 직전 archived journal 목록(`/var/log/journal/*/system@*.journal`) 기록 + `start_keep_full`
+    시작(TC15 keep-full 재충전 Flag와 동일 — vacuum 후 여유공간 재충전으로 xz ENOSPC 결정화.
+    R09 빌드는 재시작 직후 `cleanup_if_low_disk_space`가 실제 로그를 지워 공간을 비우는 것도
+    재충전이 다시 메운다, 2026-10-06 실측)
 11. `kill -9 $(pgrep -f /edge/app/bin/system_log)` → edge_runtime 재시작 →
     `task_capture_boot_log()` 무조건 실행
 12. 최대 180초까지 journald를 2초 간격으로 폴링해 `[task_capture_boot_log] Done:`
@@ -1109,7 +1121,7 @@ system_log를 `kill -9` 하면 edge_runtime이 재시작하고 startup 시
 | TC16-3 | raw `.log`가 toupload로 잘못 이관되지 않음 | boolean | true | `find "${TOUPLOAD_DIR}" -name "$(basename "$NEW_LOG")*"` 결과 없음 |
 | TC16-4 | compress 실패 경로(ENOSPC) ERROR 로그 등장, dump 실패 메시지 아님 | boolean | true | `journalctl -u docker-loader \| grep -F "[task_capture_boot_log] Failed to compress log, keeping raw .log for diagnostics:"` 매치 AND `Failed to dump log` 없음 |
 | TC16-5 | 수동 재현: `xz --keep -0` 이 ENOSPC로 실패 | boolean | true | `manual_xz_exit -ne 0` AND stderr에 `No space left on device` 포함 |
-| TC16-6 | vacuum이 실행되어 list-boots head 변경됨 | boolean | true | `[ "$after_head" != "$before_head" ]` |
+| TC16-6 | compress 실패와 무관하게 vacuum 실행됨 | boolean | true | TC15-6과 동일 — 트리거(kill) 직전 archived journal 목록이 boot capture 후 전부 삭제됨 |
 | TC16-7 | 정리 후 filler 잔재 없음 + 여유공간 AVAIL0의 95% 이상 복원 | boolean | true | `[ ! -d /edge/log/.tc16_disk_filler ]` AND `df -P /edge/log` 재확인값 ≥ AVAIL0×95% (상한 없음 — 업로드/vacuum으로 늘어나는 건 정상) |
 
 ---
@@ -1375,7 +1387,7 @@ ARCHIVE_DIR("/edge/log/system/archive")}` 3개 디렉토리를 순회하며 `cle
 | TC18-1 | 더미 배치로 파티션 여유율이 10% 미만으로 낮춰짐 | boolean | true | `[ "$after_permille" -lt 100 ]` |
 | TC18-2 | SYSTEM_LOG_DIRS 중 최소 1곳에서 더미 파일 개수가 실제로 감소함 (filesystem 관점 증거, TC18-4의 journal 증거와는 독립 채널) | boolean | true | `staging_removed>=1 \|\| toupload_removed>=1 \|\| archive_removed>=1` (각 `생성개수 - 잔존개수`) |
 | TC18-4 | journald에 SYSTEM_LOG_DIRS 중 1곳 이상의 `[cleanup] Removing:` 로그 존재 (실제 cleanup 코드 경로로 삭제됐다는 직접 증거) | boolean | true | 3개 디렉토리 접두어(`tc18_dummy_staging_`/`toupload_`/`archive_`) 중 1개 이상 `journalctl -u docker-loader \| grep -F '[cleanup] Removing:'` 결과에 매치 |
-| TC18-3 | 여유율이 20% 이상으로 회복됨 | boolean | true | `[ "$cur_permille" -ge 200 ]` |
+| TC18-3 | 여유율이 20% 이상으로 회복됨 | boolean | true | 1순위: journal `[cleanup] Enough space recovered: X%`의 X ≥ 20 (코드가 `fs::space` available/capacity로 직접 측정한 값). 로그 없을 때만 `[ "$cur_permille" -ge 200 ]`. 회복 직후 `task_capture_boot_log`가 staging에 dump+xz를 써서 df 재측정값이 20% 바로 아래로 떨어질 수 있어 df는 참고 근거(2026-10-06 실측: 로그 20.2767% / df 197‰) |
 
 ---
 

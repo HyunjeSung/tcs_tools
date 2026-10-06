@@ -61,7 +61,7 @@ def _load_config() -> dict:
 
 
 def _load_version() -> dict:
-    """레포 루트의 VERSION(KEY=VALUE) — TCS_VERSION, EMS_TARGET_MIN. 없으면 빈 dict."""
+    """레포 루트의 VERSION(KEY=VALUE) — TCS_VERSION. 없으면 빈 dict."""
     version_path = REPO_ROOT / "VERSION"
     if not version_path.exists():
         return {}
@@ -73,21 +73,6 @@ def _load_version() -> dict:
         key, _, value = line.partition("=")
         values[key.strip()] = value.strip()
     return values
-
-
-def _ems_build_number(version: Optional[str]) -> Optional[int]:
-    """'R090127' → 90127. 형식이 다르면 None(비교 불가)."""
-    m = re.fullmatch(r"R(\d+)", (version or "").strip())
-    return int(m.group(1)) if m else None
-
-
-def _ems_mismatch(dut_version: Optional[str], target_min: Optional[str]) -> Optional[bool]:
-    """DUT EMS 빌드가 대상 최소 빌드보다 낮으면 True. 둘 중 하나라도 비교 불가면 None."""
-    dut_n = _ems_build_number(dut_version)
-    target_n = _ems_build_number(target_min)
-    if dut_n is None or target_n is None:
-        return None
-    return dut_n < target_n
 
 
 def _load_secrets() -> dict:
@@ -580,9 +565,6 @@ def _generate_result_md(app_cfg: dict, run_id: str, meta: dict, cases: list,
         f"**실행일시:** {meta.get('started_at', '')} ~ {meta.get('finished_at', '')}",
         f"**DUT:** {meta.get('dut_host', DUT_HOST)}:{meta.get('dut_port', DUT_PORT)} (qcells-emsplus, AC Gen2, aarch64)",
         f"**스크립트:** {app_cfg['tc_script'].name}",
-        f"**tcs_tools:** v{meta.get('tcs_version') or '?'} (대상 EMS >= {meta.get('ems_target_min') or '?'})",
-        f"**DUT EMS:** {meta.get('dut_ems_version') or '확인 불가'}"
-        + (" ⚠ 대상 EMS보다 낮음 — 일부 TC 결과가 빌드 차이로 오판됐을 수 있음" if meta.get('ems_mismatch') else ""),
         "",
         f"**총 결과: PASS={meta.get('pass', 0)} / FAIL={meta.get('fail', 0)} / SKIP={meta.get('skip', 0)} / {len(cases)}기준**",
         "",
@@ -984,8 +966,8 @@ async def _wait_run_proc(run_proc, log_path: Path, timeout: float, stall_timeout
 
 async def _stamp_dut_version(dut: dict, logf, run_dir: Path, run_state: dict):
     """DUT /etc/os-release의 BUILD_VERSION을 읽어 output.log 첫머리에 tcs/EMS 버전 배너를
-    남기고, meta.json에도 바로 반영한다(진행 중에도 화면에 보이도록). 대상 EMS보다 낮으면
-    경고만 하고 실행은 계속한다 — 실패해도 run을 막지 않는 best-effort."""
+    남기고, meta.json에도 바로 반영한다(진행 중에도 화면에 보이도록). 호환 판단은 하지 않고
+    기록만 한다(TC별 호환은 tc_ems_compat.md) — 실패해도 run을 막지 않는 best-effort."""
     version = _load_version()
     dut_version = None
     try:
@@ -997,14 +979,11 @@ async def _stamp_dut_version(dut: dict, logf, run_dir: Path, run_state: dict):
         dut_version = out.decode(errors="replace").strip() or None
     except Exception:
         dut_version = None
-    mismatch = _ems_mismatch(dut_version, version.get("EMS_TARGET_MIN"))
     run_state["dut_ems_version"] = dut_version
-    run_state["ems_mismatch"] = mismatch
 
+    # TC별 EMS 호환 여부는 tcs/<app>/tc_ems_compat.md 호환표로 관리 — 여기선 버전만 기록
     banner = (f"[VERSION] tcs_tools v{version.get('TCS_VERSION', '?')} | "
-              f"대상 EMS >= {version.get('EMS_TARGET_MIN', '?')} | DUT EMS {dut_version or '확인 불가'}")
-    if mismatch:
-        banner += " | ⚠ 불일치 — DUT 빌드가 대상보다 낮아 일부 TC가 오판될 수 있음"
+              f"DUT EMS {dut_version or '확인 불가'}")
     logf.write(f"{banner}\n".encode())
     logf.flush()
 
@@ -1012,7 +991,6 @@ async def _stamp_dut_version(dut: dict, logf, run_dir: Path, run_state: dict):
     try:
         meta = json.loads(meta_path.read_text())
         meta["dut_ems_version"] = dut_version
-        meta["ems_mismatch"] = mismatch
         _write_meta(run_dir, meta)
     except Exception:
         pass
@@ -1456,10 +1434,8 @@ async def run_tc(run_id: str, app_cfg: dict, entry: dict, channel: str, dut: dic
         # 달라 이 추정 자체가 성립하지 않는다.
         "tc_total": entry.get("expected_tc_count"),
         "tcs_version": _load_version().get("TCS_VERSION"),
-        "ems_target_min": _load_version().get("EMS_TARGET_MIN"),
         # SSH 채널은 _stamp_dut_version()이 실행 직전에 채운다(serial은 미지원 → None)
         "dut_ems_version": None,
-        "ems_mismatch": None,
     }
     _write_meta(run_dir, meta)
 
@@ -1483,7 +1459,6 @@ async def run_tc(run_id: str, app_cfg: dict, entry: dict, channel: str, dut: dic
 
         meta["exit_code"] = exit_code
         meta["dut_ems_version"] = run_state.get("dut_ems_version")
-        meta["ems_mismatch"] = run_state.get("ems_mismatch")
         text = log_path.read_text(errors="replace")
         pass_n, fail_n, cases = _parse_results(text, app_cfg)
         _record_case_times(log_path, app_cfg, case_times)  # 마지막 순간에 찍힌 case까지 마저 기록
@@ -1602,9 +1577,9 @@ def _on_startup():
 
 @app.get("/api/version")
 def api_version():
-    """헤더 표시용 — tcs_tools 버전과 대상 EMS 최소 빌드(VERSION 파일, 매 요청 재로딩)."""
+    """헤더 표시용 — tcs_tools 버전(VERSION 파일, 매 요청 재로딩)."""
     version = _load_version()
-    return {"tcs_version": version.get("TCS_VERSION"), "ems_target_min": version.get("EMS_TARGET_MIN")}
+    return {"tcs_version": version.get("TCS_VERSION")}
 
 
 @app.get("/api/apps")
@@ -1846,46 +1821,33 @@ async def api_run(req: RunRequest):
 
         reboot_tc_map = app_cfg.get("reboot_tc_map", {})
         reboot_selected = [t for t in ordered if t in reboot_tc_map]
-        if reboot_selected:
-            # 재부팅을 수반하는 TC(device_log의 TC06/07,15,20,26)는 세션이 끊겨 다른 TC와
-            # --only로 한 번에 묶을 수 없다 — 단독 선택만 허용하고, "전체 실행"과 같은
-            # -pre/-post 체이닝(_run_ssh_full_with_reboots)으로 실행한다.
-            if len(ordered) > 1:
-                raise HTTPException(
-                    400,
-                    f"재부팅을 수반하는 TC({', '.join(reboot_selected)})는 다른 TC와 함께 선택할 수 없습니다 — 단독으로 선택하세요",
-                )
-            tc = reboot_selected[0]
-            pre_id, post_id = reboot_tc_map[tc]
-            pre_entry = app_cfg["catalog_map"][pre_id]
-            post_entry = app_cfg["catalog_map"][post_id]
-            entry = {
-                "id": "custom",
-                "label": f"선택 실행 ({tc})",
-                "flag": None,
-                "timeout": 90,
-                "reboot": False,
-                "note": pre_entry.get("note"),
-                "chain_reboot_pairs": [(pre_id, post_id)],
-                "expected_tc_count": 1,
-            }
-        else:
+        normal_selected = [t for t in ordered if t not in reboot_tc_map]
+        # 재부팅 TC(system_log TC10, device_log TC06/07·15·20·26)는 세션이 끊겨 --only에
+        # 못 묶는다. [2026-10-06] 다른 TC와 함께 선택하면 일반 TC를 --only로 먼저 돌리고,
+        # 이어서 재부팅 TC마다 -pre → 재부팅 대기 → -post 를 체이닝한다("전체 실행"과 같은
+        # _run_ssh_full_with_reboots 경로). 일반 TC가 없으면 체이닝만 한다.
+        if normal_selected:
             # verify_timer_loop_started + (필요시) setup_rotate 오버헤드 여유분.
-            timeout = 90 + sum(custom_timeouts[t] for t in ordered)
+            timeout = 90 + sum(custom_timeouts[t] for t in normal_selected)
             # stall_timeout(무출력 정지 판정)은 STALL_TIMEOUT 기본값이 아니라 선택된 TC 중
             # "출력 없는 단일 대기"가 가장 긴 것 기준으로 잡는다 — device_log TC05(6시간+)처럼
             # 중간 출력이 전혀 없는 TC가 섞여 있으면 기본값(900s)으로는 오탐(false stall)한다.
-            stall_timeout = max(custom_timeouts[t] for t in ordered) + 300
-            entry = {
-                "id": "custom",
-                "label": f"선택 실행 ({', '.join(ordered)})",
-                "flag": f"--only {','.join(ordered)}",
-                "timeout": timeout,
-                "stall_timeout": stall_timeout,
-                "reboot": False,
-                "note": None,
-                "expected_tc_count": len(ordered),
-            }
+            stall_timeout = max(custom_timeouts[t] for t in normal_selected) + 300
+            flag = f"--only {','.join(normal_selected)}"
+        else:
+            timeout, stall_timeout, flag = 90, STALL_TIMEOUT, None
+        entry = {
+            "id": "custom",
+            "label": f"선택 실행 ({', '.join(normal_selected + reboot_selected)})",
+            "flag": flag,
+            "timeout": timeout,
+            "stall_timeout": stall_timeout,
+            "reboot": False,
+            "note": None,
+            "expected_tc_count": len(ordered),
+        }
+        if reboot_selected:
+            entry["chain_reboot_pairs"] = [reboot_tc_map[t] for t in reboot_selected]
     else:
         if req.tc_id not in app_cfg["catalog_map"]:
             raise HTTPException(400, "unknown tc_id")

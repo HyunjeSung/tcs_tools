@@ -1351,8 +1351,14 @@ tc14_rtc_same_start_merge() {
     # 4. 더미 .xz 2개 배치 (RTC 이상 시뮬레이션: 동일 start, 다른 end)
     local DUMMY_A="${STAGING_DIR}/systemlog_${BOOT_START}_${BOOT_START}01.log.xz"
     local DUMMY_B="${STAGING_DIR}/systemlog_${BOOT_START}_${BOOT_START}02.log.xz"
-    seq 1 2000 | xz -1 -c > "$DUMMY_A" 2>/dev/null
-    seq 1 2000 | xz -1 -c > "$DUMMY_B" 2>/dev/null
+    # 내용에 더미별 고유 마커를 넣는다 — 병합은 .xz 스트림 바이트 연결이라, 병합 결과를
+    # 풀었을 때 각 마커가 정확히 2000줄씩 있어야 정상이다. 예전 merge 버그(병합 결과 경로가
+    # 입력 b와 같아 자기 자신을 복사 → 파일 무한 증가, repro_merge_bug.sh)가 재발하면 중복된다.
+    seq -f "TC14_DUMMY_A_%g" 1 2000 | xz -1 -c > "$DUMMY_A" 2>/dev/null
+    seq -f "TC14_DUMMY_B_%g" 1 2000 | xz -1 -c > "$DUMMY_B" 2>/dev/null
+    local DUMMY_A_SIZE DUMMY_B_SIZE
+    DUMMY_A_SIZE=$(stat -c%s "$DUMMY_A" 2>/dev/null || echo 0)
+    DUMMY_B_SIZE=$(stat -c%s "$DUMMY_B" 2>/dev/null || echo 0)
     echo "  더미 배치 완료:"
     ls -lh "${STAGING_DIR}"/systemlog_*.log.xz 2>/dev/null | sed 's/^/    /'
 
@@ -1446,9 +1452,28 @@ tc14_rtc_same_start_merge() {
             assert "TC14-4: 병합 파일 xz 무결성 (xz --test)" "FAIL"
         fi
         echo "    병합 결과: $(basename "$NEW_XZ")"
+
+        # TC14-5: 재귀/자기복사 없음 — 더미 A/B 내용이 병합 결과에 정확히 1번씩(각 2000줄)
+        local a_lines b_lines merged_size dummy_size tmp_left
+        dump_cmd ls -la "$NEW_XZ"
+        merged_size=$(stat -c%s "$NEW_XZ" 2>/dev/null || echo 0)
+        dummy_size=$((DUMMY_A_SIZE + DUMMY_B_SIZE))
+        a_lines=$(xz -dc "$NEW_XZ" 2>/dev/null | grep -c '^TC14_DUMMY_A_')
+        b_lines=$(xz -dc "$NEW_XZ" 2>/dev/null | grep -c '^TC14_DUMMY_B_')
+        dump_cmd sh -c "xz -dc '$NEW_XZ' | grep -c '^TC14_DUMMY_A_'"
+        dump_cmd sh -c "xz -dc '$NEW_XZ' | grep -c '^TC14_DUMMY_B_'"
+        dump_cmd ls -la "${STAGING_DIR}"/.merging_*.tmp
+        tmp_left=$(ls "${STAGING_DIR}"/.merging_*.tmp 2>/dev/null | wc -l)
+        echo "    병합 크기=${merged_size}B (더미 합계 ${dummy_size}B + boot 캡처분), A=${a_lines}줄 B=${b_lines}줄, .merging tmp 잔존=${tmp_left}"
+        if [ "$a_lines" -eq 2000 ] && [ "$b_lines" -eq 2000 ] && [ "$tmp_left" -eq 0 ]; then
+            assert "TC14-5: 병합 결과에 더미 A/B가 정확히 1번씩 포함 (재귀/자기복사 증가 없음, .merging tmp 잔존 없음)" "PASS"
+        else
+            assert "TC14-5: 병합 결과에 더미 A/B가 정확히 1번씩 포함 (재귀/자기복사 증가 없음, .merging tmp 잔존 없음)" "FAIL" "A=${a_lines}/2000 B=${b_lines}/2000 tmp=${tmp_left}"
+        fi
     else
         assert "TC14-3: 병합 파일 start_time 확인" "FAIL"
         assert "TC14-4: 병합 파일 xz 무결성" "FAIL"
+        assert "TC14-5: 병합 결과에 더미 A/B가 정확히 1번씩 포함 (재귀/자기복사 증가 없음, .merging tmp 잔존 없음)" "FAIL" "병합 파일 없음"
         echo "    toupload에서 신규 파일 없음"
     fi
     rm -rf "$snap_dir"
@@ -1581,12 +1606,94 @@ tc_manual_xz_enospc_probe() {
     rm -f /tmp/tc_manual_xz_out_$$ "${target_log}.xz"
 }
 
+# vacuum 판정용 — archived journal 파일 목록. `journalctl --list-boots` 첫 줄 비교는 시간만
+# 지나도 바뀌어(끝 시각이 갱신됨) vacuum 여부와 무관하게 PASS가 났다(2026-10-06 점검).
+# 트리거 직전 archived 목록을 남기고, 트리거 후 그 파일들이 전부 지워졌는지로 판정한다
+# (system_log의 `journalctl --rotate && journalctl --vacuum-files=1`은 archived 전부 삭제).
+list_archived_journals() {
+    ls "${JOURNAL_DIR}"/*/system@*.journal 2>/dev/null | sort
+}
+
+# $1 = 트리거 직전 archived 목록, $2 = 판정 ID/설명. PASS/FAIL assert까지 수행.
+assert_archived_vacuumed() {
+    local before="$1" desc="$2" after before_n remain_n
+    dump_cmd sh -c "ls -la ${JOURNAL_DIR}/*/system@*.journal"
+    dump_cmd journalctl --disk-usage
+    after=$(list_archived_journals)
+    before_n=$(echo "$before" | grep -c .)
+    remain_n=$(comm -12 <(echo "$before") <(echo "$after") | grep -c .)
+    echo "  [vacuum] 트리거 전 archived ${before_n}개 중 잔존 ${remain_n}개"
+    if [ "$before_n" -ge 1 ] && [ "$remain_n" -eq 0 ]; then
+        assert "$desc" "PASS"
+    elif [ "$before_n" -eq 0 ]; then
+        assert "$desc" "FAIL" "트리거 전 archived journal이 없어 vacuum 여부 판정 불가"
+    else
+        assert "$desc" "FAIL" "트리거 전 archived ${remain_n}/${before_n}개가 그대로 남음 — vacuum 미실행"
+        comm -12 <(echo "$before") <(echo "$after") | sed 's/^/    잔존: /'
+    fi
+}
+
+# [2026-10-06] journal이 /var/log → /edge/log/system, 즉 filler로 채우는 바로 그 파티션에 있다.
+# system_log는 dump → `journalctl --rotate && --vacuum-files=1` → xz 순서라, vacuum이 지난 journal
+# (TC가 넣은 48MB 포함)을 지우면서 공간이 다시 생겨 xz가 성공해버렸다(R090127 실측 4회 중 2회).
+# 대책: 트리거 직전 archived journal($2)이 사라지는 순간(= vacuum 완료)부터 백그라운드로
+# true-free를 KEEP_FULL_FREE_KB 수준으로 0.5초마다 다시 메운다 → 이후 xz는 결정적으로 ENOSPC.
+# vacuum 전에는 손대지 않아 dump는 계획한 RESERVE 안에서 성공한다. 도중에 다른 정리(R09
+# cleanup_if_low_disk_space 등)가 공간을 비워도 다시 메운다. 남기는 16MB는 journald가 계속
+# 기록할 여유(active 파일이 8MB 단위로 자람 — 판정 근거 로그가 유실되지 않도록)이고,
+# xz 산출물(수십 MB)보다는 충분히 작다.
+KEEP_FULL_FREE_KB=$((16 * 1024))
+KEEP_FULL_PID=""
+KEEP_FULL_LOG=""
+
+start_keep_full() {
+    local filler_dir="$1" before="$2"
+    KEEP_FULL_LOG="/tmp/tc_keep_full_$$.log"
+    echo "armed $(date +%T)" > "$KEEP_FULL_LOG"
+    (
+        local idx=1 vacuumed=0 free_kb grow_kb
+        while [ -f "$KEEP_FULL_LOG" ]; do
+            if [ "$vacuumed" -eq 0 ] \
+               && [ "$(comm -12 <(echo "$before") <(list_archived_journals) | grep -c .)" -eq 0 ]; then
+                vacuumed=1
+                echo "vacuum 감지 $(date +%T) — 이후 여유공간 재충전 시작" >> "$KEEP_FULL_LOG"
+            fi
+            if [ "$vacuumed" -eq 1 ]; then
+                free_kb=$(disk_truefree_kb "$filler_dir")
+                grow_kb=$((free_kb - KEEP_FULL_FREE_KB))
+                if [ "$grow_kb" -ge 1024 ]; then
+                    dd if=/dev/zero of="${filler_dir}/keep_$(printf '%04d' "$idx").bin" \
+                       bs=64k count=$((grow_kb / 64)) 2>/dev/null
+                    # 방금 쓴 블록이 free 계산에 반영되기 전에 다음 회차가 또 채우면 16MB 여유까지
+                    # 먹어버린다(로컬 시뮬레이션에서 이중 충전 관측) — sync 후 다음 측정.
+                    sync
+                    echo "재충전 ${grow_kb}KB $(date +%T) (truefree ${free_kb}KB)" >> "$KEEP_FULL_LOG"
+                    idx=$((idx + 1))
+                fi
+            fi
+            sleep 0.5
+        done
+    ) &
+    KEEP_FULL_PID=$!
+}
+
+stop_keep_full() {
+    [ -z "$KEEP_FULL_PID" ] && return
+    echo "  [keep-full] 재충전 기록:"
+    sed 's/^/    /' "$KEEP_FULL_LOG" 2>/dev/null
+    rm -f "$KEEP_FULL_LOG"
+    kill "$KEEP_FULL_PID" 2>/dev/null
+    wait "$KEEP_FULL_PID" 2>/dev/null
+    KEEP_FULL_PID=""
+}
+
 TC15_FILLER_DIR="/edge/log/.tc15_disk_filler"
 TC15_NEW_LOG=""
 TC15_AVAIL0_BYTES=""
 
 tc15_cleanup() {
     echo "  [CLEANUP] TC15 복원 시작..."
+    stop_keep_full
     rm -f "${TC15_NEW_LOG}.xz" 2>/dev/null
     [ -n "$TC15_NEW_LOG" ] && rm -f "$TC15_NEW_LOG" 2>/dev/null
     rm -rf "$TC15_FILLER_DIR" 2>/dev/null
@@ -1653,10 +1760,10 @@ tc15_rotate_sync_compress_fail() {
     # Phase 1 — disk 채우기 및 트리거
     dump_cmd df -P "${STAGING_DIR}"
 
-    dump_cmd journalctl --list-boots
-    local before_head before_list
-    before_head=$(journalctl --list-boots 2>/dev/null | head -n 1)
-    echo "  BEFORE list-boots head: ${before_head}"
+    local ARCH_BEFORE before_list
+    dump_cmd sh -c "ls -la ${JOURNAL_DIR}/*/system@*.journal"
+    dump_cmd journalctl --disk-usage
+    ARCH_BEFORE=$(list_archived_journals)
     dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log
     before_list=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log 2>/dev/null | sort)
 
@@ -1665,6 +1772,7 @@ tc15_rotate_sync_compress_fail() {
     # 빌드는 수 초, 기본 레벨(R090127)은 출력이 천천히 커져 127초 걸린 실측이 있다(2026-10-06:
     # 90초 대기로 판정 시점에 partial .xz가 아직 쓰이는 중 → TC15-2/4/5 오판). compress
     # 타임아웃(구 180초/신 300초)까지 덮도록 300초 대기.
+    start_keep_full "$TC15_FILLER_DIR" "$ARCH_BEFORE"
     echo "  get_log_data 요청 송신 (최대 300초 대기 — 응답이 곧 compress 결과 확정 신호)..."
     local t0 t1 resp
     t0=$(date +%s)
@@ -1726,16 +1834,7 @@ tc15_rotate_sync_compress_fail() {
         assert "TC15-5: 수동 재현 xz --keep -0 이 ENOSPC로 실패" "FAIL"
     fi
 
-    dump_cmd journalctl --list-boots
-    local after_head
-    after_head=$(journalctl --list-boots 2>/dev/null | head -n 1)
-    echo "  AFTER list-boots head: ${after_head}"
-    if [ "$after_head" != "$before_head" ]; then
-        assert "TC15-6: vacuum이 실행되어 list-boots head 변경됨" "PASS"
-    else
-        assert "TC15-6: vacuum이 실행되어 list-boots head 변경됨" "FAIL"
-        echo "    head 불변: ${after_head}"
-    fi
+    assert_archived_vacuumed "$ARCH_BEFORE" "TC15-6: compress 실패와 무관하게 vacuum 실행됨 (트리거 전 archived journal 전부 삭제)"
 
     # Phase 3 — 복원 (trap으로 무조건 실행, 여기서도 명시 호출 후 trap 해제)
     tc15_cleanup
@@ -1748,6 +1847,7 @@ TC16_AVAIL0_BYTES=""
 
 tc16_cleanup() {
     echo "  [CLEANUP] TC16 복원 시작..."
+    stop_keep_full
     # 증거는 이미 dump_cmd로 원문 캡처했으므로 "진단용 보존" 없이 항상 삭제
     # (파괴적 시험은 영구 잔재를 남기지 않는다는 원칙을 "로그 미확인 시 보존"보다 우선)
     rm -f "${TC16_NEW_LOG}.xz" 2>/dev/null
@@ -1818,10 +1918,10 @@ tc16_boot_log_compress_fail() {
     # Phase 1 — disk 채우기 및 재시작 트리거
     dump_cmd df -P "${STAGING_DIR}"
 
-    dump_cmd journalctl --list-boots
-    local before_head
-    before_head=$(journalctl --list-boots 2>/dev/null | head -n 1)
-    echo "  BEFORE list-boots head: ${before_head}"
+    local ARCH_BEFORE
+    dump_cmd sh -c "ls -la ${JOURNAL_DIR}/*/system@*.journal"
+    dump_cmd journalctl --disk-usage
+    ARCH_BEFORE=$(list_archived_journals)
 
     # 전체 경로 매칭 필수(TC02/TC14 관례) — "system_log"만 쓰면 이 스크립트 자신까지 걸림
     local SL_PID
@@ -1833,7 +1933,7 @@ tc16_boot_log_compress_fail() {
         assert "TC16-3: raw .log 가 toupload로 잘못 이관되지 않음" "FAIL"
         assert "TC16-4: compress 실패 경로(ENOSPC) ERROR 로그 등장, dump 실패 메시지 아님" "FAIL"
         assert "TC16-5: 수동 재현 xz --keep -0 이 ENOSPC로 실패" "FAIL"
-        assert "TC16-6: vacuum이 실행되어 list-boots head 변경됨" "FAIL"
+        assert "TC16-6: compress 실패와 무관하게 vacuum 실행됨 (트리거 전 archived journal 전부 삭제)" "FAIL"
         tc16_cleanup
         trap - EXIT
         return
@@ -1842,6 +1942,7 @@ tc16_boot_log_compress_fail() {
     local SL_RESTART_TS
     SL_RESTART_TS=$(date '+%Y-%m-%d %H:%M:%S')
     echo "  system_log kill (PID ${SL_PID}) → 재시작 대기..."
+    start_keep_full "$TC16_FILLER_DIR" "$ARCH_BEFORE"
     kill -9 "$SL_PID" 2>/dev/null
 
     # ENOSPC 자체는 몇 초 안에 실패하지만, kill -9 후 docker-loader 전체 종료→재기동에만
@@ -1915,15 +2016,7 @@ tc16_boot_log_compress_fail() {
         assert "TC16-5: 수동 재현 xz --keep -0 이 ENOSPC로 실패" "FAIL"
     fi
 
-    dump_cmd journalctl --list-boots
-    local after_head
-    after_head=$(journalctl --list-boots 2>/dev/null | head -n 1)
-    echo "  AFTER list-boots head: ${after_head}"
-    if [ "$after_head" != "$before_head" ]; then
-        assert "TC16-6: vacuum이 실행되어 list-boots head 변경됨" "PASS"
-    else
-        assert "TC16-6: vacuum이 실행되어 list-boots head 변경됨" "FAIL"
-    fi
+    assert_archived_vacuumed "$ARCH_BEFORE" "TC16-6: compress 실패와 무관하게 vacuum 실행됨 (트리거 전 archived journal 전부 삭제)"
 
     # Phase 3 — 복원
     tc16_cleanup
@@ -2370,11 +2463,23 @@ tc18_low_disk_cleanup() {
         echo "    journal에 해당 로그가 하나도 없으면 파일이 없어졌더라도 cleanup이 지웠다는 증거가 아님"
     fi
 
-    if [ "$cur_permille" -ge 200 ]; then
-        assert "TC18-3: 여유율이 20% 이상으로 회복됨" "PASS"
+    # 판정 1순위는 코드 자신의 회복 로그 — delete_oldest_files_until_safe는 fs::space
+    # (available/capacity = df와 같은 기준)로 >=20%가 되는 순간 "[cleanup] Enough space
+    # recovered: X%"를 찍고 멈춘다. 그 직후 task_capture_boot_log가 staging에 dump+xz를
+    # 써서 수십 MB를 다시 쓰므로, TC가 나중에 df로 재면 20% 바로 아래로 보일 수 있다
+    # (2026-10-06 실측: 코드 20.2767% 회복 → boot capture 후 df 197‰ → TC18-3 오판).
+    # df 값은 참고 근거로 남기고, 로그가 없을 때만 df로 판정한다.
+    local recovered_line recovered_pct
+    dump_cmd sh -c "grep -F '[cleanup] Enough space recovered' '${JOURNAL_CAP}'"
+    recovered_line=$(grep -F '[cleanup] Enough space recovered' "$JOURNAL_CAP" 2>/dev/null | tail -1)
+    recovered_pct=$(echo "$recovered_line" | sed -n 's/.*Enough space recovered: \([0-9.]*\)%.*/\1/p')
+    echo "  [TC18-3] 코드 회복 로그: ${recovered_pct:-없음}% / TC 측정 df: ${cur_permille}‰"
+    if [ -n "$recovered_pct" ] && awk -v p="$recovered_pct" 'BEGIN { exit !(p >= 20) }'; then
+        assert "TC18-3: 여유율이 20% 이상으로 회복됨 (코드 회복 로그 기준)" "PASS"
+    elif [ -z "$recovered_pct" ] && [ "$cur_permille" -ge 200 ]; then
+        assert "TC18-3: 여유율이 20% 이상으로 회복됨 (회복 로그 없음 — df 기준)" "PASS"
     else
-        assert "TC18-3: 여유율이 20% 이상으로 회복됨" "FAIL"
-        echo "    현재 ${cur_permille}‰ (목표 >=200‰)"
+        assert "TC18-3: 여유율이 20% 이상으로 회복됨" "FAIL" "회복 로그=${recovered_pct:-없음}%, df=${cur_permille}‰ (목표 >=20%)"
     fi
 
     # 폴링 타임아웃으로 더미가 남았으면 디바이스 청결을 위해 여기서 정리(판정에는 영향 없음)
