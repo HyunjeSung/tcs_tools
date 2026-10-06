@@ -1,0 +1,8 @@
+# tcs_tools 버전 + 이 버전의 TC가 전제로 하는 EMS 빌드(DUT /etc/os-release BUILD_VERSION).
+# 대시보드가 run 시작 시 DUT BUILD_VERSION을 읽어 EMS_TARGET_MIN 미만이면 ⚠ 불일치를 표시한다
+# (실행은 막지 않음). TC가 특정 EMS 동작 변경을 전제로 바뀌면 TCS_VERSION을 올리고
+# EMS_TARGET_MIN도 같이 갱신할 것.
+TCS_VERSION=1.1.0
+# system_log TC04/15/16이 xz -0 + 압축 전용 300초 타임아웃을 전제로 함 — R090127에는 미반영,
+# 그 다음 빌드(번호 미정, 2026-10-06 기준)부터 대상. 실제 빌드 번호가 나오면 갱신.
+EMS_TARGET_MIN=R090128

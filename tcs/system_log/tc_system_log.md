@@ -32,6 +32,14 @@ IPC(MQTT 브릿지)를 통한 on-demand export와 24시간 주기 rotation을 �
   생성된 blob이 있으면 `ensure_dummy_blob()`이 재생성하지 않고 그대로 재사용한다.
   400MB 효과를 보려면 디바이스에서 `rm -f /edge/log/.tc_dummy_journal_blob` 로
   기존 blob을 지운 뒤 다음 TC04/15/16 실행 시 재생성시킬 것.
+- **toupload 산출물 소멸 주의 (2026-10-06):** 인터넷 연결 상태에서는 toupload의 `.log.xz`가
+  생성 직후(수 초 내) 클라우드 업로드로 지워진다. 따라서 "toupload에 파일이 남아 있는지"로
+  판정하지 않는다 — 파일명/생성 여부는 journal 로그(dump 대상 파일명, `Created meta file`,
+  `Merge done`, `Running daily task`)로, 내용 검증(`xz --test`)은 생성 순간 0.2초 간격으로
+  복사해 두는 스냅샷 사본(`start_xz_snapshot`, TC04/05/14)으로 한다. 스냅샷 사본은 journal에
+  `Created meta file: <name>.meta`(xz 성공 후에만 찍힘)가 있을 때만 "생성됨"으로 인정한다
+  (`pick_completed_snapshot`) — xz 타임아웃으로 지워진 partial 사본의 거짓 PASS 방지. toupload `ls`는 참고 근거.
+  TC08도 SETUP의 meta 로그를 근거로 인정한다.
 
 ---
 
@@ -50,7 +58,11 @@ IPC(MQTT 브릿지)를 통한 on-demand export와 24시간 주기 rotation을 �
 
 ### 절차
 
-1. SETUP: `get_log_data` 요청 전송 → `task_rotate_sync()` 실행 → toupload에 `.log.xz` 생성
+1. SETUP: `get_log_data` 요청 전송 → `task_rotate_sync()` 실행 → toupload에 `.log.xz` 생성. 생성된 파일은
+   대기 10초 안에도 클라우드 업로드로 지워질 수 있어(2026-10-06 실측), 파일명과 생성 여부는
+   system_log의 `Created meta file: <name>.xz.meta` 로그(xz 성공+업로드 큐 등록)에서 확정한다
+   (`SETUP_DUMP_NAME`/`SETUP_XZ_QUEUED`). SM의 `journalctl -o cat > ...` dump 줄은 누락 사례가 있어
+   meta 줄이 없을 때만 파일명 보조 근거로 쓴다
 2. `ls -t /edge/log/toupload/system/systemlog_*.log.xz | head -1` 로 최신 파일 획득
 3. 파일명을 정규식 `systemlog_[0-9]{14}_[0-9]{14}\.log\.xz` 로 검증
 4. 파일명에서 start(앞 14자리), end(뒤 14자리) 추출 후 `start <= end` 비교
@@ -66,7 +78,7 @@ IPC(MQTT 브릿지)를 통한 on-demand export와 24시간 주기 rotation을 �
 
 | 기준 ID | 설명 | 타입 | 기준값 | 셸 검증 |
 |---------|------|------|--------|---------|
-| TC01-1 | 파일명 정규식 일치 | boolean | true | `grep -qE "systemlog_[0-9]{14}_[0-9]{14}\.log\.xz"` |
+| TC01-1 | 파일명 정규식 일치 | boolean | true | toupload 실파일, 없으면 journal로 확정한 `${SETUP_DUMP_NAME}.xz`에 `grep -qE "systemlog_[0-9]{14}_[0-9]{14}\.log\.xz"` |
 | TC01-2 | 시작 ≤ 저장 시각 | boolean | true | `[ "$start_t" -le "$end_t" ]` |
 
 ---
@@ -93,13 +105,23 @@ toupload에 `.log.xz` 파일을 생성하는지 확인한다.
 
 0. `system_log` 재시작 (내부 타이머 상태 초기화 — 다른 TC 실행 이력과 무관하게 항상 깨끗한 상태에서 시작)
 1. `journalctl -u docker-loader --no-pager | grep '[system_log_timer_loop] loop started'` 로 timer thread 시작 로그 확인
-2. `FILES_BEFORE` = 현재 toupload `.log.xz` 파일 수 및 목록 기록
+2. toupload `.log.xz` 목록 기록 (참고 근거만 — 발화 산출물은 70초 안에 클라우드 업로드로 지워질 수 있어 판정에 쓰지 않음, 2026-10-06 실측)
 3. 시스템 시간을 현재 시간과 동기화 (NTP `set-ntp yes` → 잠시 대기 → `set-ntp false` 로 변경 가능 상태)
 4. 현재 epoch `t0` 저장 후 시스템 시간을 `t0 + 25*3600` 로 변경 (`date -s @<epoch>`)
-5. 타이머 발화 대기 (70초) — system_log_timer_loop 의 1초 sleep_for + `elapsed >= 24h` check 후 `task_rotate_sync()` 호출 완료 대기
-6. toupload 에 신규 `.log.xz` 파일 생성 확인 및 파일명의 endtime 이 변경한 시간(+25h) 근처인지 확인
-7. 시스템 시간을 현재 시간으로 복원 — 4번에서 저장해둔 `t0`로 `date -s "@${t0}"`
-   직접 복원(2026-08-25 재수정, 아래 Flag 참고)
+5. 타이머 발화 대기 — `journalctl --since @<t_shift>`에서 `[task_rotate_sync] End of Log rotate logic`이
+   나올 때까지 2초 간격 최대 70초 폴링
+6. 같은 구간 journal의 `Created meta file: /edge/log/toupload/system/systemlog_<start>_<end>.log.xz.meta`에서
+   파일명을 뽑아 endtime이 +25h ±120초인지 확인 (`Running daily task`·dump 명령 줄은 task_rotate_sync
+   내부 `journalctl --rotate && --vacuum-files=1`이 지워버려 판정에 못 씀 — 2026-10-06 실측)
+7. 시스템 시간을 현재 시간으로 복원 — 4번에서 저장해둔 `t0`에 대기 경과분을 더해 `date -s` 직접
+   복원(2026-08-25 재수정, 아래 Flag 참고)
+8. 미래 시각 journal 정리 — `journalctl --rotate` 후 `rm -f /var/log/journal/*/system@*.journal`로 archived
+   전부 삭제(BusyBox `find`는 `-delete` 미지원). shift 중 timer rotate로 생긴 journal은 첫 기록이 +25h라, 남겨두면 이후 dump 파일명의
+   시작시각이 미래로 잡혀 start>end 역전(2026-10-06 --full 실측: TC01-2 FAIL)
+
+> **실행 순서 (2026-10-06):** 빠른/전체 실행과 `--only`에서 TC02는 SETUP·TC01·TC03~TC14 뒤에 실행한다
+> (시간 이동 영향이 파일명 시각을 보는 TC에 번지지 않도록). 자체적으로 system_log를 재시작하므로
+> 타이머 상태는 순서와 무관.
 
 > **주의 (Flag, 정정 — 2026-08-25 device_log TC18 세션에서 발견):** 원래는
 > `hwclock -s`(RTC→시스템)를 우선 쓰고 실패 시 NTP 재동기화로 폴백했는데, 이 DUT는
@@ -115,15 +137,15 @@ toupload에 `.log.xz` 파일을 생성하는지 확인한다.
 
 | 항목 | 기준 |
 |------|------|
-| toupload 파일 | 신규 `.log.xz` 생성됨 |
+| timer 발화 | +25h 후 journal에 `Running daily task` + toupload dump 실행 |
 | 파일명 endtime | 변경한 시스템 시간(+25h) 근처 |
 
 ### PASS/FAIL Criteria
 
 | 기준 ID | 설명 | 타입 | 기준값 | 셸 검증 |
 |---------|------|------|--------|---------|
-| TC02-1 | toupload 신규 .xz 생성 | boolean | true | `[ "$files_after" -gt "$files_before" ]` |
-| TC02-2 | 파일명 endtime이 변경 시간 근처 | manual | — | 파일명 확인 후 수동 판정 |
+| TC02-1 | +25h 후 timer 발화 (journal rotate 종료 + toupload .xz meta 생성) | boolean | true | `journalctl --since @t_shift` 에 `[task_rotate_sync] End of Log rotate logic` AND `Created meta file: .../systemlog_*.log.xz.meta` (task_rotate_sync 내부 rotate&&vacuum이 그 이전 줄 — `Running daily task`, dump 명령 — 을 지우므로 rotate 뒤에 찍히는 줄만 사용, 2026-10-06) |
+| TC02-2 | dump 파일명 endtime이 변경 시간(+25h) ±120초 이내 | number | ≤120s | `\|endtime_epoch - t_shift\| <= 120` |
 
 ---
 
@@ -162,7 +184,7 @@ toupload에 `.log.xz` 파일을 생성하는지 확인한다.
 
 | 기준 ID | 설명 | 타입 | 기준값 | 셸 검증 |
 |---------|------|------|--------|---------|
-| TC03-1 | xz 파일 신규 생성됨 | boolean | true | `[ "$FILES_AFTER" -gt "$FILES_BEFORE" ]` |
+| TC03-1 | xz 파일 신규 생성됨 | boolean | true | `[ "$FILES_AFTER" -gt "$FILES_BEFORE" ]` OR journal `Created meta file: ${SETUP_DUMP_NAME}.xz.meta` (업로드로 즉시 소멸 대비) |
 
 ---
 
@@ -311,8 +333,8 @@ rotation 완료 후 생성된 파일이 유효한 `.xz`이며, 원본 `.log` 파
 
 | 기준 ID | 설명 | 타입 | 기준값 | 셸 검증 |
 |---------|------|------|--------|---------|
-| TC05-1 | .xz 파일 존재 | boolean | true | `[ -f "$LATEST_XZ" ]` |
-| TC05-2 | xz 무결성 | exit code | 0 | `xz --test "$LATEST_XZ"` |
+| TC05-1 | .xz 파일 존재 | boolean | true | 자체 `get_log_data` 동안 0.2초 간격 스냅샷(`start_xz_snapshot`)으로 잡은 신규 `.xz` 사본 존재 (업로드로 원본이 즉시 지워져도 판정 가능, 2026-10-06) |
+| TC05-2 | xz 무결성 | exit code | 0 | 스냅샷 사본에 `xz --test` |
 | TC05-3 | 원본 .log 삭제 | boolean | true | `[ ! -f "${LATEST_XZ%.xz}" ]` |
 | TC05-4 | staging 동명 .xz 존재 시 xz -f로 덮어쓰기 성공 (크기 증가, 원본 .log 삭제) | boolean | true | `[ "$size_after" -gt "$size_dummy" ] && [ ! -f *.log ]` |
 
@@ -512,21 +534,25 @@ rotation 완료 후 생성된 파일이 유효한 `.xz`이며, 원본 `.log` 파
 - DUT 실제 리부트 가능 환경 (테스트 종료 후 90~120초의 부팅 시간 허용)
 - 시리얼 콘솔(COM7) 접속 권장 — SSH는 reboot 시 끊김
 - staging(`/edge/log/system/`)과 toupload(`/edge/log/toupload/system/`) 쓰기 가능
-- `/edge/log/system/.tc10_before` 임시 파일 작성 가능 (TC10-PRE의 toupload 개수 저장용)
+- `/edge/log/system/.tc10_before` 임시 파일 작성 가능 (TC10-PRE의 toupload 개수(참고용) + boot_id 저장용)
 
 ### 절차
 
 **Phase 1 — 리부트 전 (`--tc10-pre`):**
-1. `BEFORE_TOUPLOAD` = toupload `.log.xz` 파일 수 기록
+1. `BEFORE_TOUPLOAD` = toupload `.log.xz` 파일 수 기록 (참고용), 현재 `/proc/sys/kernel/random/boot_id`와 함께 `.tc10_before`에 저장
 2. `mosquitto_pub` → `shutdown_application_for_system_reboot` 요청, 60초 대기
 3. 응답 수신 확인
 4. staging `.log.xz` 생성 확인
 5. `reboot` 실행 (SSH 연결 종료, 시리얼은 유지)
 
 **Phase 2 — 리부트 후 (`--tc10-post`, 재접속 후 수동 실행):**
-1. `AFTER_TOUPLOAD` = toupload `.log.xz` 파일 수 확인 (boot log 무조건 캡처 + merge 결과)
-2. 파일 수 증가 확인 (`AFTER > BEFORE_TOUPLOAD`)
-3. staging 비워짐 확인
+1. 현재 boot_id가 pre에서 저장한 값과 같으면 **아직 재부팅 전** → 판정 없이 `[ERROR]` 종료,
+   `.tc10_before`는 보존(재부팅 후 post만 재실행 가능). reboot 직후 꺼지는 중에도 SSH가 붙어
+   재부팅 전 상태로 판정한 사고(2026-10-06: post 12:44:25 판정, 실제 부팅 12:44:33) 방지
+2. 현재 부팅 journal(`journalctl -b -u docker-loader`)에서 `[task_merge_staged_logs] Merge done`을
+   2초 간격 최대 120초 폴링 — pre의 shutdown .xz + boot .xz 두 파일 병합이므로 `Single file`은 불인정
+3. toupload `.log.xz` 목록/개수는 참고 근거로만 기록 (병합 파일이 즉시 업로드돼 사라질 수 있어
+   개수 비교는 판정에 쓰지 않음)
 
 
 ### 기대 결과
@@ -535,7 +561,7 @@ rotation 완료 후 생성된 파일이 유효한 `.xz`이며, 원본 `.log` 파
 |------|------|
 | 응답 수신 (pre) | MQTT 응답 수신 |
 | staging .xz (pre) | 신규 생성됨 |
-| toupload .xz (post) | 파일 수 증가 |
+| 병합 (post) | 현재 부팅 journal에 `Merge done` |
 
 ### PASS/FAIL Criteria
 
@@ -543,7 +569,7 @@ rotation 완료 후 생성된 파일이 유효한 `.xz`이며, 원본 `.log` 파
 |---------|------|------|------|--------|---------|
 | TC10-1 | pre | 응답 수신 | boolean | true | `[ -n "$resp" ]` |
 | TC10-2 | pre | staging .xz 생성 | boolean | true | `ls /edge/log/system/systemlog_*.log.xz` |
-| TC10-3 | post | toupload 파일 수 증가 (boot 캡처 + merge) | boolean | true | `[ "$AFTER_TOUPLOAD" -gt "$BEFORE_TOUPLOAD" ]` |
+| TC10-3 | post | 재부팅 후 shutdown+boot 로그 병합됨 | boolean | true | boot_id ≠ pre AND `journalctl -b -u docker-loader -o cat \| grep -F "[task_merge_staged_logs] Merge done"` |
 
 ---
 
@@ -644,7 +670,7 @@ rotation 완료 후 생성된 파일이 유효한 `.xz`이며, 원본 `.log` 파
 |---------|------|------|--------|---------|
 | TC12-1 | 3 디렉토리에서 40일 mtime `.nmon` 모두 삭제 | boolean | true | 3 디렉토리 모두 `[ ! -f "$old40" ]` |
 | TC12-2 | 3 디렉토리에서 현재 시각 `.nmon` 보존 | boolean | true | 3 디렉토리 모두 `[ -f "$now_file" ]` |
-| TC12-3 | 3 디렉토리에서 40일 mtime `.nmon.meta` 모두 삭제 | boolean | true | 3 디렉토리 모두 `[ ! -f "$old40_meta" ]` |
+| TC12-3 | 40일 mtime `.nmon.meta` 잔존 허용 (retention 삭제 대상 아님, 2026-10-06 확정 — 판정 게이트 아님, 잔존 개수만 기록) | informational | 항상 PASS | 3 디렉토리 `ls -la` 원문 기록 |
 | TC12-4 | 3 디렉토리에서 현재 시각 `.nmon.meta` 보존 | boolean | true | 3 디렉토리 모두 `[ -f "$now_meta" ]` |
 
 ---
@@ -727,7 +753,10 @@ system_log를 `kill -9` 하면 edge_runtime이 재시작하고 startup 시
    ```
 5. `kill -9 $(pgrep -f system_log | head -1)` → edge_runtime이 system_log 재시작
 6. 재시작 후 `task_capture_boot_log` 실행 → staging에 `systemlog_{BOOT_START}_{current_time}.log.xz` 추가
-7. `task_merge_staged_logs` 실행 → 3개 파일 병합 → toupload 이관 대기 (최대 90초)
+7. `task_merge_staged_logs` 실행 → 3개 파일 병합 → toupload 이관. 재시작 시각 이후 journald에서
+   `[task_merge_staged_logs] (Merge done|Single file|No staged files|Failed|Exception)` 종료 로그를
+   2초 간격 최대 300초 폴링 (merge는 boot capture dump+compress 뒤에 돌아 90초 고정 대기로는
+   부족했음 — 2026-10-06 run 실측)
 8. staging `.log.xz` 개수, toupload 파일 수, 병합 파일 시작시각, xz 무결성 확인
 
 > **정렬 근거:** 더미 파일의 end 타임스탬프 `{BOOT_START}01` (16자리)는 실제 캡처의 end 타임스탬프
@@ -854,6 +883,10 @@ system_log를 `kill -9` 하면 edge_runtime이 재시작하고 startup 시
 
 **Phase 0 — 측정 및 사전 조건 계산**
 
+0. `wait_system_log_idle 300` — system_log의 `journalctl -o cat`/`xz -f` 호스트 명령이 5초 연속
+   안 보일 때까지 최대 300초 대기. 직전 TC 재시작으로 시작된 boot capture가 fill 도중 ENOSPC로
+   실패하며 partial .xz를 지우면 공간이 돌아와 ENOSPC가 재현되지 않음(2026-10-06 run 실측)
+
 1. `journalctl --rotate && journalctl --vacuum-files=1`로 journal 초기화
 2. `/edge/log/.tc_dummy_journal_blob`(TC04와 공유하는 premade 랜덤 blob, 없으면 최초
    1회만 생성)에서 `head -c 48M`으로 48MB 슬라이스해 (2026-09-23 실측 조정: 8MB는 dump/compress 안전 마진이 너무 좁아 fill 오차로 dump 단계에서부터 ENOSPC 발생 — 48MB로 상향해 안전 구간 확보) `systemd-cat -t TC15_ENOSPC_DUMMY`
@@ -882,8 +915,9 @@ system_log를 `kill -9` 하면 edge_runtime이 재시작하고 startup 시
    원문 캡처
 10. `BEFORE_HEAD` = `journalctl --list-boots | head -n1` 기록, toupload `.log`(xz
     아닌) 목록 스냅샷(`BEFORE_LIST`)
-11. `get_log_data` 요청 송신, 최대 60초 대기 (ENOSPC는 몇 초 안에 실패하므로 기존
-    200초 대비 대폭 단축 — 요구사항 문서가 명시한 이 방식의 이점)
+11. `get_log_data` 요청 송신, 최대 300초 대기 — 응답은 task_rotate_sync 종료 후에 오므로 곧 compress
+    결과 확정 신호. ENOSPC 도달 시간은 xz 레벨에 좌우(xz -0 빌드는 수 초, 기본 레벨 R090127은 127초
+    실측)되어, 90초 대기로는 partial .xz가 아직 쓰이는 중에 판정한 오판이 있었음(2026-10-06)
 12. 응답 후 5초 추가 대기(안정화)
 13. before/after 목록 diff로 이번 사이클이 만든 신규 raw `.log`(`NEW_LOG`) 식별
 
@@ -941,7 +975,7 @@ system_log를 `kill -9` 하면 edge_runtime이 재시작하고 startup 시
 | TC15-4 | compress 실패 경로(ENOSPC) ERROR 로그 등장, dump 실패 메시지 아님 | boolean | true | `journalctl -u docker-loader \| grep -F "[task_rotate_sync] Failed to compress log!!"` 매치 AND `Failed to make log!!` 없음 |
 | TC15-5 | 수동 재현: `xz --keep -0` 이 ENOSPC로 실패 | boolean | true | `manual_xz_exit -ne 0` AND stderr에 `No space left on device` 포함 |
 | TC15-6 | vacuum이 실행되어 list-boots head 변경됨 | boolean | true | `[ "$after_head" != "$before_head" ]` |
-| TC15-7 | 정리 후 filler 잔재 없음 + 여유공간 AVAIL0 근방 복원 | boolean | true | `[ ! -d /edge/log/.tc15_disk_filler ]` AND `df -P /edge/log` 재확인값이 AVAIL0±5% |
+| TC15-7 | 정리 후 filler 잔재 없음 + 여유공간 AVAIL0의 95% 이상 복원 | boolean | true | `[ ! -d /edge/log/.tc15_disk_filler ]` AND `df -P /edge/log` 재확인값 ≥ AVAIL0×95% (상한 없음 — 업로드/vacuum으로 늘어나는 건 정상) |
 
 ---
 
@@ -994,6 +1028,10 @@ system_log를 `kill -9` 하면 edge_runtime이 재시작하고 startup 시
 
 **Phase 0 — 측정 및 사전 조건 계산**
 
+0. `wait_system_log_idle 300` — system_log의 `journalctl -o cat`/`xz -f` 호스트 명령이 5초 연속
+   안 보일 때까지 최대 300초 대기. 직전 TC 재시작으로 시작된 boot capture가 fill 도중 ENOSPC로
+   실패하며 partial .xz를 지우면 공간이 돌아와 ENOSPC가 재현되지 않음(2026-10-06 run 실측)
+
 1. staging/toupload 클린업 (`systemlog_*.log.xz`, `*.log`, `.merging_*.tmp` 제거 —
    위 Flag 참고, cleanup_if_low_disk_space 간섭 최소화 목적 겸 BEFORE 목록 정리)
 2. `journalctl --rotate && journalctl --vacuum-files=1`로 journal 초기화
@@ -1017,9 +1055,9 @@ system_log를 `kill -9` 하면 edge_runtime이 재시작하고 startup 시
 10. `BEFORE_HEAD` = `journalctl --list-boots | head -n1` 기록
 11. `kill -9 $(pgrep -f /edge/app/bin/system_log)` → edge_runtime 재시작 →
     `task_capture_boot_log()` 무조건 실행
-12. 최대 60초까지 journald를 2초 간격으로 폴링해 `[task_capture_boot_log] Done:`
-    또는 `Failed to compress log` 완료 신호를 기다림 (ENOSPC는 몇 초 안에 실패하므로
-    기존 480초 대비 대폭 단축)
+12. 최대 180초까지 journald를 2초 간격으로 폴링해 `[task_capture_boot_log] Done:`
+    또는 `Failed to compress log` 완료 신호를 기다림 (ENOSPC 자체는 수 초지만 kill 후
+    docker-loader 종료→재기동에 ~70초 걸린 사례가 있어 60→180초로 확대, 2026-10-06)
 
 **Phase 2 — 검증**
 
@@ -1072,7 +1110,7 @@ system_log를 `kill -9` 하면 edge_runtime이 재시작하고 startup 시
 | TC16-4 | compress 실패 경로(ENOSPC) ERROR 로그 등장, dump 실패 메시지 아님 | boolean | true | `journalctl -u docker-loader \| grep -F "[task_capture_boot_log] Failed to compress log, keeping raw .log for diagnostics:"` 매치 AND `Failed to dump log` 없음 |
 | TC16-5 | 수동 재현: `xz --keep -0` 이 ENOSPC로 실패 | boolean | true | `manual_xz_exit -ne 0` AND stderr에 `No space left on device` 포함 |
 | TC16-6 | vacuum이 실행되어 list-boots head 변경됨 | boolean | true | `[ "$after_head" != "$before_head" ]` |
-| TC16-7 | 정리 후 filler 잔재 없음 + 여유공간 AVAIL0 근방 복원 | boolean | true | `[ ! -d /edge/log/.tc16_disk_filler ]` AND `df -P /edge/log` 재확인값이 AVAIL0±5% |
+| TC16-7 | 정리 후 filler 잔재 없음 + 여유공간 AVAIL0의 95% 이상 복원 | boolean | true | `[ ! -d /edge/log/.tc16_disk_filler ]` AND `df -P /edge/log` 재확인값 ≥ AVAIL0×95% (상한 없음 — 업로드/vacuum으로 늘어나는 건 정상) |
 
 ---
 
@@ -1167,6 +1205,177 @@ status=success여도 조용한 오염 사례(실측으로 확인됨).
 |---------|------|------|--------|---------|
 | TC17-1 | `MessageContext`가 tid 불일치 cmd_host 응답의 위조 `status`를 그대로 노출하지 않음 | boolean | true(=마커 미등장) | 마커 주변(`grep -B3 -A1`) 문맥에서 `grep -o '"status"[[:space:]]*:[[:space:]]*"[^"]*"'`로 추출한 값이 **없어야** PASS (있으면 FAIL) |
 | TC17-2 | 위조 스팸 중에도 진짜 `get_log_data` 응답 status가 success | boolean | true(=success) | `get_resp`에 `"error_code":"NONE"` 포함 시 success(PASS), 그 외 값이면 error, 무응답(30s)이면 timeout(둘 다 FAIL) |
+
+---
+
+## TC18 — 저장공간 부족(<10%) 시 SYSTEM_LOG_DIRS cleanup (R09 전용)
+
+> **[2026-10-02] R09 전용으로 복구.** main에서는 `delete_if_low_disk_space()`/`delete_oldest_files_until_safe()`가 제거돼 2026-09-23에 삭제됐던 TC이나, R090125 백포트 커밋(`309e4e2`, EWP-2698)에는 `cleanup_log_dir()`/`cleanup_nmon_dir()` → `cleanup_if_low_disk_space(path, 10)` → `delete_oldest_files_until_safe(path, 20)` 경로가 그대로 남아있어 tcs_tools `720df12` 버전을 되살렸다. **TC18-0에 빌드 가드 추가**: 실행 중 system_log 바이너리(`/proc/<pid>/exe`)에 `[cleanup_if_low_disk_space]` 문자열이 없으면(main 계열 빌드) 파티션을 채우기 전에 SKIP 한다.
+
+### 목적
+
+`/edge/log` 파티션 여유공간이 10% 미만으로 떨어졌을 때, `system_log`가 `SYSTEM_LOG_DIRS =
+{STAGING_DIR("/edge/log/system"), TOUPLOAD_DIR(SYSTEM_LOG_PATH, "/edge/log/toupload/system/"),
+ARCHIVE_DIR("/edge/log/system/archive")}` 3개 디렉토리를 순회하며 `cleanup_log_dir()` →
+`cleanup_if_low_disk_space()` → `delete_oldest_files_until_safe()`로 오래된 파일(`.xz`/
+`.log`/`.meta`)부터 삭제해 여유공간을 회복시키는지 검증한다.
+
+> **재설계 이력 (2026-09-04):** 최초 버전은 더미 배치 후 실제 `reboot`으로 재현했다.
+> 하지만 대용량(GB급) 쓰기 직후 `reboot`하면 — `sync` 2회, 이중 sync, `/proc/meminfo`
+> Dirty/Writeback 폴링까지 다 동원해봐도 — **더미가 cleanup 로그 증거 없이 통째로
+> 사라지는 현상이 반복 재현**됐다. 같은 조건에서 `reboot` 대신
+> `systemctl restart docker-loader`(전원 재부팅 없이 앱만 재시작)로 트리거를 바꾸면
+> cleanup이 `[cleanup_if_low_disk_space]`/`[cleanup] Removing:` 로그까지 남기며 매번
+> 정상 발화하는 것을 실측으로 확인했다. 또한 실제 필드 버그 리포트(디스크 사용률이
+> 91%→71%→31%→11%로 여러 날에 걸쳐 점진적으로 회복된 사례)와 대조해보면, 그 패턴은
+> "cleanup이 완전히 실패한다"가 아니라 "cleanup이 여러 차례에 걸쳐 정상적으로 누적
+> 동작한다"는 증거였다 — 즉 "대용량 쓰기 직후 즉시 reboot"이라는 조합 자체가 실 필드
+> 시나리오에 없던, 이 TC의 재현 방법론이 만든 별개의 인위적 엣지 케이스였을 가능성이
+> 높다. 그래서 트리거를 `systemctl restart docker-loader`(TC12가 이미 쓰는 검증된
+> 패턴)로 바꾸고, `reboot` 관련 유실 현상 자체는 원인 불명·실 필드 패턴 불일치로 이 TC
+> 범위에서 제외해 별도 이슈로만 추적한다. 이 전환으로 SSH/시리얼 세션이 더 이상 안
+> 끊기게 돼 `--only`/`--full`에도 자연스럽게 편입됐다(TC10처럼 별도 pre/post로 나눌
+> 필요가 없어짐).
+
+> **더미 mtime을 30일 미만으로 두는 이유:** `cleanup_log_dir()`는 이 TC가 검증하려는
+> 저장공간-부족 경로(`cleanup_if_low_disk_space`) 외에도, 매 호출마다 **여유공간과
+> 무관하게 30일(`LOG_RETAIN_DAY`) 지난 파일을 무조건 삭제**하는 `delete_log()`를 먼저
+> 실행한다. 더미를 30일 이상 오래된 것으로 만들면 두 경로가 뒤섞여 "저장공간 부족 시
+> 정말로 `cleanup_if_low_disk_space`가 지운 것"인지 판별이 흐려진다. 그래서 더미
+> mtime을 1일 전으로 둔다 — `delete_oldest_files_until_safe()`는 mtime이 아니라 "그
+> 순간 파티션 여유율<10%"만으로 삭제 여부를 결정하므로, 1일 전이어도 최우선(가장 오래된
+> 순서) 삭제 대상이 되는 데는 지장이 없다.
+
+> **더미 배치 설계 근거 (및 한계):** `task_cleanup_logs()`는 `SYSTEM_LOG_DIRS`를
+> STAGING→TOUPLOAD→ARCHIVE 순서로 순회하고, 각 디렉토리 처리 시점마다
+> `cleanup_if_low_disk_space()`가 **그 순간의 파티션 전체 여유율**을 다시 확인한다
+> (`free_ratio >= threshold_percent(10)`이면 그 디렉토리는 그냥 스킵). 그래서
+> STAGING/TOUPLOAD엔 트리거 여부만 확인할 작은 더미(합쳐서 3MB, 1MB×3개 분할)를,
+> ARCHIVE엔 실제 회복을 담당할 큰 더미(8~105MB대 여러 개 분할)를 두는 구성으로
+> 만들었다 — **세 디렉토리 전부 단일 거대 파일이 아니라 여러 개로 쪼갠다**
+> (`system_log_partition.txt` 참고 사례처럼 실제로는 파일이 여러 개 쌓인 형태이고,
+> `delete_oldest_files_until_safe`가 오래된 순으로 순차 삭제하는 과정도 관찰할 수
+> 있게 하기 위함, 2026-09-04 사용자 확인). 다만 STAGING/TOUPLOAD에 우리 더미 말고
+> 다른 실제 운영 파일이 남아있으면 `delete_oldest_files_until_safe()`가 그것들까지
+> 오래된 순으로 같이 지우다 그 디렉토리만으로 20%를 채워버릴 수 있고, 그러면 ARCHIVE
+> 차례는 아예 오지 않을 수 있다 — 몇 곳에서 회수되는지는 실제 파일 분포에 달려있어
+> 스크립트가 통제할 수 없다. 그래서 TC18-4는 "세 디렉토리 모두"가 아니라
+> "SYSTEM_LOG_DIRS 중 최소 1곳 이상에서 실제로 발화했다"만 직접 증거로 요구한다.
+
+### 사전 조건
+
+- 공통 전제 조건 충족
+- **예외 케이스 전용 파괴적 시험**: 실제 파티션 여유공간을 소진시킨다. 시험 시작 시점
+  `/edge/log` 파티션 여유율이 **25% 이상**이어야 하며(더미 삭제만으로 코드의 회복
+  목표치(threshold_percent*2=20%)를 확정적으로 넘기기 위한 마진, 실제 로그 파일을
+  건드릴 위험 배제) — 그 외엔 여유율이 얼마든 목표 여유율(9%, 10% 트리거 바로 아래)까지
+  낮추는 데 필요한 만큼 실제로 더미를 채운다. 안전 상한(`TC18_MAX_FILL_MB`, 기본
+  6144MB)은 df 파싱이 완전히 깨진 극단적 케이스만 걸러내는 최후 안전장치일 뿐, 정상적인
+  여유율 범위에서 필요한 더미량을 막지 않는다.
+
+  > **실측(2026-09-04, 192.168.10.25):** 5.9GB 파티션(`/dev/mmcblk2p9` → `/edge/log`)에서
+  > 여유율 85%(`df -h` 기준 Used 10%와 혼동 주의 — `df`의 Capacity% 컬럼은 **사용률**이지
+  > 여유율이 아니다). 이 상태에서 10% 밑으로 낮추려면 더미가 약 4.55GB 필요 — 안전 상한
+  > 6144MB 이내라 그대로 채워서 시험이 진행된다.
+- `systemctl restart docker-loader` 실행 권한(root), `pgrep`, `dd`, `df -P`, `touch -d`,
+  `awk` 사용 가능
+- 다른 TC와 동시 실행 금지 (파티션 여유공간을 실제로 바꾸는 시험이라 TC04/15/16 등
+  디스크 여유공간을 전제하는 다른 TC와 겹치면 서로 오판을 유발할 수 있음)
+
+### 절차
+
+1. `df -P`로 `STAGING_DIR`가 속한 파티션의 `total_kb`/`avail_kb`/여유율(퍼밀) 확인
+2. 사전 조건(여유율 ≥25%, 목표 여유율까지 낮추는 데 필요한 용량 ≤ 안전 상한) 확인 —
+   미충족 시 TC18-0 FAIL 기록 후 더미 생성 없이 즉시 종료(SKIP)
+3. 더미 생성 (**세 디렉토리 전부 단일 파일이 아니라 여러 개로 분할**, 2026-09-04
+   사용자 확인): `staging`(1MB×3개 분할, `.log`), `toupload`(1MB×3개 분할, `.xz`),
+   `archive`(나머지 전체를 **8~105MB대 여러 개 파일로 분할** — 실제 로그 rotation
+   크기에 가까운 청크 여러 개로 나눠서, `delete_oldest_files_until_safe`가 오래된
+   것부터 순차적으로 지우는 걸 관찰할 수 있게 함) — 총량은 파티션 여유율을 9% 부근
+   (10% 트리거 바로 아래)까지 낮추도록 매 실행 시 동적 계산
+4. 모든 더미를 `touch -d "1 day ago"`(archive는 파일마다 1분씩 어긋나게, 모두 1일 전
+   기준)로 mtime 설정(30일 미만 — day-retention 경로와 섞이지 않게 함, 오래된 순서도
+   결정적으로 확인 가능)
+5. `df -P`로 더미 배치 후 여유율 재확인 — 10% 미만으로 낮아졌는지 확인
+6. `systemctl restart docker-loader` 실행(system_log 포함 재시작, TC12와 동일 트리거
+   패턴) — `task_cleanup_logs()`가 재시작 직후(`system_log_timer_loop()` 시작 직후,
+   92db92bb 이후 맨 앞) 동기 실행된다. 트리거 직후 **`journalctl -u docker-loader -f
+   --no-pager -o short-iso`를 `timeout 20`으로 20초만 백그라운드 실시간 캡처**해 별도
+   파일(`/tmp/tc18_journal_capture.log`)에 사본을 떠둔다(아래 Flag 참고) — `timeout`으로
+   자체 종료되므로 PID 추적/kill 불필요
+7. 더미가 모두 사라질 때까지 최대 90초, 1초 간격 폴링(TC12와 동일 예산) — 이 동안 위
+   20초 캡처는 이미 자체 종료돼 있다
+8. **`sync` 강제 실행 후 `df -P`가 안정될 때까지 최대 30초 폴링**(아래 Flag 참고),
+   현재 여유율 확인
+9. **캡처 파일에서**(라이브 재조회 아님, 아래 Flag 참고) `cleanup_if_low_disk_space()`/
+   `delete_oldest_files_until_safe()`가 실제로 발화한 직접 증거를 확인:
+   `[cleanup_if_low_disk_space]`(발화 여부), `[cleanup] Removing:`(어떤 파일을
+   지웠는지) 로그를 `dump_cmd`로 통째 캡처하고, 더미 파일명 중 **1개 이상**이
+   `[cleanup] Removing:` 로그에 등장하는지 확인
+10. 파티션 여유율이 20% 이상으로 회복됐는지 확인
+
+> **주의 (Flag, 2026-09-04 추가, df 지연):** archive 더미(4.5GB급)가 실제로 `[cleanup]
+> Removing:` 로그까지 남기며 삭제됐는데도, 그 직후 곧바로 `df`를 찍으면 여유율 회수가
+> 겨우 몇 MB만 반영되고(예: 537M→544M), 몇 분 뒤 다시 확인하면 baseline까지 완전히
+> 회복돼 있는 게 실측됐다(`du -sh`로 블록도 실제로 비었음을 확인) — `/edge/log`가
+> `commit=60`으로 마운트돼 있어(기본 5초 대비 12배 긴 간격) 대용량 단일/누적 삭제의
+> 블록 회수 반영이 지연되는 것으로 추정된다. `sync`를 강제로 호출한 뒤 `df`가 안정될
+> 때까지 짧게 폴링해서, 이 지연으로 인한 TC18-3 오탐(false negative)을 막는다.
+
+> **주의 (Flag, 2026-09-04 추가, journal 증거 소멸 — serial 실측으로 원인 특정):**
+> restart 이후 `journalctl -u docker-loader`를 사후 조회하면 `[cleanup] Removing:`
+> 로그가 매번 0건이었다. 처음엔 "cleanup이 증거 없이 파일만 지운다"는 미스터리로
+> 의심했으나, `journalctl -f` 백그라운드 실시간 tail(시리얼 콘솔로 직접 확인)로 대조한
+> 결과 **로그는 실제로 정상 발화**한다(`[cleanup] Removing: ...` 19건 전부 + `[cleanup]
+> Enough space recovered: 20.397%`까지 확인). 문제는 그 직후(260ms 뒤) `task_cleanup_logs()`
+> 바로 다음 순서로 매 시작마다 호출되는 **`task_capture_boot_log()`**가
+> `request_rotate_log()` → `SYSTEM_LOG_CMD_ROTATE_VACUUM`(`journalctl --rotate &&
+> journalctl --vacuum-files=1`)을 실행해 journald 자체 저장소(같은 `/edge/log` 파티션)를
+> 작게 유지하려고 archived journal을 지워버리는 것 — 방금 남긴 `[cleanup] Removing:`
+> 로그까지 같이 날아간다. `delete_old_journals()`(machine-id 불일치 디렉토리만 지움,
+> 무관)가 아니라 `task_capture_boot_log()`가 원인이며, journald를 롤링 버퍼처럼 쓰고
+> 주기적으로 비우는 게 이 앱의 정상 설계라 코드 결함은 아니다 — 다만 이 때문에 "restart
+> 후 사후 조회"로는 근본적으로 증거를 못 잡는다. 그래서 절차 6에서 트리거 직후
+> `journalctl -f`를 20초만 별도 파일에 실시간 tail해 사본을 떠 두고, vacuum이 journald
+> 내부 저장소를 지우더라도 그 사본에서 읽는다(같은 파일을 매 시작마다 만드는
+> `task_capture_boot_log()`의 `systemlog_*.log.xz` 산출물도 이론상 같은 사본이 되지만,
+> 뒤이은 `task_merge_staged_logs()`가 곧바로 병합·업로드 큐로 옮겨 언제 사라질지 통제할
+> 수 없어 증거로 채택하지 않았다).
+
+> **주의 (Flag, 2026-09-04 추가, TC18-2 기준 정정):** 원래 TC18-2는 "3곳 모두 파일
+> 부재"를 요구했는데, 이는 `delete_oldest_files_until_safe()`의 실제 설계(파티션 전체
+> 여유율이 목표(threshold_percent*2=20%)에 도달하는 순간 그 디렉토리 처리를 멈춤 — 남은
+> 파일을 끝까지 다 지우는 게 아님)와 안 맞는 기준이었다. 실측(2026-09-04)에서 archive
+> 더미 89개 중 13개만 지우고 20.397%에서 정상적으로 멈췄는데, 이걸 "3곳 모두 삭제
+> 안 됨"으로 FAIL 오판정했다. 그래서 "3곳 중 최소 1곳에서라도 파일 개수가 실제로
+> 줄었는지"(생성량 대비 잔존량 감소)로 완화했다 — TC18-4(journal 로그 증거)와는 독립된
+> filesystem 관점의 보조 증거로만 쓰고, "전부 삭제"를 더 이상 정상 기준으로 삼지 않는다.
+
+> **왜 파일 부재만으론 부족한가:** 더미가 사라졌다는 사실만으로는 "cleanup 코드 경로가
+> 지운 것"과 다른 원인(예: 알 수 없는 유실)을 완전히 구분할 수 없다. `[cleanup]
+> Removing: <path>`는 삭제 루프(`delete_oldest_files_until_safe`)가 그 파일을 실제로
+> 지목해 `EdgeUtils::remove_file()`을 호출했다는 코드 레벨 증거이므로, 이걸 하나도 못
+> 찾으면 파일이 없어졌더라도 TC18-4는 FAIL로 남아 "증거 없음"을 명시적으로 드러낸다.
+
+### 기대 결과
+
+| 항목 | 기준 |
+|------|------|
+| 사전 조건 | 여유율 ≥25% AND 필요 소진량 ≤ 안전 상한 |
+| 더미 배치 후 여유율 | 10% 미만 |
+| 더미 (restart 후) | SYSTEM_LOG_DIRS 중 최소 1곳에서 더미 파일 개수가 실제로 감소함 (전부 삭제까지는 요구하지 않음 — 아래 Flag 참고) |
+| journald 삭제 증거 (restart 후) | 3개 더미 파일명 중 1개 이상이 `[cleanup] Removing:` 로그에 등장 |
+| 파티션 여유율 (restart 후) | 20% 이상으로 회복 |
+
+### PASS/FAIL Criteria
+
+| 기준 ID | 설명 | 타입 | 기준값 | 셸 검증 |
+|---------|------|------|--------|---------|
+| TC18-0 | 사전 조건 충족(실행 중 바이너리에 `[cleanup_if_low_disk_space]` 존재 AND 여유율≥25% AND 필요 소진량≤안전상한 6144MB) — 미충족 시 이후 절차 생략(SKIP) | boolean | true | `grep -caF "[cleanup_if_low_disk_space]" /proc/<pid>/exe` ≥1 + df 파싱값 기반 계산 |
+| TC18-1 | 더미 배치로 파티션 여유율이 10% 미만으로 낮춰짐 | boolean | true | `[ "$after_permille" -lt 100 ]` |
+| TC18-2 | SYSTEM_LOG_DIRS 중 최소 1곳에서 더미 파일 개수가 실제로 감소함 (filesystem 관점 증거, TC18-4의 journal 증거와는 독립 채널) | boolean | true | `staging_removed>=1 \|\| toupload_removed>=1 \|\| archive_removed>=1` (각 `생성개수 - 잔존개수`) |
+| TC18-4 | journald에 SYSTEM_LOG_DIRS 중 1곳 이상의 `[cleanup] Removing:` 로그 존재 (실제 cleanup 코드 경로로 삭제됐다는 직접 증거) | boolean | true | 3개 디렉토리 접두어(`tc18_dummy_staging_`/`toupload_`/`archive_`) 중 1개 이상 `journalctl -u docker-loader \| grep -F '[cleanup] Removing:'` 결과에 매치 |
+| TC18-3 | 여유율이 20% 이상으로 회복됨 | boolean | true | `[ "$cur_permille" -ge 200 ]` |
 
 ---
 
@@ -1562,7 +1771,7 @@ dump를 차단하는지, 트립 중에도 day-retention(`delete_log`)이 정상 
 | TC15 | A (자동) | task_rotate_sync compress 실패 시 raw .log 보존 — **재설계(2026-09-23)**: xz -0+300초 분리 타임아웃으로 기존 180s 공유 타임아웃 유도 방식이 더 이상 유효하지 않아, 대상 파티션을 거의 채워 xz를 ENOSPC로 결정적 실패시키는 fault injection으로 전환(요구사항 문서 대안 (a) 채택). 예외 케이스 전용 파괴적 시험, 시험 종료 시 filler 전량 삭제+여유공간 복원 필수 |
 | TC16 | A (자동) | task_capture_boot_log compress 실패 시 raw .log 보존 — TC15와 동일 ENOSPC 기법(2026-09-23 재설계) + `kill -9 system_log` 재시작 |
 | TC17 | A (자동) | MessageContext tid 미검증 재현 — cmd_host 응답 위조(`mosquitto_pub`) 직접 발행, 회귀 세트 미포함(단독 실행 전용) |
-| ~~TC18~~ | — | [2026-09-23 삭제] 저장공간 부족(<10%) 시 SYSTEM_LOG_DIRS cleanup — 검증 대상이던 `delete_if_low_disk_space()`/`delete_oldest_files_until_safe()`가 review 판단으로 코드에서 완전히 제거되어(다른 앱이 파티션을 채워도 system_log 파일만 지우는 게 실효성 없다는 이유) TC 자체를 삭제함. day-retention(`delete_log`)은 그대로 유지되며 TC07이 계속 검증한다 |
+| TC18 | A (자동) | [2026-10-02 R09 전용 복구] 저장공간 부족(<10%) 시 SYSTEM_LOG_DIRS cleanup — main에선 검증 대상 함수가 제거돼 2026-09-23 삭제됐으나 R090125 백포트에는 남아있어 복구. 빠른/전체 실행 미포함, `--tc18`/`--only`로만 실행. main 빌드(함수 부재)·여유율<25%면 TC18-0에서 자동 SKIP |
 | TC19 | B (반자동) | 로그 디스크 예산 watermark 타당성 근거 수집 — 데이터 수집(du/find)은 자동, "타당함/재검토 필요" 최종 판단은 결과 보고서 작성자 수동 판정. PASS/FAIL 게이트 아닌 informational |
 | TC20 | A (자동) | 로그 디스크 예산 circuit breaker 트립/재개 경계 + 트립 중 day-retention 유지 — 예외 케이스 전용 파괴적 시험(최대 ~2.6GiB 더미), `kill -9 system_log` 재시작으로 트립/재개 결정적 재현. `--full`/`--only`에 포함, 기본 실행에는 미포함. 사전 조건(여유공간) 미충족 시 자동 SKIP. TC20-4(트립 중 vacuum 실행 여부)는 informational/Flag — 코드 분석상 트립 중 미실행 기대(요구사항 가정과 배치, review 전달 필요) |
 | TC21 | A (자동) | 온디맨드 반복 요청 시 WARN 로그량 선형성 — 게이트 트립 상태(TC20 Phase 1 재사용 또는 자체 유발) 전제, 8회 반복 요청 대비 WARN 로그 수 선형성만 판정(레이트리밋 부재 자체는 기존 사양). `--full`/`--only`에 포함, 기본 실행에는 미포함. 다른 디스크 전제 TC와 동시 실행 금지 |

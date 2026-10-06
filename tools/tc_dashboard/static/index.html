@@ -64,6 +64,9 @@
   header { display: flex; align-items: center; justify-content: space-between;
            padding: 14px 24px; border-bottom: 1px solid var(--border); background: var(--panel); }
   header h1 { font-size: 17px; margin: 0; }
+  header h1 .ver { font-size: 11px; font-weight: 400; color: var(--muted); margin-left: 8px; }
+  .ems-ver { display: block; font-size: 11px; color: var(--muted); }
+  .ems-ver.mismatch { color: var(--warn); }
   header .dut { font-size: 12px; color: var(--muted); }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
   .dot.on { background: var(--pass); } .dot.off { background: var(--fail); }
@@ -225,7 +228,7 @@
 
   <div class="content">
     <header>
-      <h1 id="pageTitle">system_log TC Dashboard</h1>
+      <h1><span id="pageTitle">system_log TC Dashboard</span><span id="tcsVersion" class="ver"></span></h1>
       <div class="dut"><span id="dutDot" class="dot unknown" title="연결 상태 미확인 — 아직 실행 이력 없음"></span>DUT
         <select id="dutSelect" title="테스트할 DUT 선택"></select>
         <span id="channelBadge" class="badge channel-ssh" title="TC 실행에 사용되는 연결 채널">SSH</span>
@@ -772,8 +775,15 @@ async function refreshHistory() {
     const dutLabel = r.dut_host
       ? r.dut_host + (r.dut_port && r.dut_port !== 22 ? `:${r.dut_port}` : '')
       : null;
+    // DUT EMS 빌드(BUILD_VERSION) — run 시작 시 서버가 읽어 meta에 저장. 대상 EMS보다
+    // 낮으면 ⚠로 표시(실행은 막지 않음). 버전 기능 이전 run/serial 채널은 표시 생략.
+    const emsLine = r.dut_ems_version
+      ? `<span class="ems-ver${r.ems_mismatch ? ' mismatch' : ''}" title="${r.ems_mismatch
+          ? `DUT EMS가 이 run의 tcs_tools v${escapeHtml(r.tcs_version || '?')} 대상(>= ${escapeHtml(r.ems_target_min || '?')})보다 낮음 — 일부 TC가 빌드 차이로 오판됐을 수 있음`
+          : `tcs_tools v${escapeHtml(r.tcs_version || '?')} 대상 EMS >= ${escapeHtml(r.ems_target_min || '?')}`}">EMS ${escapeHtml(r.dut_ems_version)}${r.ems_mismatch ? ' ⚠' : ''}</span>`
+      : '';
     const dutCell = dutLabel
-      ? `<span title="이 run이 실행된 DUT">${escapeHtml(dutLabel)}</span>`
+      ? `<span title="이 run이 실행된 DUT">${escapeHtml(dutLabel)}</span>${emsLine}`
       : `<span class="muted" title="이 기능 추가 이전 실행이라 기록 없음">-</span>`;
     const stopCell = r.status === 'running'
       ? `<button class="stop-btn" type="button" title="중지" data-run-id="${r.run_id}" onclick="event.stopPropagation(); stopRun('${r.run_id}', this)"></button>`
@@ -836,7 +846,17 @@ async function initDutState() {
   }
 }
 
+async function loadTcsVersion() {
+  try {
+    const v = await fetch('/api/version').then(r => r.json());
+    if (v.tcs_version) {
+      $('#tcsVersion').textContent = `tcs_tools v${v.tcs_version} · 대상 EMS ≥ ${v.ems_target_min || '?'}`;
+    }
+  } catch (e) { /* 버전 표시는 부가 정보 — 실패해도 대시보드 동작에 영향 없음 */ }
+}
+
 async function init() {
+  loadTcsVersion();
   await loadDutSelector();
   await loadApps();
   await refreshAppMeta();

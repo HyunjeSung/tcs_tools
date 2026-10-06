@@ -21,13 +21,19 @@ JOURNAL_DIR="/var/log/journal"
 # 아니므로, 한 번 뽑은 고엔트로피 데이터를 재사용해도 무방하다).
 DUMMY_BLOB="/edge/log/.tc_dummy_journal_blob"
 DUMMY_BLOB_RAW_MB=400
-# [2026-09-23] TC18(저장공간 부족 cleanup)은 delete_if_low_disk_space()/
-# delete_oldest_files_until_safe() 함수 자체가 review 판단으로 코드에서 완전히
-# 제거되면서 검증 대상이 없어져 이 TC도 함께 삭제됨(요구사항 원문: "이 메커니즘이
-# system_log 아닌 다른 앱 때문에 파티션이 꽉 차도 애먼 system_log 파일만 지워서
-# 실효성이 없다"). 과거 TC18 전용 상수(TC18_TARGET_LOW_PERCENT 등)도 함께 제거—
-# 실측으로 확인됐던 "5.9GB 파티션 여유율 85%→9%까지 더미 약 4.55GB 필요"라는 수치는
-# TC15/16/20/21/22의 안전 상한(6144MB) 산정 근거로 주석에 그대로 남겨둔다.
+# [2026-10-02] TC18(저장공간 부족 cleanup) R09 전용으로 복구 — main에서는
+# delete_if_low_disk_space()/delete_oldest_files_until_safe()가 제거되어 2026-09-23에
+# TC가 삭제됐으나, R090125 백포트(309e4e2, EWP-2698)에는 cleanup_if_low_disk_space()가
+# 그대로 남아있어 R09 검증용으로 720df12 버전을 되살렸다. 해당 함수가 없는 빌드(main
+# 계열)에서는 TC18-0 사전 조건에서 자동 SKIP 된다.
+TC18_TARGET_LOW_PERCENT=9
+TC18_MIN_FREE_BEFORE_PERMILLE=250
+# 상한은 "df 파싱이 완전히 깨진 경우"만 걸러내는 최후 안전장치로만 두고(실사용 DUT는
+# 여유율이 얼마든 실제로 채운다 — 실측 192.168.10.25: 5.9GB 파티션 여유율 85%에서 목표
+# 9%까지 낮추는 데 더미 약 4.55GB 필요했음), 안전 상한(TC18_MAX_FILL_MB)을 그 실측치보다
+# 넉넉히 크게 잡아 그대로 수용한다.
+TC18_MAX_FREE_BEFORE_PERMILLE=950
+TC18_MAX_FILL_MB=6144
 PASS=0
 FAIL=0
 
@@ -156,9 +162,32 @@ setup_rotate() {
     dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log.xz
     FILES_BEFORE=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | wc -l)
 
+    local setup_epoch
+    setup_epoch=$(date +%s)
     ROTATE_RESP=$(send_and_wait "get_log_data" "{}" 30)
     echo "[SETUP] 응답: $([ -n "$ROTATE_RESP" ] && echo "OK: $ROTATE_RESP" || echo 'TIMEOUT')"
     sleep 10
+
+    # 생성된 .xz는 대기 10초 안에도 클라우드 업로드로 지워질 수 있다(2026-10-06 default run
+    # 실측: after=0 → TC01/TC03 FAIL). 파일명/생성 여부는 journal에서 확정한다 —
+    # dump 대상 파일명 + "Created meta file"(xz 성공 후 업로드 큐 등록) 로그.
+    # [2026-10-06 2차] SM의 "Executing host command: journalctl -o cat > ..." 줄은 실측에서 누락된
+    # 사례가 있어(140733 run: Created meta만 있고 dump 줄 없음) system_log 자신이 남기는
+    # "Created meta file: <name>.xz.meta"를 1순위 근거로 쓴다 — xz 성공+업로드 큐 등록까지 보장.
+    local meta_name
+    meta_name=$(journalctl -u docker-loader --no-pager -o cat --since "@${setup_epoch}" 2>/dev/null \
+                | grep -F "Created meta file: ${TOUPLOAD_DIR}/systemlog_" \
+                | grep -o 'systemlog_[0-9]\{14\}_[0-9]\{14\}\.log' | head -1)
+    SETUP_XZ_QUEUED=""
+    if [ -n "$meta_name" ]; then
+        SETUP_DUMP_NAME="$meta_name"
+        SETUP_XZ_QUEUED=1
+    else
+        SETUP_DUMP_NAME=$(journalctl -u docker-loader --no-pager -o cat --since "@${setup_epoch}" 2>/dev/null \
+                          | grep -F "journalctl -o cat > ${TOUPLOAD_DIR}/" \
+                          | grep -o 'systemlog_[0-9]\{14\}_[0-9]\{14\}\.log' | head -1)
+    fi
+    dump_cmd sh -c "journalctl -u docker-loader --no-pager -o cat --since '@${setup_epoch}' 2>/dev/null | grep -E 'journalctl -o cat > ${TOUPLOAD_DIR}/|Created meta file: ${TOUPLOAD_DIR}/systemlog_'"
 
     dump_cmd journalctl --disk-usage
     JOURNAL_DISKUSAGE_AFTER="$(journalctl --disk-usage 2>/dev/null)"
@@ -168,8 +197,11 @@ setup_rotate() {
     dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log.xz
     FILES_AFTER=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | wc -l)
     LATEST_XZ=$(find_latest_xz "${TOUPLOAD_DIR}")
+    # 업로드로 이미 사라졌으면 journal로 확정한 파일명을 쓴다(TC05/06은 실파일 필요 — 자체 처리)
+    [ -z "$LATEST_XZ" ] && [ -n "$SETUP_DUMP_NAME" ] && LATEST_XZ="${TOUPLOAD_DIR}/${SETUP_DUMP_NAME}.xz"
 
     echo "[SETUP] 완료."
+    echo "[SETUP] journal dump 파일명: ${SETUP_DUMP_NAME:-없음}, xz 업로드 큐 등록: $([ -n "$SETUP_XZ_QUEUED" ] && echo 확인 || echo 미확인)"
     echo "[SETUP] xz 파일: before=${FILES_BEFORE} after=${FILES_AFTER}"
     echo "[SETUP] 저널: before=${JOURNAL_SIZE_BEFORE} after=${JOURNAL_SIZE_AFTER}"
     echo ""
@@ -180,6 +212,8 @@ setup_rotate() {
 # ============================================================
 tc01_filename_format() {
     echo "=== TC01: 파일명 규칙 검증 ==="
+    # 파일명은 SETUP이 journal에서 확정한 dump 대상 + .xz (toupload 실파일은 업로드로 이미
+    # 사라졌을 수 있어 ls는 참고 근거 — 파일명 근거는 SETUP의 journal 원문 출력)
     dump_cmd ls -la "$LATEST_XZ"
 
     if echo "$LATEST_XZ" | grep -qE "systemlog_[0-9]{14}_[0-9]{14}\.log\.xz"; then
@@ -276,15 +310,10 @@ tc02_timer_running() {
         echo "    [WARN] '[system_log_timer_loop] loop started' 로그 없음 — 부팅 직후 vacuum으로 사라졌을 가능성, 계속 진행"
     fi
 
-    # 2. BEFORE 목록 기록 — "최신 파일"을 mtime/파일명 중 뭘로 찾든 이전 run이 남긴
-    # 미래 날짜 잔재에 취약하다(find_latest_xz도 마찬가지). TC11/TC14와 동일하게
-    # before/after 목록을 통째로 저장해두고 diff(comm -13)로 "이번에 진짜 새로 생긴
-    # 파일"만 식별한다 — 잔재 존재 여부와 무관하게 항상 정확하다.
-    local files_before files_after t0 BEFORE_LIST
+    # 2. toupload 목록은 참고 근거로만 남긴다 — 발화로 생긴 .xz는 관찰 창(70초) 안에 클라우드
+    # 업로드로 지워질 수 있어 파일 개수/diff로는 오판한다(2026-10-06 --full 실측: 13:52:36에
+    # 정상 생성됐지만 70초 뒤 toupload 0개 → FAIL). 판정은 journal의 발화/dump 로그로 한다.
     dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log.xz
-    BEFORE_LIST=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | sort)
-    files_before=$(echo "$BEFORE_LIST" | grep -c .)
-    echo "  [TC02-절차2] files_before=${files_before}"
 
     # 3. 시스템 시간을 현재 시간(NTP)과 동기화
     echo "  [TC02-절차3] NTP로 시스템 시간 동기화..."
@@ -294,24 +323,33 @@ tc02_timer_running() {
     echo "    동기화 후 시간: $(date '+%F %T')"
 
     # 4. 시간 +25h shift
+    local t0
     t0=$(date +%s)
     local t_shift=$((t0 + 25 * 3600))
     echo "  [TC02-절차4] 시스템 시간 +25h 이동: $(date -d "@${t_shift}" '+%F %T') (원래: $(date -d "@${t0}" '+%F %T'))"
     date -s "@${t_shift}" > /dev/null
 
-    # 5. 타이머 발화 대기 (70초)
-    echo "  [TC02-절차5] 타이머 발화 대기 (70초)..."
-    sleep 70
+    # 5. 타이머 발화 대기 — shift 이후 journal에서 daily task 종료 로그를 최대 70초 폴링
+    echo "  [TC02-절차5] 타이머 발화 대기 (최대 70초, journal 폴링)..."
+    local i done_line=""
+    for i in $(seq 1 35); do
+        sleep 2
+        done_line=$(journalctl -u docker-loader --no-pager -o cat --since "@${t_shift}" 2>/dev/null \
+                     | grep -F '[task_rotate_sync] End of Log rotate logic' | tail -1)
+        [ -n "$done_line" ] && break
+    done
+    dump_cmd sh -c "journalctl -u docker-loader --no-pager -o cat --since '@${t_shift}' 2>/dev/null | grep -E 'system_log_timer_loop|task_rotate_sync|Created meta file: ${TOUPLOAD_DIR}/systemlog_'"
 
-    # 6. 신규 파일 + endtime 확인 — comm -13 으로 BEFORE_LIST에 없던 파일만 골라낸다
-    # (TC14의 NEW_XZ 패턴과 동일). 여러 개면 그중 첫 번째를 본다 — TC14와 동일한 관례.
+    # 6. 발화 산출물 파일명 — task_rotate_sync 안의 rotate&&vacuum이 그 이전 줄("Running daily
+    # task", dump 명령)을 지워버리므로(2026-10-06 실측) rotate 뒤에 찍히는 "Created meta file"
+    # 줄에서 뽑는다. shift 이후엔 다른 요청이 없으므로 이 구간의 rotate 종료+meta 생성 = timer 발화.
+    local dump_name
+    dump_name=$(journalctl -u docker-loader --no-pager -o cat --since "@${t_shift}" 2>/dev/null \
+                | grep -F "Created meta file: ${TOUPLOAD_DIR}/systemlog_" \
+                | grep -o 'systemlog_[0-9]\{14\}_[0-9]\{14\}\.log' | head -1)
+    echo "  [TC02-절차6] rotate 종료: ${done_line:-없음}"
+    echo "  [TC02-절차6] 발화 산출물: ${dump_name:-없음}.xz"
     dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log.xz
-    local AFTER_LIST
-    AFTER_LIST=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | sort)
-    files_after=$(echo "$AFTER_LIST" | grep -c .)
-    local latest_xz
-    latest_xz=$(comm -13 <(echo "$BEFORE_LIST") <(echo "$AFTER_LIST") | head -1)
-    echo "  [TC02-절차6] files_after=${files_after}, 신규 파일=$(basename "${latest_xz:-none}")"
 
     # 7. 시스템 시간을 현재 시간으로 복원.
     # [2026-08-25 device_log TC18 세션에서 발견 후 재수정] 원래는 hwclock -s(RTC 기준)를
@@ -323,22 +361,31 @@ tc02_timer_running() {
     # "성공"으로 보고됨) — RTC 상태에 따라 복원이 조용히 실패할 수 있는 구조였다.
     # RTC/NTP 둘 다에 의존하지 않고, 4번에서 이미 셸 변수로 저장해둔 t0(jump 전 원래
     # epoch)로 직접 복원한다 — device_log TC18/TC19가 이미 쓰는 것과 동일한 방식.
+    # 대기한 시간만큼은 더해서 복원한다(t0 그대로면 그만큼 시계가 뒤로 감).
     echo "  [TC02-절차7] 시스템 시간 복원..."
-    date -s "@${t0}" > /dev/null
+    date -s "@$((t0 + $(date +%s) - t_shift))" > /dev/null
     echo "    복원 후 시간: $(date '+%F %T')"
 
+    # 8. shift 중 timer의 rotate로 생긴 journal 파일은 첫 기록이 미래(+25h) 시각이라, 복원 후에도
+    # list-boots 시작시각이 미래로 잡혀 이후 dump 파일명이 start>end로 역전된다(2026-10-06
+    # --full 실측: TC01-2 systemlog_20261007135236_20261006125235). rotate로 현재 파일을
+    # 닫고 archived 파일을 전부 지워, 다음 dump의 시작시각이 복원된 현재 시각이 되게 한다.
+    echo "  [TC02-절차8] 미래 시각 journal 정리..."
+    dump_cmd journalctl --rotate
+    # BusyBox find는 -delete 미지원(2026-10-06 실측) — 셸 glob으로 직접 삭제
+    dump_cmd sh -c "rm -fv ${JOURNAL_DIR}/*/system@*.journal"
+    dump_cmd journalctl --list-boots
+
     # PASS/FAIL Criteria
-    if [ "$files_after" -gt "$files_before" ]; then
-        assert "TC02-1: toupload 신규 .xz 생성" "PASS"
+    if [ -n "$done_line" ] && [ -n "$dump_name" ]; then
+        assert "TC02-1: +25h 후 timer 발화 (journal rotate 종료 + toupload .xz meta 생성)" "PASS"
     else
-        assert "TC02-1: toupload 신규 .xz 생성" "FAIL"
-        echo "    files_before=${files_before} files_after=${files_after}"
+        assert "TC02-1: +25h 후 timer 발화 (journal rotate 종료 + toupload .xz meta 생성)" "FAIL" "rotate_end=${done_line:-없음} meta=${dump_name:-없음}"
     fi
 
     local expected_endtime actual_endtime expected_epoch actual_epoch diff_sec
     expected_endtime=$(date -d "@${t_shift}" '+%Y%m%d%H%M%S')
-    actual_endtime=$(basename "${latest_xz:-}" | sed -n 's/systemlog_[0-9]*_\([0-9]\{14\}\)\.log\.xz/\1/p')
-    echo "  [TC02-2] 최신 파일: $(basename "${latest_xz:-none}")"
+    actual_endtime=$(echo "${dump_name:-}" | sed -n 's/systemlog_[0-9]*_\([0-9]\{14\}\)\.log/\1/p')
     echo "  [TC02-2] 기대 endtime(+25h)=${expected_endtime}, 실제 endtime=${actual_endtime:-N/A}"
     if [ -n "$actual_endtime" ]; then
         expected_epoch="$t_shift"
@@ -358,8 +405,7 @@ tc02_timer_running() {
             echo "    actual_endtime 파싱 실패: ${actual_endtime}"
         fi
     else
-        assert "TC02-2: 파일명 endtime이 변경 시간 ±120초 이내" "FAIL"
-        echo "    latest_xz에서 endtime 추출 실패: ${latest_xz}"
+        assert "TC02-2: 파일명 endtime이 변경 시간 ±120초 이내" "FAIL" "발화 dump 파일명 없음"
     fi
 }
 
@@ -369,9 +415,11 @@ tc02_timer_running() {
 tc03_on_demand_export() {
     echo "=== TC03: On-demand export ==="
 
-    if [ "$FILES_AFTER" -gt "$FILES_BEFORE" ]; then
+    # 생성 직후 업로드로 지워질 수 있어 개수 비교만으로는 오판 — SETUP이 journal로 확인한
+    # "Created meta file: <dump>.xz.meta"(xz 성공 + 업로드 큐 등록)도 생성 근거로 인정한다.
+    if [ "$FILES_AFTER" -gt "$FILES_BEFORE" ] || [ -n "$SETUP_XZ_QUEUED" ]; then
         assert "TC03-1: get_log_data 후 .xz 파일 신규 생성됨" "PASS"
-        echo "  before=${FILES_BEFORE} after=${FILES_AFTER}"
+        echo "  before=${FILES_BEFORE} after=${FILES_AFTER}, journal 큐 등록=${SETUP_DUMP_NAME:-없음}.xz"
     else
         assert "TC03-1: get_log_data 후 .xz 파일 신규 생성됨" "FAIL"
         echo "  before=${FILES_BEFORE} after=${FILES_AFTER}"
@@ -401,6 +449,11 @@ tc04_timeout_large_log() {
     local labels="100MB 200MB"
     local wait_timeouts="200 500"
     local idx=0
+
+    # compress 실패 시 system_log는 raw .log(100~200MB)를 toupload에 남긴다 — 그대로 두면
+    # 뒤 TC(TC15 등)의 디스크 계산/신규 .log 판정을 흐리므로 TC04가 만든 것만 마지막에 정리.
+    local RAW_BEFORE_LIST
+    RAW_BEFORE_LIST=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log 2>/dev/null | sort)
 
     for target_mb in $target_sizes; do
         idx=$((idx + 1))
@@ -454,18 +507,27 @@ tc04_timeout_large_log() {
         echo "    [TC04-${idx}] get_log_data 요청 송신 (최대 ${wait_timeout}초 대기)..."
         local t0 t1 elapsed resp
         t0=$(date +%s)
+        # 응답 직후 업로드로 원본이 지워질 수 있어 스냅샷 사본으로 판정한다(TC05와 동일, 2026-10-06)
+        local snap_dir="/tmp/tc04_xz_snapshot"
+        start_xz_snapshot "$snap_dir"
         resp=$(send_and_wait "get_log_data" "{}" "$wait_timeout")
         t1=$(date +%s)
         elapsed=$((t1 - t0))
         echo "    [TC04-${idx}] 응답: $([ -n "$resp" ] && echo "OK ($resp)" || echo 'TIMEOUT'), 응답까지 ${elapsed}초"
+        sleep 3
+        stop_xz_snapshot
 
-        local AFTER_LIST after_files new_xz
+        local AFTER_LIST after_files new_xz new_name
         AFTER_LIST=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | sort)
-        new_xz=$(comm -13 <(echo "$BEFORE_LIST") <(echo "$AFTER_LIST") | head -1)
         after_files=$(echo "$AFTER_LIST" | grep -c .)
+        new_name=$(pick_completed_snapshot "$(echo "$BEFORE_LIST" | xargs -r -n1 basename | sort)" "$snap_dir" "@${t0}")
+        new_xz=""
+        [ -n "$new_name" ] && new_xz="${snap_dir}/${new_name}"
 
         dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log.xz
-        echo "    [TC04-${idx}] after: files=${after_files}"
+        dump_cmd ls -la "$snap_dir"
+        dump_cmd sh -c "journalctl -u docker-loader --no-pager -o cat --since '@${t0}' 2>/dev/null | grep -E 'Created meta file: ${TOUPLOAD_DIR}/systemlog_|Failed to compress'"
+        echo "    [TC04-${idx}] after: files=${after_files}, 압축 완료(meta 로그) 신규=${new_name:-없음}"
 
         # criteria ID: 100MB 티어 = TC04-1(존재)/TC04-2(무결성), 200MB 티어 = TC04-3/TC04-4
         local exist_id integrity_id
@@ -489,9 +551,20 @@ tc04_timeout_large_log() {
         else
             assert "TC04-${integrity_id}: ${label} 티어 산출물 무결성" "FAIL" "신규 .xz 없음 — 무결성 검사 대상 없음"
         fi
+        rm -rf "$snap_dir"
     done
 
     # 최종 cleanup
+    local RAW_AFTER_LIST raw_left f
+    RAW_AFTER_LIST=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log 2>/dev/null | sort)
+    raw_left=$(comm -13 <(echo "$RAW_BEFORE_LIST") <(echo "$RAW_AFTER_LIST"))
+    if [ -n "$raw_left" ]; then
+        echo "  [CLEANUP] TC04가 남긴 raw .log 정리 (compress 실패 잔재)"
+        for f in $raw_left; do
+            dump_cmd ls -la "$f"
+            rm -f "$f" "${f}.xz" 2>/dev/null
+        done
+    fi
     journalctl --rotate 2>/dev/null
     journalctl --vacuum-files=1 2>/dev/null
 }
@@ -499,6 +572,56 @@ tc04_timeout_large_log() {
 # ============================================================
 # TC05: Rotation - xz 압축 확인
 # ============================================================
+# toupload에 생기는 systemlog_*.log.xz를 업로드로 지워지기 전에 0.2초 간격으로 $1에 복사해
+# 둔다(크기가 바뀌면 다시 복사 — xz가 쓰는 중이던 partial을 최종본으로 덮어씀). 생성 직후
+# 클라우드 업로드가 원본을 지워도 내용 검증(xz --test)을 할 수 있게 하기 위함(2026-10-06).
+start_xz_snapshot() {
+    local snap="$1"
+    rm -rf "$snap"
+    mkdir -p "$snap"
+    (
+        while [ -d "$snap" ]; do
+            for f in "${TOUPLOAD_DIR}"/systemlog_*.log.xz; do
+                [ -f "$f" ] || continue
+                if [ "$(stat -c%s "$f" 2>/dev/null)" != "$(stat -c%s "$snap/$(basename "$f")" 2>/dev/null)" ]; then
+                    cp -p "$f" "$snap/" 2>/dev/null
+                fi
+            done
+            sleep 0.2
+        done
+    ) &
+    XZ_SNAPSHOT_PID=$!
+}
+
+stop_xz_snapshot() {
+    kill "$XZ_SNAPSHOT_PID" 2>/dev/null
+    wait "$XZ_SNAPSHOT_PID" 2>/dev/null
+}
+
+# system_log가 $1(.log.xz 파일명)의 meta를 만들었는지 — "Created meta file"은 xz 성공 후에만
+# 찍히므로 압축 완료 + 업로드 큐 등록의 근거다. task_rotate_sync 안의 rotate&&vacuum이 그
+# 이전 journal 줄(dump 명령, Running daily task 등)을 지워버리지만 이 줄은 rotate 뒤에
+# 찍혀 살아남는다(2026-10-06 실측). $2 = journalctl --since 값.
+xz_meta_logged() {
+    journalctl -u docker-loader --no-pager -o cat --since "$2" 2>/dev/null \
+        | grep -qF "Created meta file: ${TOUPLOAD_DIR}/$1.meta"
+}
+
+# 스냅샷($2)의 신규 파일(before 목록 $1 기준) 중 meta 로그($3 이후)가 있는 = 압축 완료된 것을
+# 골라 출력. xz 타임아웃으로 지워진 partial .xz 사본을 "생성됨"으로 오판하지 않기 위함
+# (2026-10-06 실측: R090127에서 TC04가 partial 사본으로 거짓 PASS). $4(선택) = 우선할 접두어.
+pick_completed_snapshot() {
+    local before="$1" snap="$2" since="$3" prefix="${4:-}" n
+    for n in $(comm -13 <(echo "$before") <(ls "$snap" 2>/dev/null | sort) | sort -t_ -k1,1 \
+               | awk -v p="$prefix" 'p != "" && index($0, p) == 1 {print; next} {rest = rest $0 "\n"} END {printf "%s", rest}'); do
+        if xz_meta_logged "$n" "$since"; then
+            echo "$n"
+            return 0
+        fi
+    done
+    return 1
+}
+
 tc05_compression() {
     echo "=== TC05: 로그 파일 xz 압축 확인 ==="
 
@@ -506,17 +629,26 @@ tc05_compression() {
     # 업로드 파이프라인이 먼저 업로드+삭제해버릴 수 있다(관찰 창이 길수록 흔들림) —
     # TC02/TC04와 동일한 이유로 여기서 자체 get_log_data를 새로 발행하고 comm -13 diff로
     # "이번에 진짜 새로 생긴" 파일만 검사한다.
-    local BEFORE_LIST AFTER_LIST NEW_XZ resp
+    # 응답 직후 업로드로 원본이 지워질 수 있어(2026-10-06 실측: 10초 대기 중 소멸) 생성 순간을
+    # 스냅샷으로 잡는다 — 존재 판정/무결성은 스냅샷 사본, 원본 .log 삭제는 toupload 원위치로 본다.
+    local BEFORE_LIST NEW_XZ NEW_NAME resp snap_dir="/tmp/tc05_xz_snapshot"
     dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log.xz
-    BEFORE_LIST=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | sort)
+    BEFORE_LIST=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | xargs -r -n1 basename | sort)
 
+    local tc05_epoch
+    tc05_epoch=$(date +%s)
+    start_xz_snapshot "$snap_dir"
     resp=$(send_and_wait "get_log_data" "{}" 30)
     echo "  [TC05] get_log_data 응답: $([ -n "$resp" ] && echo "OK: $resp" || echo 'TIMEOUT')"
     sleep 10
+    stop_xz_snapshot
 
     dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log.xz
-    AFTER_LIST=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | sort)
-    NEW_XZ=$(comm -13 <(echo "$BEFORE_LIST") <(echo "$AFTER_LIST") | head -1)
+    dump_cmd ls -la "$snap_dir"
+    dump_cmd sh -c "journalctl -u docker-loader --no-pager -o cat --since '@${tc05_epoch}' 2>/dev/null | grep -F 'Created meta file: ${TOUPLOAD_DIR}/systemlog_'"
+    NEW_NAME=$(pick_completed_snapshot "$BEFORE_LIST" "$snap_dir" "@${tc05_epoch}")
+    NEW_XZ=""
+    [ -n "$NEW_NAME" ] && NEW_XZ="${snap_dir}/${NEW_NAME}"
 
     if [ -n "$NEW_XZ" ] && [ -f "$NEW_XZ" ]; then
         dump_cmd ls -la "$NEW_XZ"
@@ -535,7 +667,7 @@ tc05_compression() {
                 "${xz_size}B, 마지막 수정 ${xz_age}초 전 — host_agent 압축 타임아웃(5s) 후에도 xz 프로세스가 취소되지 않고 계속 쓰는 중일 가능성"
         fi
 
-        local log_file="${NEW_XZ%.xz}"
+        local log_file="${TOUPLOAD_DIR}/${NEW_NAME%.xz}"
         dump_cmd ls -la "$log_file"
         if [ ! -f "$log_file" ]; then
             assert "TC05-3: 원본 .log 파일 삭제됨" "PASS"
@@ -580,6 +712,7 @@ tc05_compression() {
         assert "TC05-4: xz -f 실행 성공" "FAIL"
     fi
     rm -f "${XZ_TEST_BASE}.log" "${XZ_TEST_BASE}.log.xz" 2>/dev/null
+    rm -rf "$snap_dir"
 }
 
 # ============================================================
@@ -724,14 +857,17 @@ tc08_blob_upload() {
     dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log.xz.meta
     meta_count=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz.meta 2>/dev/null | wc -l)
 
-    if [ "$xz_count" -gt 0 ]; then
+    # 업로드로 즉시 지워질 수 있어(2026-10-06 실측: 0개) SETUP 때 journal로 확인한
+    # "Created meta file: <SETUP .xz>.meta"(= .xz 생성 + .meta 생성)도 근거로 인정한다.
+    echo "  SETUP journal 근거: Created meta file: ${TOUPLOAD_DIR}/${SETUP_DUMP_NAME:-?}.xz.meta ($([ -n "$SETUP_XZ_QUEUED" ] && echo 확인 || echo 미확인))"
+    if [ "$xz_count" -gt 0 ] || [ -n "$SETUP_XZ_QUEUED" ]; then
         assert "TC08-1: toupload에 .log.xz 파일 존재" "PASS"
         echo "  .xz 파일 수: $xz_count"
     else
         assert "TC08-1: toupload에 .log.xz 파일 존재" "FAIL"
     fi
 
-    if [ "$meta_count" -gt 0 ]; then
+    if [ "$meta_count" -gt 0 ] || [ -n "$SETUP_XZ_QUEUED" ]; then
         assert "TC08-2: toupload에 .log.xz.meta 파일 존재" "PASS"
         echo "  .meta 파일 수: $meta_count"
     else
@@ -813,8 +949,8 @@ tc10_pre() {
         echo "  staging before=${before_staging} after=${after_staging}"
     fi
 
-    # post 단계에서 비교하기 위해 toupload 파일 수 저장
-    echo "$before_toupload" > "${TC10_SAVE}"
+    # post 단계용: 1행 toupload 파일 수(참고), 2행 현재 boot_id(재부팅 여부 판정)
+    printf '%s\n%s\n' "$before_toupload" "$(cat /proc/sys/kernel/random/boot_id)" > "${TC10_SAVE}"
 
     echo ""
     echo "============================================"
@@ -838,22 +974,43 @@ tc10_post() {
         exit 1
     fi
 
-    local before_toupload
+    local before_toupload pre_boot_id cur_boot_id
     dump_cmd cat "${TC10_SAVE}"
-    before_toupload=$(cat "${TC10_SAVE}")
+    before_toupload=$(sed -n 1p "${TC10_SAVE}")
+    pre_boot_id=$(sed -n 2p "${TC10_SAVE}")
+    dump_cmd cat /proc/sys/kernel/random/boot_id
+    cur_boot_id=$(cat /proc/sys/kernel/random/boot_id)
+
+    # reboot 명령 직후엔 DUT가 꺼지는 중에도 SSH가 붙어, 재부팅 전 상태로 판정하는 사고가
+    # 있었다(2026-10-06: post 12:44:25 판정, 실제 부팅 12:44:33). boot_id가 pre와 같으면
+    # 판정하지 않고 종료 — .tc10_before는 보존해 재부팅 후 post만 다시 돌릴 수 있게 한다.
+    if [ -n "$pre_boot_id" ] && [ "$pre_boot_id" = "$cur_boot_id" ]; then
+        echo "[ERROR] 아직 재부팅 전 (boot_id 동일: ${cur_boot_id}) — 재부팅 완료 후 --tc10-post 를 다시 실행하세요 (${TC10_SAVE} 보존)"
+        exit 1
+    fi
     rm -f "${TC10_SAVE}"
 
-    local after_toupload
+    # 판정은 현재 부팅 journal의 Merge done 로그로 한다 — 병합 파일은 toupload에 들어가자마자
+    # 업로드돼 사라질 수 있어 파일 개수 비교는 오판 위험(toupload 목록은 참고 근거로만 남김).
+    # pre의 shutdown .xz + 이번 boot .xz 두 개가 병합돼야 하므로 "Single file"은 PASS 아님.
+    local i merge_line=""
+    for i in $(seq 1 60); do
+        merge_line=$(journalctl -b -u docker-loader --no-pager -o cat 2>/dev/null \
+                     | grep -F '[task_merge_staged_logs] Merge done' | tail -1)
+        [ -n "$merge_line" ] && break
+        sleep 2
+    done
+    dump_cmd sh -c "journalctl -b -u docker-loader --no-pager -o cat 2>/dev/null | grep -F '[task_merge_staged_logs]'"
     dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log.xz
+    local after_toupload
     after_toupload=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | wc -l)
 
-    if [ "$after_toupload" -gt "$before_toupload" ]; then
-        assert "TC10-3: 재부팅 후 toupload .xz 파일 증가 (boot 로그 병합)" "PASS"
-        echo "  toupload before=${before_toupload} after=${after_toupload}"
+    if [ -n "$merge_line" ]; then
+        assert "TC10-3: 재부팅 후 shutdown+boot 로그 병합됨 (현재 부팅 journal Merge done)" "PASS"
     else
-        assert "TC10-3: 재부팅 후 toupload .xz 파일 증가 (boot 로그 병합)" "FAIL"
-        echo "  toupload before=${before_toupload} after=${after_toupload}"
+        assert "TC10-3: 재부팅 후 shutdown+boot 로그 병합됨 (현재 부팅 journal Merge done)" "FAIL" "120초 내 현재 부팅 journal에 Merge done 없음"
     fi
+    echo "  (참고) toupload before=${before_toupload} after=${after_toupload}"
 
     echo ""
     echo "============================================"
@@ -1019,7 +1176,7 @@ tc12_nmon_retention() {
         echo "  [ERROR] system_log 프로세스 없음"
         assert "TC12-1: 3 디렉토리에서 mtime 40일 .nmon 더미 모두 삭제됨" "FAIL"
         assert "TC12-2: 3 디렉토리에서 현재 시각 .nmon 더미 보존됨" "FAIL"
-        assert "TC12-3: 3 디렉토리에서 mtime 40일 .nmon.meta 더미 모두 삭제됨" "FAIL"
+        assert "TC12-3: mtime 40일 .nmon.meta 잔존 허용 (retention 삭제 대상 아님)" "FAIL"
         assert "TC12-4: 3 디렉토리에서 현재 시각 .nmon.meta 더미 보존됨" "FAIL"
         return
     fi
@@ -1056,7 +1213,7 @@ tc12_nmon_retention() {
         fi
         if [ -f "$old40_meta" ]; then
             fail_old_meta=$((fail_old_meta + 1))
-            echo "    [잔존] ${d}/tc12_old40.nmon.meta 가 삭제되지 않음"
+            echo "    [잔존-허용] ${d}/tc12_old40.nmon.meta (meta는 retention 삭제 대상 아님)"
         fi
 
         if [ ! -f "$now_file" ]; then
@@ -1081,11 +1238,9 @@ tc12_nmon_retention() {
         assert "TC12-2: 3 디렉토리에서 현재 시각 .nmon 더미 보존됨" "FAIL"
     fi
 
-    if [ "$fail_old_meta" -eq 0 ]; then
-        assert "TC12-3: 3 디렉토리에서 mtime 40일 .nmon.meta 더미 모두 삭제됨" "PASS"
-    else
-        assert "TC12-3: 3 디렉토리에서 mtime 40일 .nmon.meta 더미 모두 삭제됨" "FAIL"
-    fi
+    # [2026-10-06] .nmon.meta는 retention 삭제 대상이 아님(사용자 확정) — 지워져도/남아도
+    # 정상이므로 판정 게이트에서 제외하고 잔존 개수만 근거로 남긴다(위 ls 원문 참고).
+    assert "TC12-3: mtime 40일 .nmon.meta 잔존 허용 (retention 삭제 대상 아님)" "PASS" "잔존 ${fail_old_meta}/3 디렉토리"
 
     if [ "$fail_now_meta" -eq 0 ]; then
         assert "TC12-4: 3 디렉토리에서 현재 시각 .nmon.meta 더미 보존됨" "PASS"
@@ -1212,26 +1367,34 @@ tc14_rtc_same_start_merge() {
         assert "TC14: system_log 프로세스 확인" "FAIL"
         return
     fi
-    local MARKER
-    MARKER="/tmp/tc14_marker_$$"
-    touch "$MARKER"
+    local SL_RESTART_TS
+    SL_RESTART_TS=$(date '+%Y-%m-%d %H:%M:%S')
+    # 병합 파일은 toupload로 옮겨진 직후 업로드로 지워질 수 있어 스냅샷 사본으로 판정(2026-10-06)
+    local snap_dir="/tmp/tc14_xz_snapshot"
+    start_xz_snapshot "$snap_dir"
     echo "  system_log kill (PID ${SL_PID}) → 재시작 대기..."
     kill -9 "$SL_PID" 2>/dev/null
 
-    # 6-7. task_capture_boot_log + task_merge_staged_logs 완료 대기 (최대 90초)
-    # comm -13 으로 BEFORE_LIST 대비 신규 파일만 감지 (-newer MARKER 는 기존 파일을 잘못 감지할 수 있음)
-    local i toupload_new=0 after_check
-    for i in $(seq 1 90); do
-        sleep 1
-        after_check=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | sort)
-        toupload_new=$(comm -13 <(echo "$BEFORE_LIST") <(echo "$after_check") | wc -l)
-        if [ "$toupload_new" -ge 1 ]; then
-            echo "  [${i}s] toupload 신규 파일 감지"
-            break
-        fi
-        [ $((i % 20)) -eq 0 ] && printf "  [%2ds] 대기 중...\n" "$i"
+    # 6-7. task_merge_staged_logs 종료 로그 대기 (최대 300초, 2초 간격)
+    # merge는 재시작 직후 task_capture_boot_log(dump+compress)가 끝난 뒤에야 돈다 —
+    # 예전처럼 "toupload 신규 파일" 90초 폴링은 boot capture가 길어지면 merge 전에
+    # 포기했다(2026-10-06 run: 판정 ~09:54, 실제 Merge done 09:55:08). 종료 로그로 판정한다.
+    local MAX_WAIT=300 elapsed=0 merge_line=""
+    while [ "$elapsed" -lt "$MAX_WAIT" ]; do
+        sleep 2
+        elapsed=$((elapsed + 2))
+        merge_line=$(journalctl -u docker-loader --no-pager -o cat --since "$SL_RESTART_TS" 2>/dev/null \
+                     | grep -E '\[task_merge_staged_logs\] (Merge done|Single file|No staged files|Failed|.*Exception)' | tail -1)
+        [ -n "$merge_line" ] && break
+        [ $((elapsed % 20)) -eq 0 ] && printf "  [%3ds] 대기 중...\n" "$elapsed"
     done
-    rm -f "$MARKER"
+    if [ -n "$merge_line" ]; then
+        echo "  [완료 감지 @ ${elapsed}s] ${merge_line}"
+        sleep 2   # push_staged_to_toupload 이동 마무리 여유
+    else
+        echo "  [WARN] ${MAX_WAIT}s 내 task_merge_staged_logs 종료 로그 미감지 — 이후 검증은 현재 상태 기준으로 진행"
+    fi
+    dump_cmd sh -c "journalctl -u docker-loader --no-pager -o cat --since '${SL_RESTART_TS}' 2>/dev/null | grep -F '[task_merge_staged_logs]'"
 
     # 8. 검증
     local staging_remain
@@ -1248,11 +1411,17 @@ tc14_rtc_same_start_merge() {
     # 단순 개수 비교(전:후)는 관찰 창 동안 배경 클라우드 업로드가 다른 파일을 먼저
     # 지우면 순감소로 보여 진짜 신규 생성을 놓친다(TC05-1과 동일 원인) — 개수가 아니라
     # comm -13 diff로 "이번에 진짜 새로 생긴" 파일이 있는지로 판정한다.
-    local AFTER_TOUPLOAD AFTER_LIST NEW_XZ
+    stop_xz_snapshot
+    local AFTER_TOUPLOAD AFTER_LIST NEW_XZ NEW_NAME
     dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log.xz
+    dump_cmd ls -la "$snap_dir"
     AFTER_LIST=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log.xz 2>/dev/null | sort)
     AFTER_TOUPLOAD=$(echo "$AFTER_LIST" | grep -c .)
-    NEW_XZ=$(comm -13 <(echo "$BEFORE_LIST") <(echo "$AFTER_LIST") | head -1)
+    # 병합 결과는 start_time=BOOT_START 인 파일 — 같은 창에 rotate 산출물 등 다른 신규 파일이
+    # 섞일 수 있어 BOOT_START로 시작하는 것을 우선 고른다.
+    NEW_NAME=$(pick_completed_snapshot "$(echo "$BEFORE_LIST" | xargs -r -n1 basename | sort)" "$snap_dir" "$SL_RESTART_TS" "systemlog_${BOOT_START}_")
+    NEW_XZ=""
+    [ -n "$NEW_NAME" ] && NEW_XZ="${snap_dir}/${NEW_NAME}"
     if [ -n "$NEW_XZ" ]; then
         assert "TC14-2: toupload .log.xz 신규 생성됨" "PASS"
         echo "    toupload: ${BEFORE_TOUPLOAD} → ${AFTER_TOUPLOAD} (신규: $(basename "$NEW_XZ"))"
@@ -1282,6 +1451,7 @@ tc14_rtc_same_start_merge() {
         assert "TC14-4: 병합 파일 xz 무결성" "FAIL"
         echo "    toupload에서 신규 파일 없음"
     fi
+    rm -rf "$snap_dir"
 }
 
 # ============================================================
@@ -1301,6 +1471,30 @@ tc14_rtc_same_start_merge() {
 # 전혀 다르다 — 애초 명세 초안의 1536MB 상한은 루트파티션 기준 오추정이었다. TC18이
 # 이미 같은 파티션에서 "여유율 85%→9%까지 약 4.55GB 더미"를 실전 검증해뒀으므로
 # (TC18_MAX_FILL_MB=6144 참고), TC15/16도 동일 안전 상한을 그대로 재사용한다.
+# system_log가 띄운 dump/compress 호스트 명령(journalctl -o cat, xz -f)이 끝날 때까지
+# 최대 $1초 대기(5초 연속 미검출 시 idle 판정). 직전 TC의 재시작으로 시작된
+# task_capture_boot_log가 다음 TC의 disk fill 도중 ENOSPC로 실패하며 partial .xz를
+# 지우면, 그만큼 공간이 돌아와 의도한 ENOSPC가 재현되지 않는다(2026-10-06 run 실측:
+# TC14 boot capture xz가 TC15 fill 중 실패 → TC15 compress 성공 → TC15-1~5 FAIL).
+wait_system_log_idle() {
+    local timeout="$1" i idle=0
+    for i in $(seq 1 "$timeout"); do
+        if pgrep -f "journalctl -o cat" >/dev/null 2>&1 || pgrep -f "xz -f" >/dev/null 2>&1; then
+            idle=0
+        else
+            idle=$((idle + 1))
+            if [ "$idle" -ge 5 ]; then
+                echo "  [idle] system_log dump/compress 명령 없음 (${i}s)"
+                return 0
+            fi
+        fi
+        sleep 1
+    done
+    echo "  [WARN] ${timeout}초 내 system_log dump/compress 명령이 끝나지 않음"
+    dump_cmd sh -c "ps w | grep -E 'journalctl -o cat|xz -f' | grep -v grep"
+    return 1
+}
+
 TC15_MAX_FILL_MB=6144
 TC16_MAX_FILL_MB=6144
 TC_DISK_FILL_MIN_HEADROOM_BYTES=$((20 * 1024 * 1024))   # 20MiB
@@ -1403,12 +1597,13 @@ tc15_cleanup() {
         local restored_kb restored_bytes lo hi
         restored_kb=$(disk_truefree_kb "${STAGING_DIR}")
         restored_bytes=$((restored_kb * 1024))
+        # 하한만 본다 — 시험 중 업로드/vacuum으로 공간이 AVAIL0보다 더 늘어나는 건 정상
+        # (2026-10-06 실측 restored=AVAIL0의 106%로 상한 초과 FAIL 오탐).
         lo=$((TC15_AVAIL0_BYTES * 95 / 100))
-        hi=$((TC15_AVAIL0_BYTES * 105 / 100))
-        if [ "$restored_bytes" -ge "$lo" ] && [ "$restored_bytes" -le "$hi" ]; then
-            assert "TC15-7: 정리 후 filler 잔재 없음 + 여유공간 AVAIL0 근방 복원" "PASS"
+        if [ "$restored_bytes" -ge "$lo" ]; then
+            assert "TC15-7: 정리 후 filler 잔재 없음 + 여유공간 AVAIL0의 95% 이상 복원" "PASS"
         else
-            assert "TC15-7: 정리 후 filler 잔재 없음 + 여유공간 AVAIL0 근방 복원" "FAIL" "AVAIL0=${TC15_AVAIL0_BYTES}B restored=${restored_bytes}B (허용 ${lo}~${hi}B)"
+            assert "TC15-7: 정리 후 filler 잔재 없음 + 여유공간 AVAIL0의 95% 이상 복원" "FAIL" "AVAIL0=${TC15_AVAIL0_BYTES}B restored=${restored_bytes}B (하한 ${lo}B)"
         fi
     fi
     [ -d "$TC15_FILLER_DIR" ] && echo "  [WARN] filler 디렉토리 잔존: $TC15_FILLER_DIR"
@@ -1422,6 +1617,7 @@ tc15_rotate_sync_compress_fail() {
     trap tc15_cleanup EXIT
 
     # Phase 0 — 측정 및 사전 조건 계산
+    wait_system_log_idle 300
     dump_cmd journalctl --rotate
     dump_cmd journalctl --vacuum-files=1
     sleep 2
@@ -1464,10 +1660,15 @@ tc15_rotate_sync_compress_fail() {
     dump_cmd ls -la "${TOUPLOAD_DIR}"/systemlog_*.log
     before_list=$(ls "${TOUPLOAD_DIR}"/systemlog_*.log 2>/dev/null | sort)
 
-    echo "  get_log_data 요청 송신 (최대 90초 대기 — ENOSPC는 대체로 빠르지만 3차 실행에서 응답이 60초를 넘긴 사례가 있어 여유를 둠)..."
+    # get_log_data 응답은 task_rotate_sync(dump+rotate+compress+move)가 끝난 뒤에야 오므로
+    # 응답 = compress 실패/성공 확정 신호다. ENOSPC 도달 시간은 xz 레벨에 좌우된다 — xz -0
+    # 빌드는 수 초, 기본 레벨(R090127)은 출력이 천천히 커져 127초 걸린 실측이 있다(2026-10-06:
+    # 90초 대기로 판정 시점에 partial .xz가 아직 쓰이는 중 → TC15-2/4/5 오판). compress
+    # 타임아웃(구 180초/신 300초)까지 덮도록 300초 대기.
+    echo "  get_log_data 요청 송신 (최대 300초 대기 — 응답이 곧 compress 결과 확정 신호)..."
     local t0 t1 resp
     t0=$(date +%s)
-    resp=$(send_and_wait "get_log_data" "{}" 90)
+    resp=$(send_and_wait "get_log_data" "{}" 300)
     t1=$(date +%s)
     echo "  응답: $([ -n "$resp" ] && echo "OK: $resp" || echo 'TIMEOUT'), 소요 $((t1 - t0))초"
     sleep 5
@@ -1559,12 +1760,13 @@ tc16_cleanup() {
         local restored_kb restored_bytes lo hi
         restored_kb=$(disk_truefree_kb "${STAGING_DIR}")
         restored_bytes=$((restored_kb * 1024))
+        # 하한만 본다 — 시험 중 업로드/vacuum으로 공간이 AVAIL0보다 더 늘어나는 건 정상
+        # (2026-10-06 실측 restored=AVAIL0의 106%로 상한 초과 FAIL 오탐).
         lo=$((TC16_AVAIL0_BYTES * 95 / 100))
-        hi=$((TC16_AVAIL0_BYTES * 105 / 100))
-        if [ "$restored_bytes" -ge "$lo" ] && [ "$restored_bytes" -le "$hi" ]; then
-            assert "TC16-7: 정리 후 filler 잔재 없음 + 여유공간 AVAIL0 근방 복원" "PASS"
+        if [ "$restored_bytes" -ge "$lo" ]; then
+            assert "TC16-7: 정리 후 filler 잔재 없음 + 여유공간 AVAIL0의 95% 이상 복원" "PASS"
         else
-            assert "TC16-7: 정리 후 filler 잔재 없음 + 여유공간 AVAIL0 근방 복원" "FAIL" "AVAIL0=${TC16_AVAIL0_BYTES}B restored=${restored_bytes}B (허용 ${lo}~${hi}B)"
+            assert "TC16-7: 정리 후 filler 잔재 없음 + 여유공간 AVAIL0의 95% 이상 복원" "FAIL" "AVAIL0=${TC16_AVAIL0_BYTES}B restored=${restored_bytes}B (하한 ${lo}B)"
         fi
     fi
     [ -d "$TC16_FILLER_DIR" ] && echo "  [WARN] filler 디렉토리 잔존: $TC16_FILLER_DIR"
@@ -1578,6 +1780,7 @@ tc16_boot_log_compress_fail() {
     trap tc16_cleanup EXIT
 
     # Phase 0 — 측정 및 사전 조건 계산
+    wait_system_log_idle 300
     rm -f "${STAGING_DIR}"/systemlog_*.log.xz "${STAGING_DIR}"/systemlog_*.log \
           "${STAGING_DIR}"/.merging_*.tmp 2>/dev/null
     dump_cmd journalctl --rotate
@@ -1641,8 +1844,10 @@ tc16_boot_log_compress_fail() {
     echo "  system_log kill (PID ${SL_PID}) → 재시작 대기..."
     kill -9 "$SL_PID" 2>/dev/null
 
-    # ENOSPC는 몇 초 안에 실패하므로 기존 480초 대비 대폭 단축 — 2초 간격 최대 60초 폴링
-    local MAX_WAIT=60 elapsed=0 done_line=""
+    # ENOSPC 자체는 몇 초 안에 실패하지만, kill -9 후 docker-loader 전체 종료→재기동에만
+    # ~70초가 걸린 사례가 있어(2026-10-06 실측: SIGTERM까지 50초, 재기동 22초) 60초로는
+    # 새 프로세스가 뜨기도 전에 판정·filler 정리가 끝나버렸다 — 2초 간격 최대 180초 폴링.
+    local MAX_WAIT=180 elapsed=0 done_line=""
     while [ "$elapsed" -lt "$MAX_WAIT" ]; do
         sleep 2
         elapsed=$((elapsed + 2))
@@ -1881,6 +2086,305 @@ tc17_message_context_tid_pollution() {
         done
     fi
     rm -f "${TOUPLOAD_DIR}"/systemlog__*.* 2>/dev/null
+}
+
+
+# ============================================================
+# TC18: 저장공간 부족(<10%) 시 SYSTEM_LOG_DIRS(staging/toupload/archive) cleanup 확인
+# [2026-10-02] R09(R090125 백포트) 전용으로 720df12 버전 복구 — main 빌드에선 자동 SKIP
+# [2026-09-04 재설계] 원래는 더미 배치 후 실제 reboot으로 재현했으나, reboot 자체가
+# (원인 불명, 실 필드 버그 패턴과도 다른) 대용량 쓰기를 유실시키는 별개 현상과 뒤섞여
+# 있었다 — systemctl restart docker-loader(전원 재부팅 없이 앱만 재시작)로 트리거를
+# 바꾸면 cleanup이 매번 로그 증거까지 포함해 정상 발화하는 것을 실측으로 확인했다
+# (TC12가 이미 쓰는 검증된 트리거와 동일 패턴). reboot 관련 유실 현상 자체는 원인
+# 불명·실 필드 패턴 불일치로 이 TC 범위에서 제외하고 별도 이슈로만 기록한다.
+# 더미 mtime은 30일 미만(1일 전)으로 둬서 day-retention(delete_log)이 같이 지우지
+# 않게 하고, 순수하게 cleanup_if_low_disk_space() 경로만 검증한다.
+# [주의] 실제 파티션 여유공간을 소진시키는 파괴적 시험이다 — 사전 조건(여유율 >=25%,
+#        필요 소진량 <= 안전 상한) 미충족 시 자동으로 SKIP(TC18-0 FAIL로 기록).
+# ============================================================
+tc18_low_disk_cleanup() {
+    echo "=== TC18: 저장공간 부족(<10%) 시 SYSTEM_LOG_DIRS cleanup 확인 (systemctl restart docker-loader 트리거) ==="
+
+    mkdir -p "${STAGING_DIR}" "${TOUPLOAD_DIR}" "${ARCHIVE_DIR}"
+
+    dump_cmd df -h "${STAGING_DIR}"
+    local total_kb avail_kb before_permille
+    total_kb=$(disk_total_kb "${STAGING_DIR}")
+    avail_kb=$(disk_avail_kb "${STAGING_DIR}")
+    before_permille=$(disk_free_permille "${STAGING_DIR}")
+    echo "  [TC18] 현재 파티션: total=${total_kb}KB avail=${avail_kb}KB free=${before_permille}‰"
+
+    local TC18_0_LABEL="TC18-0: 사전 조건 확인 (R09 함수 존재, df 파싱 성공, 여유율>=25%, 필요 소진량<=안전상한)"
+
+    # [2026-10-02, R09 전용 복구] 검증 대상 함수가 실행 중인 바이너리에 있는지 먼저 확인한다.
+    # main 계열 빌드는 cleanup_if_low_disk_space()가 제거돼 이 시험이 의미가 없으므로
+    # 파티션을 채우기 전에 SKIP 한다(실행 중 프로세스의 exe를 직접 grep — /edge/app vs
+    # /edge/devapp 핫스왑 경로 차이와 무관하게 실제 돌고 있는 바이너리를 본다).
+    local SL_EXE_PID fn_hits
+    SL_EXE_PID=$(pgrep -f /edge/app/bin/system_log | head -1)
+    dump_cmd sh -c "grep -caF '[cleanup_if_low_disk_space]' /proc/${SL_EXE_PID}/exe"
+    fn_hits=$(grep -caF '[cleanup_if_low_disk_space]' "/proc/${SL_EXE_PID}/exe" 2>/dev/null)
+    if [ "${fn_hits:-0}" -eq 0 ]; then
+        assert "$TC18_0_LABEL" "FAIL" "실행 중 system_log 바이너리(PID ${SL_EXE_PID:-없음})에 cleanup_if_low_disk_space 없음 — R09 전용 TC, 이 빌드에선 시험 중단(SKIP)"
+        return
+    fi
+
+    if [ -z "$total_kb" ] || [ -z "$avail_kb" ]; then
+        assert "$TC18_0_LABEL" "FAIL" "df -P 파싱 실패 (total_kb=${total_kb} avail_kb=${avail_kb})"
+        return
+    fi
+    if [ "$total_kb" -le 0 ]; then
+        assert "$TC18_0_LABEL" "FAIL" "total_kb=${total_kb} 비정상"
+        return
+    fi
+
+    # 여유율 하한(>=25%): 더미 삭제만으로 코드의 회복 목표치(threshold_percent*2=20%)를
+    # 확정적으로 넘길 수 있고, 실제 로그 파일을 건드릴 위험도 없게 하는 마진.
+    if [ "$before_permille" -lt "$TC18_MIN_FREE_BEFORE_PERMILLE" ]; then
+        assert "$TC18_0_LABEL" "FAIL" "현재 여유율 ${before_permille}‰(<250‰) - 이미 부족한 상태라 안전하게 재현 불가, 시험 중단"
+        return
+    fi
+    # 상한(<=950‰)은 df 파싱이 완전히 깨진 극단적 케이스만 걸러내는 최후 안전장치다.
+    # 여유율 자체가 아무리 높아도 실제로 그만큼 더미를 채운다 — 필요 더미량은 안전 상한
+    # (TC18_MAX_FILL_MB)이 실측치(약 4.55GB, 192.168.10.25 5.9GB 파티션 기준)보다
+    # 넉넉히 크게 잡혀있어 이 DUT에서도 그대로 수용됨.
+    if [ "$before_permille" -gt "$TC18_MAX_FREE_BEFORE_PERMILLE" ]; then
+        assert "$TC18_0_LABEL" "FAIL" "현재 여유율 ${before_permille}‰(>950‰) - df 파싱 이상 가능성, 시험 중단"
+        return
+    fi
+
+    # 목표: STAGING/TOUPLOAD엔 각 1MB(트리거 확인용) / ARCHIVE엔 나머지 전부(실제 회복을
+    # 담당). SYSTEM_LOG_DIRS는 STAGING→TOUPLOAD→ARCHIVE 순서로 처리되고 매 디렉토리마다
+    # "파티션 전체 여유율<10%"인지 다시 확인한다 — 회복량이 큰 더미를 마지막 디렉토리에
+    # 몰아둬야 앞선 두 디렉토리 처리 뒤에도 여전히 10% 밑에 머물러 세 곳 모두 확정적으로
+    # 발화한다(파일 삭제 여부는 그 시점 파티션 여유율<10%만으로 결정되고, 삭제되는 각 파일
+    # 자체의 크기와는 무관 — delete_oldest_files_until_safe는 그 디렉토리에 남은 대상
+    # 확장자 파일이 없어질 때까지 또는 20%에 도달할 때까지 가장 오래된 것부터 지운다).
+    # 목표 여유율을 10%에 최대한 가깝게(9%) 잡아 필요 더미량 자체를 최소화한다.
+    local need_kb archive_mb
+    need_kb=$(awk -v avail="$avail_kb" -v total="$total_kb" -v tgt="$TC18_TARGET_LOW_PERCENT" 'BEGIN{ n = avail - (total*tgt/100); if (n<1024) n=1024; printf "%d", n }')
+    archive_mb=$(( (need_kb / 1024) - 2 ))
+    [ "$archive_mb" -lt 1 ] && archive_mb=1
+
+    if [ "$archive_mb" -gt "$TC18_MAX_FILL_MB" ]; then
+        assert "$TC18_0_LABEL" "FAIL" "필요 소진량 ${archive_mb}MB > 안전 상한 ${TC18_MAX_FILL_MB}MB — 시험 중단(코드 결함 아님)"
+        return
+    fi
+    assert "$TC18_0_LABEL" "PASS"
+
+    local d1_glob="${STAGING_DIR}/tc18_dummy_staging_"
+    local d2_glob="${TOUPLOAD_DIR}/tc18_dummy_toupload_"
+    local d3_glob="${ARCHIVE_DIR}/tc18_dummy_archive_"
+
+    echo "  [TC18] 더미 생성: 세 디렉토리 전부 단일 거대 파일이 아니라 여러 개로 분할한다"
+    echo "         (system_log_partition.txt 참고 사례처럼 여러 파일이 쌓인 형태를 재현,"
+    echo "         delete_oldest_files_until_safe가 오래된 순으로 순차 삭제하는 것도 관찰 가능)"
+
+    # 파일마다 mtime을 1분씩 어긋나게(모두 1일 전 기준) 찍어서 삭제 순서가 오래된 것부터
+    # 결정적으로 보이도록 한다(2026-09-04, 사용자 확인). day-retention(LOG_RETAIN_DAY=30일,
+    # delete_log)이 이 더미를 같이 집어가지 않도록 30일 미만으로 유지한다.
+    local now_epoch base_epoch
+    now_epoch=$(date +%s)
+    base_epoch=$(( now_epoch - 86400 ))
+    local global_idx=1
+
+    # total_mb를 sizes 목록 청크로 쪼개 glob_prefix{NNN}.ext 여러 파일로 나눠 쓴다.
+    # global_idx를 함수 밖(전역)에서 계속 증가시켜, 같은 mtime 오프셋이 세 디렉토리에
+    # 걸쳐 겹치지 않게 한다.
+    make_split_dummy() {
+        local glob_prefix="$1" ext="$2" total_mb="$3" sizes="$4"
+        local made_mb=0 count=0
+        while [ "$made_mb" -lt "$total_mb" ]; do
+            for sz in $sizes; do
+                [ "$made_mb" -ge "$total_mb" ] && break
+                local remain=$(( total_mb - made_mb ))
+                [ "$sz" -gt "$remain" ] && sz=$remain
+                [ "$sz" -lt 1 ] && sz=1
+                local f="${glob_prefix}$(printf '%03d' "$global_idx").${ext}"
+                local file_epoch=$(( base_epoch + global_idx * 60 ))
+                dd if=/dev/zero of="$f" bs=1M count="$sz" 2>/dev/null
+                touch -d "@${file_epoch}" "$f" 2>/dev/null
+                made_mb=$(( made_mb + sz ))
+                count=$((count + 1))
+                global_idx=$((global_idx + 1))
+            done
+        done
+        echo "$count"
+    }
+
+    local staging_count toupload_count archive_count
+    # staging/toupload는 트리거 확인용(합쳐서 최대 3MB — 목표~10% 문턱 사이 마진(약 60MB)
+    # 대비 무시할 수준이라, 지워져도 그 자체만으로 20% 회복을 채우지 않는다. 그래야
+    # STAGING→TOUPLOAD→ARCHIVE 순회 중 뒤 디렉토리도 계속 "여유율<10%"로 남아 확정적으로
+    # 발화한다 — 위 더미 배치 설계 근거 참고).
+    staging_count=$(make_split_dummy "$d1_glob" "log" 3 "1 1 1")
+    toupload_count=$(make_split_dummy "$d2_glob" "xz" 3 "1 1 1")
+    archive_count=$(make_split_dummy "$d3_glob" "xz" "$archive_mb" "8 23 47 68 91 105 42 15 33 76 12 58 99 29 64")
+    echo "  [TC18] 분할 생성 완료: staging ${staging_count}개(3MB), toupload ${toupload_count}개(3MB), archive ${archive_count}개(${archive_mb}MB)"
+    sync
+
+    dump_cmd ls -la "${d1_glob}"* "${d2_glob}"* "${d3_glob}"*
+    dump_cmd df -h "${STAGING_DIR}"
+    local after_permille
+    after_permille=$(disk_free_permille "${STAGING_DIR}")
+    echo "  [TC18] 더미 배치 후 여유율: ${after_permille}‰"
+
+    if [ "$after_permille" -lt 100 ]; then
+        assert "TC18-1: 더미 배치로 파티션 여유율이 10% 미만으로 낮춰짐" "PASS"
+    else
+        assert "TC18-1: 더미 배치로 파티션 여유율이 10% 미만으로 낮춰짐" "FAIL"
+        echo "  여유율 ${after_permille}‰ (목표 <100‰) — archive_mb 재계산 필요"
+        rm -f "${d1_glob}"* "${d2_glob}"* "${d3_glob}"*
+        return
+    fi
+
+    local d1_prefix d2_prefix d3_prefix
+    d1_prefix=$(basename "$d1_glob")
+    d2_prefix=$(basename "$d2_glob")
+    d3_prefix=$(basename "$d3_glob")
+
+    # 전체 경로로 매칭 필수(TC12/TC14/TC16 관례) — "system_log"만 쓰면 이 스크립트
+    # 자신(tc_system_log.sh)까지 걸려 엉뚱한 PID를 집는 사고가 날 수 있다.
+    local SL_PID
+    SL_PID=$(pgrep -f /edge/app/bin/system_log | head -1)
+
+    echo "  [TC18] systemctl restart docker-loader 트리거 (현재 system_log PID ${SL_PID})..."
+    dump_cmd systemctl restart docker-loader
+
+    # [2026-09-04, serial 실측으로 확인] task_cleanup_logs()가 남기는 [cleanup] Removing:
+    # 로그는 실제로 찍히지만, 바로 다음 순서인 task_capture_boot_log()가 1초도 안 돼
+    # request_rotate_log() → `journalctl --rotate && journalctl --vacuum-files=1`을 호출해
+    # journald 자체 저장소에서 archived journal을 지워버린다(journald 자체 용량을 작게
+    # 유지하려는 정상 동작 — delete_old_journals()가 아니라 task_capture_boot_log() 소관).
+    # 그래서 restart "후" journalctl을 사후 조회하면 이미 지워지고 없다 — restart 직후
+    # `journalctl -f`를 20초만 background로 짧게 걸어 별도 파일에 사본을 떠두면, vacuum이
+    # journald 내부 저장소를 지우더라도 그 사본은 안전하다. timeout으로 자체 종료되니
+    # PID 추적/kill 불필요 — 뒤이은 90초 더미-소멸 폴링 동안 이미 다 끝나 있다.
+    local JOURNAL_CAP="/tmp/tc18_journal_capture.log"
+    rm -f "$JOURNAL_CAP"
+    timeout 20 journalctl -u docker-loader -f --no-pager -o short-iso > "$JOURNAL_CAP" 2>&1 &
+
+    # task_cleanup_logs()는 system_log_timer_loop() 시작 직후(92db92bb 이후 맨 앞)
+    # 동기 실행되므로 재시작 후 몇 초 내 반영된다 — TC12와 동일하게 최대 90초 폴링.
+    local i gone=0 staging_remain toupload_remain archive_remain
+    for i in $(seq 1 90); do
+        sleep 1
+        staging_remain=$(ls "${d1_glob}"*.log 2>/dev/null | wc -l)
+        toupload_remain=$(ls "${d2_glob}"*.xz 2>/dev/null | wc -l)
+        archive_remain=$(ls "${d3_glob}"*.xz 2>/dev/null | wc -l)
+        if [ "$staging_remain" -eq 0 ] && [ "$toupload_remain" -eq 0 ] && [ "$archive_remain" -eq 0 ]; then
+            gone=1
+            echo "  [${i}s] 더미 전부 소멸 감지"
+            break
+        fi
+        [ $((i % 20)) -eq 0 ] && echo "  [${i}s] 대기 중... staging 잔존=${staging_remain}개 toupload 잔존=${toupload_remain}개 archive 잔존=${archive_remain}개"
+    done
+    [ "$gone" -eq 0 ] && echo "  [WARN] 90초 내 더미 완전 소멸 미감지 — 현재 상태 기준으로 판정"
+
+    # [2026-09-04, 실측 후 추가] 파일이 사라진 것(unlink 반영)과 df가 그 블록 회수를
+    # 보고하는 것 사이에 지연이 있었다 — archive 더미(4.5GB급) 삭제 직후 곧바로 df를
+    # 찍으면 회수가 겨우 몇 MB만 반영되고, 몇 분 뒤 다시 찍으면 baseline까지 완전히
+    # 회복돼 있었다(`/edge/log`가 `commit=60`으로 마운트돼 있어 대용량 단일 파일 삭제의
+    # 블록 회수 반영이 지연되는 것으로 추정). `sync`로 강제 커밋을 요청한 뒤, df가
+    # 안정될 때까지 최대 30초 폴링해서 이 지연으로 인한 TC18-3 오탐(false negative)을
+    # 막는다.
+    sync
+    local j prev_permille=-1 stable_count=0 cur_permille
+    for j in $(seq 1 30); do
+        cur_permille=$(disk_free_permille "${STAGING_DIR}")
+        if [ "$cur_permille" -ge 200 ]; then
+            echo "  [df 안정화 ${j}s] 여유율 ${cur_permille}‰ (목표 도달)"
+            break
+        fi
+        if [ "$cur_permille" -eq "$prev_permille" ]; then
+            stable_count=$((stable_count + 1))
+            [ "$stable_count" -ge 3 ] && { echo "  [df 안정화 ${j}s] 여유율 ${cur_permille}‰ (더 안 변함, 폴링 종료)"; break; }
+        else
+            stable_count=0
+        fi
+        prev_permille="$cur_permille"
+        sync
+        sleep 1
+    done
+
+    dump_cmd ls -la "${STAGING_DIR}" "${TOUPLOAD_DIR}" "${ARCHIVE_DIR}"
+    dump_cmd df -h "${STAGING_DIR}"
+    cur_permille=$(disk_free_permille "${STAGING_DIR}")
+    echo "  [TC18] 현재 여유율: ${cur_permille}‰"
+
+    # 파일 부재만으로는 "cleanup이 지웠다"는 걸 확정할 수 없으므로, journald에서
+    # cleanup_if_low_disk_space()/delete_oldest_files_until_safe()가 실제로 발화한
+    # 직접 증거를 같이 남긴다 — restart 직후 20초만 떴던 백그라운드 캡처($JOURNAL_CAP,
+    # timeout으로 이미 자체 종료됨)에서 읽는다(라이브 journalctl 재조회 아님 —
+    # task_capture_boot_log()의 vacuum-files=1이 이미 원본을 지웠을 수 있어 사후 조회는
+    # 신뢰 불가, 위 트리거 직후 주석 참고).
+    dump_cmd wc -l "$JOURNAL_CAP"
+    dump_cmd sh -c "grep -F '[cleanup_if_low_disk_space]' '$JOURNAL_CAP'"
+    dump_cmd sh -c "grep -F '[cleanup] Removing:' '$JOURNAL_CAP'"
+
+    local removed_log found1_count=0 found2_count=0 found3_count=0
+    removed_log=$(grep -F '[cleanup] Removing:' "$JOURNAL_CAP" 2>/dev/null)
+    # 3곳 모두 여러 개로 쪼갰으므로 각 접두어로 몇 개나 매치되는지 센다(1개 이상이면 그
+    # 디렉토리에서 실제로 발화한 것).
+    found1_count=$(echo "$removed_log" | grep -cF "$d1_prefix")
+    found2_count=$(echo "$removed_log" | grep -cF "$d2_prefix")
+    found3_count=$(echo "$removed_log" | grep -cF "$d3_prefix")
+    echo "  [TC18] journald [cleanup] Removing 매치: staging=${found1_count}개 toupload=${found2_count}개 archive=${found3_count}개"
+
+    local staging_remain_final toupload_remain_final archive_remain_final
+    staging_remain_final=$(ls "${d1_glob}"*.log 2>/dev/null | wc -l)
+    toupload_remain_final=$(ls "${d2_glob}"*.xz 2>/dev/null | wc -l)
+    archive_remain_final=$(ls "${d3_glob}"*.xz 2>/dev/null | wc -l)
+
+    # [2026-09-04 정정] "3곳 전부 파일 부재"는 delete_oldest_files_until_safe의 실제
+    # 설계(파티션 전체 여유율이 목표(20%)에 도달하면 그 즉시 멈춤 — 남은 파일을 끝까지
+    # 다 지우는 게 아님)와 안 맞는 기준이었다. 실측(2026-09-04)에서도 archive 89개 중
+    # 13개만 지우고 20.397%에서 멈췄는데 이걸 FAIL로 오판정했다. 그래서 "파일 개수가
+    # 실제로 줄었는지"(생성량 대비 잔존량 감소, filesystem 관점의 독립 증거 — TC18-4의
+    # journal 로그 증거와는 별개 채널)로 바꾼다: 3곳 중 최소 1곳에서라도 개수가 줄면 PASS.
+    local staging_removed toupload_removed archive_removed
+    staging_removed=$(( staging_count - staging_remain_final ))
+    toupload_removed=$(( toupload_count - toupload_remain_final ))
+    archive_removed=$(( archive_count - archive_remain_final ))
+    echo "  [TC18] 파일 개수 감소(생성 대비 잔존): staging ${staging_count}→${staging_remain_final}(${staging_removed}개 감소) toupload ${toupload_count}→${toupload_remain_final}(${toupload_removed}개 감소) archive ${archive_count}→${archive_remain_final}(${archive_removed}개 감소)"
+    if [ "$staging_removed" -ge 1 ] || [ "$toupload_removed" -ge 1 ] || [ "$archive_removed" -ge 1 ]; then
+        assert "TC18-2: SYSTEM_LOG_DIRS 중 최소 1곳에서 더미 파일 개수가 실제로 감소함(filesystem 관점 증거)" "PASS"
+    else
+        assert "TC18-2: SYSTEM_LOG_DIRS 중 최소 1곳에서 더미 파일 개수가 실제로 감소함(filesystem 관점 증거)" "FAIL"
+        echo "    3곳 전부 감소 없음 — cleanup이 전혀 발화하지 않았을 가능성"
+    fi
+
+    # 3곳 전부를 요구하지 않는다 — staging/toupload에 우리 더미 말고 다른 실제 파일이
+    # 남아있으면(운영 중 쌓인 실 로그 등) delete_oldest_files_until_safe가 그것들까지
+    # 오래된 순으로 같이 지우다 그 디렉토리만으로 20%를 채워버릴 수 있고, 그러면 archive
+    # 차례는 아예 오지도 않는다(뒤 디렉토리는 그 시점 여유율이 이미 10% 넘어 스킵) — 몇
+    # 곳에서 회수되는지는 그때그때 실제 파일 분포에 달려있어 우리가 통제할 수 없다.
+    # 그래서 "SYSTEM_LOG_DIRS 중 최소 1곳 이상에서 delete_oldest_files_until_safe가
+    # 실제로 돌았다"는 것만 직접 증거로 요구한다.
+    if [ "$found1_count" -ge 1 ] || [ "$found2_count" -ge 1 ] || [ "$found3_count" -ge 1 ]; then
+        assert "TC18-4: journald에 SYSTEM_LOG_DIRS 중 1곳 이상의 [cleanup] Removing 로그 존재 (실제 cleanup 경로로 삭제됐다는 직접 증거)" "PASS"
+        echo "    매치: staging=${found1_count}개 toupload=${found2_count}개 archive=${found3_count}개"
+    else
+        assert "TC18-4: journald에 SYSTEM_LOG_DIRS 중 1곳 이상의 [cleanup] Removing 로그 존재 (실제 cleanup 경로로 삭제됐다는 직접 증거)" "FAIL"
+        echo "    journal에 해당 로그가 하나도 없으면 파일이 없어졌더라도 cleanup이 지웠다는 증거가 아님"
+    fi
+
+    if [ "$cur_permille" -ge 200 ]; then
+        assert "TC18-3: 여유율이 20% 이상으로 회복됨" "PASS"
+    else
+        assert "TC18-3: 여유율이 20% 이상으로 회복됨" "FAIL"
+        echo "    현재 ${cur_permille}‰ (목표 >=200‰)"
+    fi
+
+    # 폴링 타임아웃으로 더미가 남았으면 디바이스 청결을 위해 여기서 정리(판정에는 영향 없음)
+    rm -f "${d1_glob}"*.log "${d2_glob}"*.xz "${d3_glob}"*.xz 2>/dev/null
+    rm -f "$JOURNAL_CAP"
+
+    echo ""
+    echo "============================================"
+    echo " 결과: PASS=${PASS}  FAIL=${FAIL}"
+    echo "============================================"
 }
 
 # ============================================================
@@ -2518,11 +3022,8 @@ verify_timer_loop_started() {
 # 안내 문구는 각 case 분기에서 따로 처리한다 (전체 실행은 여기 이어 TC15/16을 더 실행).
 run_quick_set() {
     verify_timer_loop_started
-    # TC02는 자체적으로 system_log를 재시작해 매번 깨끗한 상태에서 시작하므로 순서 무관하지만,
-    # 관례상 가장 먼저 실행한다.
-    tc02_timer_running
 
-    # TC02 이후 나머지 TC들의 사전 조건(toupload .xz 1개)을 위한 SETUP
+    # 나머지 TC들의 사전 조건(toupload .xz 1개)을 위한 SETUP
     setup_rotate
     tc01_filename_format
     tc03_on_demand_export
@@ -2540,6 +3041,11 @@ run_quick_set() {
     # system_log kill/재시작을 수반하는 TC14는 뒤에 배치.
     tc14_rtc_same_start_merge
 
+    # TC02는 시스템 시간을 +25h 옮기므로 SETUP/TC01 등 파일명 시각을 보는 TC 뒤에 둔다
+    # (2026-10-06: 맨 앞에서 돌다 미래 시각 journal을 남겨 TC01-2 start>end 오판 유발).
+    # 자체적으로 system_log를 재시작하고 끝에 미래 시각 journal도 정리한다.
+    tc02_timer_running
+
     # TC19(로그 디스크 예산 watermark 근거 수집)는 읽기 전용/비파괴적이라 빠른 실행에도
     # 안전하게 포함한다. TC09(factory_reset, run_quick_set 밖에서 마지막에 호출됨)가
     # toupload를 비우기 *전* 시점의 분포를 봐야 하므로 run_quick_set의 맨 끝에 둔다.
@@ -2552,6 +3058,9 @@ case "${1}" in
         ;;
     --tc10-post)
         tc10_post
+        ;;
+    --tc18)
+        tc18_low_disk_cleanup
         ;;
     --tc19)
         tc19_watermark_evidence
@@ -2693,7 +3202,7 @@ case "${1}" in
         # TC01/03/06 은 setup_rotate() 가 채우는 전역 변수(LATEST_XZ, FILES_BEFORE/AFTER,
         # JOURNAL_*)에 의존하므로, 선택 목록에 하나라도 포함되면 먼저 실행해둔다.
         case ",${SELECTED}," in
-            *,TC01,*|*,TC03,*|*,TC06,*)
+            *,TC01,*|*,TC03,*|*,TC06,*|*,TC08,*)
                 setup_rotate
                 ;;
         esac
@@ -2701,7 +3210,7 @@ case "${1}" in
         # 스크립트의 표준 실행 순서를 그대로 따른다 — 사용자가 콤마 목록을 어떤 순서로
         # 넘기든 무관하게 항상 이 순서로 실행한다. TC09(factory_reset)는 toupload/staging을
         # 통째로 비우므로, 다른 TC와 같이 선택돼도 항상 맨 마지막에 오도록 배열 끝에 둔다.
-        for tc in TC01 TC02 TC03 TC04 TC05 TC06 TC07 TC08 TC11 TC12 TC13 TC14 TC15 TC16 TC17 TC19 TC20 TC21 TC22 TC09; do
+        for tc in TC01 TC03 TC04 TC05 TC06 TC07 TC08 TC11 TC12 TC13 TC14 TC02 TC15 TC16 TC17 TC18 TC19 TC20 TC21 TC22 TC09; do
             case ",${SELECTED}," in
                 *,${tc},*)
                     case "$tc" in
@@ -2721,6 +3230,7 @@ case "${1}" in
                         TC15) tc15_rotate_sync_compress_fail ;;
                         TC16) tc16_boot_log_compress_fail ;;
                         TC17) tc17_message_context_tid_pollution ;;
+                        TC18) tc18_low_disk_cleanup ;;
                         TC19) tc19_watermark_evidence ;;
                         TC20) tc20_disk_budget_circuit_breaker ;;
                         TC21) tc21_ondemand_warn_linearity ;;
@@ -2801,6 +3311,7 @@ case "${1}" in
         echo "  ./tc_system_log.sh --tc15       (rotate_sync compress 실패, ENOSPC 방식 — 파괴적, 수십 초~수 분, 사전조건 미충족 시 자동 SKIP)"
         echo "  ./tc_system_log.sh --tc16       (boot_log compress 실패, ENOSPC 방식 — 파괴적, 수십 초~수 분, 사전조건 미충족 시 자동 SKIP)"
         echo "  ./tc_system_log.sh --tc17       (MessageContext tid 미검증 재현 — TC17-1 위조 응답 소비/크래시 + TC17-2 진짜 요청 무결성)"
+        echo "  ./tc_system_log.sh --tc18       (저장공간 부족(<10%) cleanup, R09 전용 — 파괴적, main 빌드/사전조건 미충족 시 자동 SKIP)"
         echo "  ./tc_system_log.sh --tc20       (로그 디스크 예산 circuit breaker 트립/재개 — 파괴적, ~2.6GiB 더미, 사전조건 미충족 시 자동 SKIP)"
         echo "  ./tc_system_log.sh --tc21       (온디맨드 반복 요청 시 WARN 로그량 선형성 — 파괴적, 자체 트립 유발)"
         echo "  ./tc_system_log.sh --tc22       (로그 디스크 예산 능동 정리, 트립 tick 내 즉시 정리+재개 — 파괴적, 사전조건 미충족 시 자동 SKIP)"

@@ -60,6 +60,36 @@ def _load_config() -> dict:
     return values
 
 
+def _load_version() -> dict:
+    """레포 루트의 VERSION(KEY=VALUE) — TCS_VERSION, EMS_TARGET_MIN. 없으면 빈 dict."""
+    version_path = REPO_ROOT / "VERSION"
+    if not version_path.exists():
+        return {}
+    values = {}
+    for line in version_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        values[key.strip()] = value.strip()
+    return values
+
+
+def _ems_build_number(version: Optional[str]) -> Optional[int]:
+    """'R090127' → 90127. 형식이 다르면 None(비교 불가)."""
+    m = re.fullmatch(r"R(\d+)", (version or "").strip())
+    return int(m.group(1)) if m else None
+
+
+def _ems_mismatch(dut_version: Optional[str], target_min: Optional[str]) -> Optional[bool]:
+    """DUT EMS 빌드가 대상 최소 빌드보다 낮으면 True. 둘 중 하나라도 비교 불가면 None."""
+    dut_n = _ems_build_number(dut_version)
+    target_n = _ems_build_number(target_min)
+    if dut_n is None or target_n is None:
+        return None
+    return dut_n < target_n
+
+
 def _load_secrets() -> dict:
     """레포 루트의 secrets.env(KEY=VALUE, git에 커밋 안 됨)를 읽어 os.environ에도
     반영한다. TC 스크립트가 필요로 하는 인증정보(예: device_log의
@@ -550,6 +580,9 @@ def _generate_result_md(app_cfg: dict, run_id: str, meta: dict, cases: list,
         f"**실행일시:** {meta.get('started_at', '')} ~ {meta.get('finished_at', '')}",
         f"**DUT:** {meta.get('dut_host', DUT_HOST)}:{meta.get('dut_port', DUT_PORT)} (qcells-emsplus, AC Gen2, aarch64)",
         f"**스크립트:** {app_cfg['tc_script'].name}",
+        f"**tcs_tools:** v{meta.get('tcs_version') or '?'} (대상 EMS >= {meta.get('ems_target_min') or '?'})",
+        f"**DUT EMS:** {meta.get('dut_ems_version') or '확인 불가'}"
+        + (" ⚠ 대상 EMS보다 낮음 — 일부 TC 결과가 빌드 차이로 오판됐을 수 있음" if meta.get('ems_mismatch') else ""),
         "",
         f"**총 결과: PASS={meta.get('pass', 0)} / FAIL={meta.get('fail', 0)} / SKIP={meta.get('skip', 0)} / {len(cases)}기준**",
         "",
@@ -949,6 +982,42 @@ async def _wait_run_proc(run_proc, log_path: Path, timeout: float, stall_timeout
             wait_task.cancel()
 
 
+async def _stamp_dut_version(dut: dict, logf, run_dir: Path, run_state: dict):
+    """DUT /etc/os-release의 BUILD_VERSION을 읽어 output.log 첫머리에 tcs/EMS 버전 배너를
+    남기고, meta.json에도 바로 반영한다(진행 중에도 화면에 보이도록). 대상 EMS보다 낮으면
+    경고만 하고 실행은 계속한다 — 실패해도 run을 막지 않는 best-effort."""
+    version = _load_version()
+    dut_version = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *ssh_argv(dut, "sed -n 's/^BUILD_VERSION=//p' /etc/os-release | tr -d '\"'"),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+        dut_version = out.decode(errors="replace").strip() or None
+    except Exception:
+        dut_version = None
+    mismatch = _ems_mismatch(dut_version, version.get("EMS_TARGET_MIN"))
+    run_state["dut_ems_version"] = dut_version
+    run_state["ems_mismatch"] = mismatch
+
+    banner = (f"[VERSION] tcs_tools v{version.get('TCS_VERSION', '?')} | "
+              f"대상 EMS >= {version.get('EMS_TARGET_MIN', '?')} | DUT EMS {dut_version or '확인 불가'}")
+    if mismatch:
+        banner += " | ⚠ 불일치 — DUT 빌드가 대상보다 낮아 일부 TC가 오판될 수 있음"
+    logf.write(f"{banner}\n".encode())
+    logf.flush()
+
+    meta_path = run_dir / "meta.json"
+    try:
+        meta = json.loads(meta_path.read_text())
+        meta["dut_ems_version"] = dut_version
+        meta["ems_mismatch"] = mismatch
+        _write_meta(run_dir, meta)
+    except Exception:
+        pass
+
+
 async def _run_ssh(dut: dict, run_state: dict, app_cfg: dict, entry: dict, log_path: Path, run_dir: Path,
                     case_times: Optional[dict] = None) -> "int | None":
     await _ensure_fresh_ssh_master(dut)
@@ -969,6 +1038,7 @@ async def _run_ssh(dut: dict, run_state: dict, app_cfg: dict, entry: dict, log_p
             *ssh_argv(dut, f"chmod +x {remote_script}"), stdout=logf, stderr=logf,
         )
         await asyncio.wait_for(chmod_proc.wait(), timeout=15)
+        await _stamp_dut_version(dut, logf, run_dir, run_state)
 
         journal_proc, journal_lines, collector_task = await _start_journal_capture(dut)
 
@@ -1103,6 +1173,8 @@ async def _run_ssh_full_with_reboots(dut: dict, run_state: dict, app_cfg: dict, 
                 *ssh_argv(dut, f"chmod +x {remote_script}"), stdout=logf, stderr=logf,
             )
             await asyncio.wait_for(chmod_proc.wait(), timeout=15)
+            if "dut_ems_version" not in run_state:   # 체인 첫 단계에서 한 번만
+                await _stamp_dut_version(dut, logf, run_dir, run_state)
 
             journal_proc, journal_lines, collector_task = await _start_journal_capture(dut)
 
@@ -1383,6 +1455,11 @@ async def run_tc(run_id: str, app_cfg: dict, entry: dict, channel: str, dut: dic
         # 분모로 잡혀 0%→100%로 튀는 버그가 났었다) tc_id="custom"은 매번 선택 개수가
         # 달라 이 추정 자체가 성립하지 않는다.
         "tc_total": entry.get("expected_tc_count"),
+        "tcs_version": _load_version().get("TCS_VERSION"),
+        "ems_target_min": _load_version().get("EMS_TARGET_MIN"),
+        # SSH 채널은 _stamp_dut_version()이 실행 직전에 채운다(serial은 미지원 → None)
+        "dut_ems_version": None,
+        "ems_mismatch": None,
     }
     _write_meta(run_dir, meta)
 
@@ -1405,6 +1482,8 @@ async def run_tc(run_id: str, app_cfg: dict, entry: dict, channel: str, dut: dic
             exit_code = await _run_ssh(dut, run_state, app_cfg, entry, log_path, run_dir, case_times)
 
         meta["exit_code"] = exit_code
+        meta["dut_ems_version"] = run_state.get("dut_ems_version")
+        meta["ems_mismatch"] = run_state.get("ems_mismatch")
         text = log_path.read_text(errors="replace")
         pass_n, fail_n, cases = _parse_results(text, app_cfg)
         _record_case_times(log_path, app_cfg, case_times)  # 마지막 순간에 찍힌 case까지 마저 기록
@@ -1519,6 +1598,13 @@ def _on_startup():
     for app_cfg in APPS.values():
         _prune_old_runs(app_cfg["runs_dir"])
         _rebuild_latest_status(app_cfg)
+
+
+@app.get("/api/version")
+def api_version():
+    """헤더 표시용 — tcs_tools 버전과 대상 EMS 최소 빌드(VERSION 파일, 매 요청 재로딩)."""
+    version = _load_version()
+    return {"tcs_version": version.get("TCS_VERSION"), "ems_target_min": version.get("EMS_TARGET_MIN")}
 
 
 @app.get("/api/apps")
